@@ -111,3 +111,27 @@ def test_release_script_covers_all_packages_and_plugin_manifests() -> None:
     assert "runtime-sources.json" in release
     assert "check-generated-foundation.py" in release
     assert "check-runtime-constraints.py" in release
+
+
+def test_public_marketplaces_and_install_instructions_are_complete() -> None:
+    codex = json.loads(
+        (ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
+    )
+    claude = json.loads(
+        (ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8")
+    )
+    for marketplace in (codex, claude):
+        assert marketplace["name"] == "alc"
+        assert marketplace["plugins"] == [
+            {
+                "name": "alc",
+                "description": "Agentic Learning Copilot learning workflows.",
+                "source": "./plugins/alc",
+                "category": "education",
+            }
+        ]
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "codex plugin marketplace add tririver/alc --ref stable" in readme
+    assert "/plugin marketplace add tririver/alc@stable" in readme
+    assert "dsh plugin --profile alc add github:tririver/alc" in readme

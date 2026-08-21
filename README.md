@@ -19,6 +19,43 @@ ALC does not depend on ARC. Its Skill may optionally suggest ARC when academic
 research would improve a Companion; the user decides whether to install or
 continue without it.
 
+## Install
+
+ALC is distributed as an agent plugin with a lazy, SHA-locked private runtime.
+The runtime installs exact Git revisions of AC Foundation and ALC; no PyPI
+publication is assumed.
+
+For Codex:
+
+```bash
+codex plugin marketplace add tririver/alc --ref stable
+codex plugin add alc@alc
+```
+
+For Claude Code:
+
+```text
+/plugin marketplace add tririver/alc@stable
+/plugin install alc
+```
+
+For DeepSeek Harness:
+
+```bash
+dsh plugin --profile alc add github:tririver/alc
+```
+
+Check or prewarm the locked runtime:
+
+```bash
+plugins/alc/bin/alc-runtime doctor
+plugins/alc/bin/alc-runtime setup
+```
+
+The neutral document cache defaults to `.ac/cache/ac-document` below the
+launch directory; override it with `AC_DOCUMENT_CACHE`. Foundation runtime
+state uses `AC_HOME` and `AC_RUNTIME_HOME`.
+
 ## Development
 
 ```bash

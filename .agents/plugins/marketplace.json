@@ -1,0 +1,13 @@
+{
+  "name": "alc",
+  "description": "ALC learning tools for OCR proofreading, translation, Companion readers, and standalone HTML.",
+  "owner": {"name": "ALC"},
+  "plugins": [
+    {
+      "name": "alc",
+      "description": "Agentic Learning Copilot learning workflows.",
+      "source": "./plugins/alc",
+      "category": "education"
+    }
+  ]
+}
