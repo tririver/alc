@@ -1,0 +1,24 @@
+{
+  "name": "alc",
+  "version": "2.0.0",
+  "description": "Agentic Learning Copilot for OCR proofreading, translation, Companion reading, and standalone HTML.",
+  "author": {
+    "name": "ALC"
+  },
+  "license": "MIT",
+  "keywords": ["alc", "learning", "ocr", "translation", "companion", "html"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ALC",
+    "shortDescription": "OCR, translation, Companion reading, and HTML",
+    "longDescription": "Agent Skills and lazy-installed CLIs for source-faithful OCR proofreading, translation, Companion generation, and interactive standalone HTML.",
+    "developerName": "ALC",
+    "category": "Education",
+    "capabilities": ["Learning"],
+    "defaultPrompt": [
+      "Use ALC to proofread this OCR against its PDF",
+      "Use ALC to translate this document",
+      "Use ALC to build a Companion reader"
+    ]
+  }
+}

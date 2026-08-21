@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import tomllib
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PACKAGES = ROOT / "packages"
+PLUGIN = ROOT / "plugins/alc"
+SCRIPTS = PLUGIN / "skills/alc/scripts"
+EXPECTED = {
+    "alc-companion": {
+        "ac-jobs",
+        "ac-llm",
+        "ac-document",
+        "ac-proposer-reviewer",
+        "alc-render",
+        "alc-translate",
+    },
+    "alc-ocr-proofread": {"ac-jobs", "ac-llm", "ac-document"},
+    "alc-render": {"ac-document"},
+    "alc-translate": {"ac-jobs", "ac-llm", "ac-document", "alc-render"},
+}
+
+
+def _project(package: str) -> dict[str, object]:
+    return tomllib.loads(
+        (PACKAGES / package / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+
+
+def test_package_set_metadata_and_dependency_graph() -> None:
+    assert {path.name for path in PACKAGES.iterdir() if path.is_dir()} == set(EXPECTED)
+    for package, internal in EXPECTED.items():
+        project = _project(package)
+        assert project["name"] == package
+        assert project["version"] == "2.0.0"
+        assert project["authors"] == [{"name": "ALC"}]
+        assert project["urls"]["Repository"] == "https://github.com/tririver/alc"
+        dependencies = {
+            dependency.split(">=", 1)[0]
+            for dependency in project.get("dependencies", [])
+            if dependency.startswith(("ac-", "alc-"))
+        }
+        assert dependencies == internal
+        for dependency in project.get("dependencies", []):
+            if dependency.startswith(("ac-", "alc-")):
+                assert dependency.endswith(">=2,<3")
+
+
+def test_learning_packages_have_no_arc_code_dependency() -> None:
+    source = "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for path in PACKAGES.rglob("*")
+        if path.is_file() and path.suffix in {".py", ".toml"}
+    )
+    for stale in ("import arc_", "from arc_", '"arc-', '"arc.', "ARC_"):
+        assert stale not in source
+
+
+def test_plugin_exposes_only_learning_wrappers_and_workflows() -> None:
+    wrappers = {path.name for path in (PLUGIN / "bin").iterdir() if path.is_file()}
+    assert wrappers == {
+        "alc-runtime",
+        "alc-render",
+        "alc-ocr-proofread",
+        "alc-translate",
+        "alc-companion",
+    }
+    workflows = {
+        path.name for path in (PLUGIN / "skills/alc/workflows").iterdir() if path.is_file()
+    }
+    assert workflows == {"companion.md", "ocr-proofread.md"}
+    skill = (PLUGIN / "skills/alc/SKILL.md").read_text(encoding="utf-8")
+    assert "never make it a Python or runtime dependency" in skill
+    assert "install ARC automatically" in skill
+
+
+def test_runtime_source_lock_uses_full_shas_and_major_ranges() -> None:
+    lock = json.loads((SCRIPTS / "runtime-sources.json").read_text(encoding="utf-8"))
+    assert lock["schema_version"] == "ac.runtime_sources.v1"
+    assert lock["profile"] == "alc"
+    assert {source["id"] for source in lock["sources"]} == {"foundation", "product"}
+    for source in lock["sources"]:
+        assert re.fullmatch(r"[0-9a-f]{40}", source["commit"])
+        assert source["version"] == ">=2,<3"
+
+
+def test_generated_foundation_copies_match_manifest() -> None:
+    manifest = json.loads((SCRIPTS / "generated-sources.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == "ac.generated_sources.v1"
+    for relative, metadata in manifest["files"].items():
+        path = (SCRIPTS / relative).resolve()
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == metadata["sha256"]
+
+
+def test_release_script_covers_all_packages_and_plugin_manifests() -> None:
+    release = (ROOT / "scripts/release-alc.sh").read_text(encoding="utf-8")
+    for package in EXPECTED:
+        assert f'"{package}"' in release
+    assert "plugins/alc/.codex-plugin/plugin.json" in release
+    assert "plugins/alc/.claude-plugin/plugin.json" in release
+    assert "runtime-sources.json" in release

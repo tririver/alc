@@ -1,11 +1,11 @@
 {
-  "name": "arc-dsh",
+  "name": "alc-dsh",
   "private": true,
   "type": "module",
-  "main": "./plugins/arc/dsh/index.js",
+  "main": "./plugins/alc/dsh/index.js",
   "dsh": {
     "bundle": {
-      "patch": "./plugins/arc/dsh/cordis.patch.yml"
+      "patch": "./plugins/alc/dsh/cordis.patch.yml"
     }
   }
 }

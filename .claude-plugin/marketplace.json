@@ -1,15 +1,15 @@
 {
-  "name": "arc",
-  "description": "ARC research tooling for papers, research domains, translation, companion readers, calculation, and report typesetting.",
+  "name": "alc",
+  "description": "ALC learning tools for OCR proofreading, translation, Companion readers, and standalone HTML.",
   "owner": {
-    "name": "ARC"
+    "name": "ALC"
   },
   "plugins": [
     {
-      "name": "arc",
-      "description": "CLI-first ARC paper, research-domain, and report typesetting tools.",
-      "source": "./plugins/arc",
-      "category": "productivity"
+      "name": "alc",
+      "description": "Agentic Learning Copilot learning workflows.",
+      "source": "./plugins/alc",
+      "category": "education"
     }
   ]
 }
