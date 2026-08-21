@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alc-companion"
+version = "2.0.0"
+description = "Source-faithful, LLM-assisted paper companions for ALC."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "ALC" }]
+requires-python = ">=3.11"
+dependencies = [
+  "ac-jobs>=2,<3",
+  "ac-llm>=2,<3",
+  "ac-document>=2,<3",
+  "alc-render>=2,<3",
+  "ac-proposer-reviewer>=2,<3",
+  "alc-translate>=2,<3",
+  "markdown-it-py>=4.2,<5",
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+
+[project.urls]
+Homepage = "https://github.com/tririver/alc"
+Repository = "https://github.com/tririver/alc"
+Issues = "https://github.com/tririver/alc/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+alc-companion = "alc_companion.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alc_companion"]
