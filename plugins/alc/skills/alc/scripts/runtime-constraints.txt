@@ -1,7 +1,7 @@
 # Direct external dependencies tested for ALC v2.0.0.
 beautifulsoup4==4.14.3
-httpx==0.28.1
 json-repair==0.59.10
 jsonschema==4.26.0
 lxml==6.1.1
-pydantic==2.13.4
+markdown-it-py==4.2.0
+Pillow==12.3.0

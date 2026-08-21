@@ -15,8 +15,6 @@ from ac_document import (
 from alc_render import (
     FRONT_MATTER_BEGIN,
     FRAGMENT_REVISION_SCHEMA,
-    FRAGMENT_REVISION_SCHEMA_V1,
-    FRAGMENT_REVISION_SCHEMA_V2,
     AnchorBlock,
     FragmentAnchor,
     FragmentAppearance,
@@ -88,32 +86,17 @@ def test_json_front_matter_round_trip_and_markdown_normalization() -> None:
     assert decoded.markdown_body == "One\nTwo\n"
 
 
-def test_v1_round_trip_retains_original_schema_and_digest() -> None:
-    revision = replace(
-        make_revision(),
-        schema_version=FRAGMENT_REVISION_SCHEMA_V1,
-        appearance=None,
+@pytest.mark.parametrize("version", ("v1", "v2"))
+def test_obsolete_fragment_revision_schemas_are_rejected(version: str) -> None:
+    metadata = fragment_revision_to_document(make_revision())
+    metadata["schema_version"] = f"alc.render.fragment_revision.{version}"
+    value = (
+        f"{FRONT_MATTER_BEGIN}\n{json.dumps(metadata, sort_keys=True, separators=(',', ':'))}\n"
+        "<!-- ALC:FRAGMENT-JSON:END -->\nBody\n"
     )
-    encoded = encode_fragment_revision(revision)
-    metadata = json.loads(encoded.splitlines()[1])
-    assert metadata["schema_version"] == FRAGMENT_REVISION_SCHEMA_V1
-    assert "appearance" not in metadata
-    assert decode_fragment_revision(
-        encoded, filename=fragment_revision_filename(revision)
-    ) == revision
 
-
-def test_v2_appearance_round_trip_retains_original_schema() -> None:
-    revision = replace(
-        make_revision(),
-        schema_version=FRAGMENT_REVISION_SCHEMA_V2,
-        appearance=FragmentAppearance("#F9FAFB", "#111827"),
-    )
-    encoded = encode_fragment_revision(revision)
-    metadata = json.loads(encoded.splitlines()[1])
-    assert metadata["schema_version"] == FRAGMENT_REVISION_SCHEMA_V2
-    assert "deleted" not in metadata
-    assert decode_fragment_revision(encoded) == revision
+    with pytest.raises(ValueError, match="unsupported"):
+        decode_fragment_revision(value)
 
 
 def test_v3_appearance_and_deletion_are_canonical_and_digest_bound() -> None:
@@ -134,10 +117,10 @@ def test_semantic_digest_is_independent_of_mapping_insertion_order() -> None:
     assert left.semantic_digest == right.semantic_digest
 
 
-def test_v1_rejects_yaml_and_extra_front_matter_fields() -> None:
+def test_front_matter_rejects_yaml_and_extra_fields() -> None:
     yaml_value = (
         f"{FRONT_MATTER_BEGIN}\n"
-        "schema_version: alc.render.fragment_revision.v1\n"
+        "schema_version: alc.render.fragment_revision.v3\n"
         "<!-- ALC:FRAGMENT-JSON:END -->\nBody"
     )
     with pytest.raises(ValueError, match="valid JSON"):

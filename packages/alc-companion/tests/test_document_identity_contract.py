@@ -22,11 +22,8 @@ from alc_companion.request_contracts import (
     CompanionGenerationRecipe,
     decode_build_request,
     decode_generation_recipe,
-    decode_handler_semantic_input,
     encode_build_request,
     encode_generation_recipe,
-    encode_handler_semantic_input,
-    normalize_handler_semantic_input,
 )
 from alc_companion.source_identity import resolve_document_identity
 
@@ -106,34 +103,17 @@ def test_editorial_recipe_uses_current_schema_only_when_enabled() -> None:
     assert decode_generation_recipe(document) == recipe
 
 
-def test_v17_recipe_normalizes_without_editorial_fields() -> None:
-    document = encode_generation_recipe(CompanionGenerationRecipe())
-    document["schema_version"] = "alc.companion.generation_recipe.v17"
-    document.pop("reader_publication_recipe")
-
-    decoded = decode_generation_recipe(document)
-
-    assert decoded.cross_chapter_editorial_review is False
-    assert decoded.editorial_proposer_prompt == EDITORIAL_PROPOSER_PROMPT_VERSION
-    assert decoded.editorial_reviewer_prompt == EDITORIAL_REVIEWER_PROMPT_VERSION
-    normalized = encode_generation_recipe(decoded)
-    assert normalized["schema_version"] == COMPANION_GENERATION_RECIPE_SCHEMA
-    assert normalized["reader_publication_recipe"] == (
-        "alc.companion.reader_publication.v1"
-    )
-
-
-def test_v18_recipe_cannot_encode_a_disabled_editorial_review() -> None:
+def test_editorial_recipe_cannot_disable_editorial_review() -> None:
     document = encode_generation_recipe(
         CompanionGenerationRecipe(cross_chapter_editorial_review=True)
     )
     document["cross_chapter_editorial_review"] = False
 
-    with pytest.raises(ValueError, match="v18 generation recipe requires"):
+    with pytest.raises(ValueError, match="editorial generation recipe requires"):
         decode_generation_recipe(document)
 
 
-def test_v7_request_decodes_without_reviewed_supplements(
+def test_v7_request_is_rejected(
     tmp_path: Path,
 ) -> None:
     request = encode_build_request(
@@ -142,36 +122,21 @@ def test_v7_request_decodes_without_reviewed_supplements(
     request["schema_version"] = "alc.companion.build_request.v7"
     del request["reviewed_supplements"]
 
-    decoded = decode_build_request(request)
-
-    assert decoded.reviewed_supplements == ()
-    assert encode_build_request(decoded)["schema_version"] == (
-        COMPANION_BUILD_REQUEST_SCHEMA
-    )
-
-    recipe = CompanionGenerationRecipe()
-    legacy_binding = {
-        "request": request,
-        "generation_recipe": encode_generation_recipe(recipe),
-    }
-    normalized = normalize_handler_semantic_input(legacy_binding)
-    normalized_request, normalized_recipe = decode_handler_semantic_input(
-        normalized
-    )
-    assert normalized == encode_handler_semantic_input(
-        normalized_request, normalized_recipe
-    )
+    with pytest.raises(ValueError, match="unsupported"):
+        decode_build_request(request)
 
 
 def test_old_request_and_recipe_schemas_are_rejected(tmp_path: Path) -> None:
     request = encode_build_request(
         CompanionBuildRequest(_document(tmp_path, "# Source\n\nBody.\n"))
     )
-    request["schema_version"] = "alc.companion.build_request.v6"
-    with pytest.raises(ValueError, match="unsupported"):
-        decode_build_request(request)
+    for version in ("v6", "v7"):
+        request["schema_version"] = f"alc.companion.build_request.{version}"
+        with pytest.raises(ValueError, match="unsupported"):
+            decode_build_request(request)
 
     recipe = encode_generation_recipe(CompanionGenerationRecipe())
-    recipe["schema_version"] = "alc.companion.generation_recipe.v15"
-    with pytest.raises(ValueError, match="unsupported"):
-        decode_generation_recipe(recipe)
+    for version in ("v15", "v17", "v18"):
+        recipe["schema_version"] = f"alc.companion.generation_recipe.{version}"
+        with pytest.raises(ValueError, match="unsupported"):
+            decode_generation_recipe(recipe)

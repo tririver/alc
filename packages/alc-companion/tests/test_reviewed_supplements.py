@@ -126,32 +126,17 @@ def test_reviewed_supplement_validates_and_round_trips(tmp_path: Path) -> None:
         decode_reviewed_companion_supplement({**encoded, "extra": True})
 
 
-def test_legacy_supplement_entries_upgrade_direct_and_draft_provenance(
+def test_obsolete_supplement_schema_is_rejected(
     tmp_path: Path,
 ) -> None:
     source = _source(tmp_path)
     encoded = encode_reviewed_companion_supplement(_supplement(source))
     encoded["schema_version"] = "alc.companion.reviewed_supplement.v1"
-    for entry in encoded["entries"]:
-        del entry["source_basis"]
-        del entry["source_basis_reason"]
-
-    direct = decode_reviewed_companion_supplement(encoded)
-    assert direct.schema_version == "alc.companion.reviewed_supplement.v2"
-    assert direct.entries[0].source_basis == "supplement_units"
-
-    encoded["entries"][0]["source_unit_ids"] = []
-    encoded["coverage"][0]["disposition"] = "excluded"
-    encoded["coverage"][0]["entry_ids"] = []
-    encoded["source_inventory_digest"] = reviewed_source_inventory_digest(
-        direct.coverage
-    )
-    via_draft = decode_reviewed_companion_supplement(encoded)
-    assert via_draft.entries[0].source_basis == "supplement_drafts"
-    validate_reviewed_companion_supplement(via_draft, source)
+    with pytest.raises(ValueError, match="unsupported"):
+        decode_reviewed_companion_supplement(encoded)
 
 
-def test_legacy_nested_supplement_binding_normalizes_for_durable_resume(
+def test_obsolete_nested_supplement_binding_is_rejected(
     tmp_path: Path,
 ) -> None:
     source = _source(tmp_path)
@@ -164,11 +149,8 @@ def test_legacy_nested_supplement_binding_normalizes_for_durable_resume(
     legacy = copy.deepcopy(current)
     nested = legacy["request"]["reviewed_supplements"][0]
     nested["schema_version"] = "alc.companion.reviewed_supplement.v1"
-    for entry in nested["entries"]:
-        del entry["source_basis"]
-        del entry["source_basis_reason"]
-
-    assert normalize_handler_semantic_input(legacy) == current
+    with pytest.raises(ValueError, match="unsupported"):
+        normalize_handler_semantic_input(legacy)
 
 
 @pytest.mark.parametrize("collection", ("entries", "coverage", "drafts"))

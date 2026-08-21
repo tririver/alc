@@ -25,8 +25,8 @@ from .prompts import (
     CHAPTER_GUIDE_REVIEW_PROMPT_VERSION,
     EDITORIAL_PROPOSER_PROMPT_VERSION,
     EDITORIAL_REVIEWER_PROMPT_VERSION,
-    LEGACY_CHAPTER_GUIDE_PROMPT_VERSION_V16,
-    LEGACY_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
+    HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16,
+    HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
 )
 from .reader_labels import resolve_reader_labels
 from .reviewed_supplements import (
@@ -38,15 +38,6 @@ from .reviewed_supplements import (
 
 
 COMPANION_BUILD_REQUEST_SCHEMA = "alc.companion.build_request.v8"
-LEGACY_COMPANION_BUILD_REQUEST_SCHEMA_V7 = (
-    "alc.companion.build_request.v7"
-)
-LEGACY_COMPANION_GENERATION_RECIPE_SCHEMA_V17 = (
-    "alc.companion.generation_recipe.v17"
-)
-LEGACY_EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA_V18 = (
-    "alc.companion.generation_recipe.v18"
-)
 COMPANION_GENERATION_RECIPE_SCHEMA = "alc.companion.generation_recipe.v19"
 EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA = (
     "alc.companion.generation_recipe.v20"
@@ -252,11 +243,11 @@ class CompanionGenerationRecipe:
             "author_identity_prompt": {AUTHOR_IDENTITY_PROMPT_VERSION},
             "chapter_guide_prompt": {
                 CHAPTER_GUIDE_PROMPT_VERSION,
-                LEGACY_CHAPTER_GUIDE_PROMPT_VERSION_V16,
+                HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16,
             },
             "chapter_guide_review_prompt": {
                 CHAPTER_GUIDE_REVIEW_PROMPT_VERSION,
-                LEGACY_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
+                HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
             },
             "equation_label_visual_prompt": {
                 EQUATION_LABEL_VISUAL_PROMPT_VERSION
@@ -399,10 +390,9 @@ def decode_build_request(
         "companion_section_ids",
     }
     schema_version = document.get("schema_version")
-    if schema_version == COMPANION_BUILD_REQUEST_SCHEMA:
-        fields.add("reviewed_supplements")
-    elif schema_version != LEGACY_COMPANION_BUILD_REQUEST_SCHEMA_V7:
+    if schema_version != COMPANION_BUILD_REQUEST_SCHEMA:
         raise ValueError("unsupported Companion build-request schema")
+    fields.add("reviewed_supplements")
     request = _exact(document, fields, "build request")
     source = _mapping(request["source"], "rich source")
     validators = request["validator_digests"]
@@ -467,16 +457,13 @@ def decode_generation_recipe(
         "chapter_guide_review_final_round",
     }
     schema_version = document.get("schema_version")
-    current = schema_version in {
+    if schema_version not in {
         COMPANION_GENERATION_RECIPE_SCHEMA,
         EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA,
-    }
-    if current:
-        fields.add("reader_publication_recipe")
-    editorial = schema_version in {
-        EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA,
-        LEGACY_EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA_V18,
-    }
+    }:
+        raise ValueError("unsupported Companion generation-recipe schema")
+    fields.add("reader_publication_recipe")
+    editorial = schema_version == EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA
     if editorial:
         fields.update(
             {
@@ -485,17 +472,12 @@ def decode_generation_recipe(
                 "editorial_reviewer_prompt",
             }
         )
-    elif schema_version not in {
-        COMPANION_GENERATION_RECIPE_SCHEMA,
-        LEGACY_COMPANION_GENERATION_RECIPE_SCHEMA_V17,
-    }:
-        raise ValueError("unsupported Companion generation-recipe schema")
     raw_recipe = _exact(document, fields, "generation recipe")
     if editorial and not _strict_bool(
         raw_recipe, "cross_chapter_editorial_review"
     ):
         raise ValueError(
-            "v18 generation recipe requires cross_chapter_editorial_review"
+            "editorial generation recipe requires cross_chapter_editorial_review"
         )
     model = _exact(
         _mapping(raw_recipe["model"], "model"),
@@ -535,10 +517,8 @@ def decode_generation_recipe(
         equation_label_visual_prompt=_string(
             raw_recipe, "equation_label_visual_prompt"
         ),
-        reader_publication_recipe=(
-            _string(raw_recipe, "reader_publication_recipe")
-            if current
-            else READER_PUBLICATION_RECIPE
+        reader_publication_recipe=_string(
+            raw_recipe, "reader_publication_recipe"
         ),
         cross_chapter_editorial_review=editorial,
         editorial_proposer_prompt=(

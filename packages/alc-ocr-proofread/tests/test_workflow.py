@@ -309,7 +309,7 @@ def test_page_schema_accepts_descriptive_edit_kinds() -> None:
     assert kind == {"type": "string", "minLength": 1}
 
 
-def test_legacy_boundary_request_keeps_its_semantic_identity() -> None:
+def test_obsolete_boundary_request_is_rejected() -> None:
     current = BoundaryRepairConfig(
         "/project",
         "/book.pdf",
@@ -320,7 +320,8 @@ def test_legacy_boundary_request_keeps_its_semantic_identity() -> None:
     ).document()
     legacy = dict(current, schema_version="alc.ocr_proofread.boundary_repair_request.v1")
 
-    assert BoundaryRepairConfig.from_document(legacy).document() == legacy
+    with pytest.raises(ValueError, match="unsupported"):
+        BoundaryRepairConfig.from_document(legacy)
     assert current["schema_version"] == "alc.ocr_proofread.boundary_repair_request.v2"
 
 

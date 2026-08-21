@@ -248,10 +248,7 @@ class BoundaryRepairConfig:
         cls, value: Mapping[str, Any]
     ) -> "BoundaryRepairConfig":
         schema_version = value.get("schema_version")
-        if schema_version not in {
-            "alc.ocr_proofread.boundary_repair_request.v1",
-            BOUNDARY_REPAIR_REQUEST_SCHEMA,
-        }:
+        if schema_version != BOUNDARY_REPAIR_REQUEST_SCHEMA:
             raise ValueError("unsupported OCR boundary-repair request")
         return cls(
             project_dir=str(value["project_dir"]),

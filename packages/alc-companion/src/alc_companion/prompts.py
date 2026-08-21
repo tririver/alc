@@ -11,10 +11,10 @@ CHAPTER_GUIDE_PROMPT_VERSION = "alc.companion.chapter-learning-prompt.v17"
 CHAPTER_GUIDE_REVIEW_PROMPT_VERSION = (
     "alc.companion.chapter-learning-review-prompt.v17"
 )
-LEGACY_CHAPTER_GUIDE_PROMPT_VERSION_V16 = (
+HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16 = (
     "alc.companion.chapter-learning-prompt.v16"
 )
-LEGACY_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16 = (
+HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16 = (
     "alc.companion.chapter-learning-review-prompt.v16"
 )
 AUTHOR_IDENTITY_PROMPT_VERSION = "alc.companion.author-identity-prompt.v3"
@@ -459,7 +459,7 @@ def chapter_guide_proposer_instructions(
 ) -> str:
     if version == CHAPTER_GUIDE_PROMPT_VERSION:
         instruction = _CHAPTER_GUIDE_INSTRUCTION
-    elif version == LEGACY_CHAPTER_GUIDE_PROMPT_VERSION_V16:
+    elif version == HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16:
         instruction = _CHAPTER_GUIDE_INSTRUCTION_V16
     else:
         raise ValueError("unsupported chapter guide prompt contract")
@@ -474,7 +474,7 @@ def chapter_guide_reviewer_instructions(
 ) -> str:
     if version == CHAPTER_GUIDE_REVIEW_PROMPT_VERSION:
         instruction = _CHAPTER_GUIDE_REVIEW_INSTRUCTION
-    elif version == LEGACY_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16:
+    elif version == HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16:
         instruction = _CHAPTER_GUIDE_REVIEW_INSTRUCTION_V16
     else:
         raise ValueError("unsupported chapter guide review prompt contract")
@@ -600,8 +600,8 @@ __all__ = [
     "CHAPTER_GUIDE_REVIEW_PROMPT_VERSION",
     "EDITORIAL_PROPOSER_PROMPT_VERSION",
     "EDITORIAL_REVIEWER_PROMPT_VERSION",
-    "LEGACY_CHAPTER_GUIDE_PROMPT_VERSION_V16",
-    "LEGACY_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16",
+    "HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16",
+    "HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16",
     "author_identity_prompt",
     "chapter_guide_proposer_instructions",
     "chapter_guide_reviewer_instructions",

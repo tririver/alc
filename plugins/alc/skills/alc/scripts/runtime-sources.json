@@ -1,12 +1,11 @@
 {
-  "schema_version": "ac.runtime_sources.v1",
+  "schema_version": "ac.runtime_sources.v2",
   "profile": "alc",
   "sources": [
     {
       "id": "foundation",
       "repository": "https://github.com/tririver/ac-foundation.git",
-      "commit": "8cb4429605b09793cd6ce423063e42055acbd919",
-      "version": ">=2,<3",
+      "commit": "027a4a1aef084138760638fb0e0cff2a6b075402",
       "packages": [
         "ac-jobs",
         "ac-llm",
@@ -25,7 +24,6 @@
       "id": "product",
       "repository": "https://github.com/tririver/alc.git",
       "commit": "b931e21ff427227b91613a1cdbe9da82e6d5371a",
-      "version": ">=2,<3",
       "packages": [
         "alc-render",
         "alc-ocr-proofread",
@@ -41,7 +39,5 @@
       "local_root_env": "AC_PRODUCT_REPO_ROOT"
     }
   ],
-  "environment_defaults": {
-    "ALC_HOME": "{cwd}/.alc"
-  }
+  "environment_defaults": {}
 }

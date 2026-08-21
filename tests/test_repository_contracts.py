@@ -24,6 +24,8 @@ EXPECTED = {
     "alc-render": {"ac-document"},
     "alc-translate": {"ac-jobs", "ac-llm", "ac-document", "alc-render"},
 }
+VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+ALC_MAJOR = int(VERSION.split(".")[0])
 
 
 def _project(package: str) -> dict[str, object]:
@@ -37,7 +39,7 @@ def test_package_set_metadata_and_dependency_graph() -> None:
     for package, internal in EXPECTED.items():
         project = _project(package)
         assert project["name"] == package
-        assert project["version"] == "2.0.0"
+        assert project["version"] == VERSION
         assert project["authors"] == [{"name": "ALC"}]
         assert project["urls"]["Repository"] == "https://github.com/tririver/alc"
         dependencies = {
@@ -47,8 +49,10 @@ def test_package_set_metadata_and_dependency_graph() -> None:
         }
         assert dependencies == internal
         for dependency in project.get("dependencies", []):
-            if dependency.startswith(("ac-", "alc-")):
-                assert dependency.endswith(">=2,<3")
+            if dependency.startswith("alc-"):
+                assert dependency.endswith(f">={ALC_MAJOR},<{ALC_MAJOR + 1}")
+            elif dependency.startswith("ac-"):
+                assert re.search(r">=\d+,<\d+$", dependency)
 
 
 def test_learning_packages_have_no_arc_code_dependency() -> None:
@@ -79,14 +83,15 @@ def test_plugin_exposes_only_learning_wrappers_and_workflows() -> None:
     assert "install ARC automatically" in skill
 
 
-def test_runtime_source_lock_uses_full_shas_and_major_ranges() -> None:
+def test_runtime_source_lock_uses_full_shas() -> None:
     lock = json.loads((SCRIPTS / "runtime-sources.json").read_text(encoding="utf-8"))
-    assert lock["schema_version"] == "ac.runtime_sources.v1"
+    assert lock["schema_version"] == "ac.runtime_sources.v2"
     assert lock["profile"] == "alc"
     assert {source["id"] for source in lock["sources"]} == {"foundation", "product"}
     for source in lock["sources"]:
         assert re.fullmatch(r"[0-9a-f]{40}", source["commit"])
-        assert source["version"] == ">=2,<3"
+        assert "version" not in source
+    assert lock["environment_defaults"] == {}
 
 
 def test_generated_foundation_copies_match_manifest() -> None:
@@ -104,3 +109,5 @@ def test_release_script_covers_all_packages_and_plugin_manifests() -> None:
     assert "plugins/alc/.codex-plugin/plugin.json" in release
     assert "plugins/alc/.claude-plugin/plugin.json" in release
     assert "runtime-sources.json" in release
+    assert "check-generated-foundation.py" in release
+    assert "check-runtime-constraints.py" in release

@@ -1,9 +1,9 @@
 """Atomic overlays and standalone publication rendering for ALC."""
 
+__version__ = "2.0.0"
+
 from .contracts import (
     FRAGMENT_REVISION_SCHEMA,
-    FRAGMENT_REVISION_SCHEMA_V1,
-    FRAGMENT_REVISION_SCHEMA_V2,
     LAYER_SCHEMA,
     PUBLICATION_SCHEMA,
     AnchorBlock,
@@ -102,8 +102,6 @@ from .workspace import (
 
 __all__ = [
     "FRAGMENT_REVISION_SCHEMA",
-    "FRAGMENT_REVISION_SCHEMA_V1",
-    "FRAGMENT_REVISION_SCHEMA_V2",
     "FRONT_MATTER_BEGIN",
     "FRONT_MATTER_END",
     "HTML_RENDER_RECIPE",

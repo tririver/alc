@@ -31,8 +31,6 @@ from ._json import (
 )
 
 
-FRAGMENT_REVISION_SCHEMA_V1 = "alc.render.fragment_revision.v1"
-FRAGMENT_REVISION_SCHEMA_V2 = "alc.render.fragment_revision.v2"
 FRAGMENT_REVISION_SCHEMA = "alc.render.fragment_revision.v3"
 LAYER_SCHEMA = "alc.render.layer.v1"
 PUBLICATION_SCHEMA = "alc.render.publication.v1"
@@ -64,7 +62,7 @@ _ANCHOR_BLOCK_FIELDS = {
     "content_fingerprint",
 }
 _ANCHOR_FIELDS = {"kind", "target_id", "related_blocks"}
-_FRAGMENT_V1_FIELDS = {
+_FRAGMENT_FIELDS = {
     "schema_version",
     "source",
     "fragment_id",
@@ -77,9 +75,9 @@ _FRAGMENT_V1_FIELDS = {
     "title",
     "citation_ids",
     "provenance",
+    "appearance",
+    "deleted",
 }
-_FRAGMENT_V2_FIELDS = _FRAGMENT_V1_FIELDS | {"appearance"}
-_FRAGMENT_V3_FIELDS = _FRAGMENT_V2_FIELDS | {"deleted"}
 _APPEARANCE_FIELDS = {"foreground", "background"}
 _REVISION_REF_FIELDS = {
     "path",
@@ -259,23 +257,14 @@ class FragmentRevision:
     deleted: bool = False
 
     def __post_init__(self) -> None:
-        if self.schema_version not in {
-            FRAGMENT_REVISION_SCHEMA_V1,
-            FRAGMENT_REVISION_SCHEMA_V2,
-            FRAGMENT_REVISION_SCHEMA,
-        }:
+        if self.schema_version != FRAGMENT_REVISION_SCHEMA:
             raise ValueError("unsupported fragment revision schema")
-        if self.schema_version == FRAGMENT_REVISION_SCHEMA_V1:
-            if self.appearance is not None:
-                raise ValueError("v1 fragment revisions cannot define appearance")
-        elif self.appearance is not None and not isinstance(
+        if self.appearance is not None and not isinstance(
             self.appearance, FragmentAppearance
         ):
             raise ValueError("appearance must be a FragmentAppearance or null")
         if not isinstance(self.deleted, bool):
             raise ValueError("deleted must be a boolean")
-        if self.schema_version != FRAGMENT_REVISION_SCHEMA and self.deleted:
-            raise ValueError("only v3 fragment revisions can be deleted")
         if not isinstance(self.source, SourceIdentity):
             raise ValueError("fragment source must be a SourceIdentity")
         if not isinstance(self.anchor, FragmentAnchor):
@@ -748,17 +737,12 @@ def fragment_revision_to_document(
         "citation_ids": list(revision.citation_ids),
         "provenance": thaw_json(revision.provenance),
     }
-    if revision.schema_version in {
-        FRAGMENT_REVISION_SCHEMA_V2,
-        FRAGMENT_REVISION_SCHEMA,
-    }:
-        value["appearance"] = (
-            None
-            if revision.appearance is None
-            else fragment_appearance_to_document(revision.appearance)
-        )
-    if revision.schema_version == FRAGMENT_REVISION_SCHEMA:
-        value["deleted"] = revision.deleted
+    value["appearance"] = (
+        None
+        if revision.appearance is None
+        else fragment_appearance_to_document(revision.appearance)
+    )
+    value["deleted"] = revision.deleted
     return value
 
 
@@ -768,21 +752,8 @@ def fragment_revision_from_document(
     if not isinstance(value, Mapping):
         raise ValueError("fragment revision must be an object")
     schema_version = value.get("schema_version")
-    if schema_version == FRAGMENT_REVISION_SCHEMA_V1:
-        item = require_exact(value, _FRAGMENT_V1_FIELDS, "fragment revision")
-        appearance = None
-        deleted = False
-    elif schema_version == FRAGMENT_REVISION_SCHEMA_V2:
-        item = require_exact(value, _FRAGMENT_V2_FIELDS, "fragment revision")
-        raw_appearance = item["appearance"]
-        appearance = (
-            None
-            if raw_appearance is None
-            else fragment_appearance_from_document(raw_appearance)
-        )
-        deleted = False
-    elif schema_version == FRAGMENT_REVISION_SCHEMA:
-        item = require_exact(value, _FRAGMENT_V3_FIELDS, "fragment revision")
+    if schema_version == FRAGMENT_REVISION_SCHEMA:
+        item = require_exact(value, _FRAGMENT_FIELDS, "fragment revision")
         raw_appearance = item["appearance"]
         appearance = (
             None
@@ -1110,8 +1081,6 @@ def _relative_path(value: Any, description: str) -> str:
 
 __all__ = [
     "FRAGMENT_REVISION_SCHEMA",
-    "FRAGMENT_REVISION_SCHEMA_V1",
-    "FRAGMENT_REVISION_SCHEMA_V2",
     "LAYER_SCHEMA",
     "PUBLICATION_SCHEMA",
     "AnchorBlock",

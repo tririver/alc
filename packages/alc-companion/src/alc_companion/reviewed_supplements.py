@@ -20,9 +20,6 @@ from .rich_text import parse_markdown
 REVIEWED_COMPANION_SUPPLEMENT_SCHEMA = (
     "alc.companion.reviewed_supplement.v2"
 )
-LEGACY_REVIEWED_COMPANION_SUPPLEMENT_SCHEMA_V1 = (
-    "alc.companion.reviewed_supplement.v1"
-)
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -387,12 +384,8 @@ def decode_reviewed_companion_supplement(
         "reviewed supplement",
     )
     schema_version = _required_string(document, "schema_version")
-    if schema_version not in {
-        REVIEWED_COMPANION_SUPPLEMENT_SCHEMA,
-        LEGACY_REVIEWED_COMPANION_SUPPLEMENT_SCHEMA_V1,
-    }:
+    if schema_version != REVIEWED_COMPANION_SUPPLEMENT_SCHEMA:
         raise ValueError("unsupported reviewed Companion supplement schema")
-    legacy = schema_version == LEGACY_REVIEWED_COMPANION_SUPPLEMENT_SCHEMA_V1
     return ReviewedCompanionSupplement(
         supplement_id=_required_string(document, "supplement_id"),
         summary=_required_string(document, "summary"),
@@ -403,7 +396,7 @@ def decode_reviewed_companion_supplement(
             document, "source_inventory_digest"
         ),
         entries=tuple(
-            _decode_entry(item, legacy=legacy)
+            _decode_entry(item)
             for item in _object_sequence(document["entries"], "entries")
         ),
         coverage=tuple(
@@ -467,10 +460,8 @@ def _encode_resource(item: ReviewedOwnedResource) -> dict[str, Any]:
     }
 
 
-def _decode_entry(
-    value: Mapping[str, Any], *, legacy: bool
-) -> ReviewedSupplementEntry:
-    legacy_fields = {
+def _decode_entry(value: Mapping[str, Any]) -> ReviewedSupplementEntry:
+    expected_fields = {
         "entry_id",
         "anchor_block_id",
         "anchor_fingerprint",
@@ -478,22 +469,14 @@ def _decode_entry(
         "markdown",
         "source_draft_ids",
         "source_unit_ids",
+        "source_basis",
+        "source_basis_reason",
     }
-    expected_fields = (
-        legacy_fields
-        if legacy
-        else legacy_fields | {"source_basis", "source_basis_reason"}
-    )
     if not isinstance(value, Mapping) or set(value) != expected_fields:
         raise ValueError("reviewed entry has invalid fields")
     item = value
     units = _string_tuple(item["source_unit_ids"], "source_unit_ids")
     drafts = _string_tuple(item["source_draft_ids"], "source_draft_ids")
-    legacy_basis = (
-        "supplement_units"
-        if units
-        else "supplement_drafts" if drafts else "primary_source"
-    )
     return ReviewedSupplementEntry(
         entry_id=_required_string(item, "entry_id"),
         anchor_block_id=_required_string(item, "anchor_block_id"),
@@ -502,20 +485,8 @@ def _decode_entry(
         markdown=_required_string(item, "markdown"),
         source_draft_ids=drafts,
         source_unit_ids=units,
-        source_basis=(
-            _required_string(item, "source_basis")
-            if "source_basis" in item
-            else legacy_basis
-        ),  # type: ignore[arg-type]
-        source_basis_reason=(
-            _required_string(item, "source_basis_reason")
-            if "source_basis_reason" in item
-            else (
-                "Imported legacy entry without supplemental unit provenance."
-                if legacy and legacy_basis == "primary_source"
-                else ""
-            )
-        ),
+        source_basis=_required_string(item, "source_basis"),  # type: ignore[arg-type]
+        source_basis_reason=_required_string(item, "source_basis_reason"),
     )
 
 
@@ -706,7 +677,6 @@ def _required_integer(value: Mapping[str, Any], key: str) -> int:
 
 
 __all__ = [
-    "LEGACY_REVIEWED_COMPANION_SUPPLEMENT_SCHEMA_V1",
     "REVIEWED_COMPANION_SUPPLEMENT_SCHEMA",
     "ReviewedCompanionSupplement",
     "ReviewedOwnedResource",

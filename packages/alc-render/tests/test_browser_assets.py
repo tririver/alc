@@ -566,7 +566,7 @@ if (statusControl.textContent || !statusControl.hidden) {
   throw new Error("toolbar status remained visible after ten seconds");
 }
 helpers.validateRevisionMetadata({
-  schema_version: "alc.render.fragment_revision.v1",
+  schema_version: "alc.render.fragment_revision.v3",
   source: helpers.state.payload.source_identity,
   fragment_id: "note-1",
   revision: 1,
@@ -587,6 +587,8 @@ helpers.validateRevisionMetadata({
   language: "en",
   title: null,
   citation_ids: [],
+  appearance: null,
+  deleted: false,
   provenance: {producer: "test"}
 });
 helpers.setupMarkdown();
@@ -765,7 +767,7 @@ var anchor = {
   }]
 };
 var base = {
-  schema_version: "alc.render.fragment_revision.v1",
+  schema_version: "alc.render.fragment_revision.v3",
   source: source,
   fragment_id: "note-1",
   revision: 1,
@@ -776,6 +778,8 @@ var base = {
   language: "en",
   title: null,
   citation_ids: [],
+  appearance: null,
+  deleted: false,
   provenance: {producer: "alc-render-browser"},
   markdown_body: "old",
   semantic_digest: "d".repeat(64),
@@ -1330,7 +1334,7 @@ var anchor = {
   }]
 };
 var base = {
-  schema_version: "alc.render.fragment_revision.v1",
+  schema_version: "alc.render.fragment_revision.v3",
   source: source,
   fragment_id: "note-1",
   revision: 1,
@@ -1341,6 +1345,8 @@ var base = {
   language: "en",
   title: "Caf\u00e9",
   citation_ids: ["ref-1"],
+  appearance: null,
+  deleted: false,
   provenance: {
     producer: "some-other-editor",
     last_editor: "some-other-editor",
@@ -2025,7 +2031,7 @@ var anchor = {
   }]
 };
 var baseMetadata = {
-  schema_version: "alc.render.fragment_revision.v1",
+  schema_version: "alc.render.fragment_revision.v3",
   source: source,
   fragment_id: "note-1",
   revision: 1,
@@ -2036,6 +2042,8 @@ var baseMetadata = {
   language: "en",
   title: null,
   citation_ids: [],
+  appearance: null,
+  deleted: false,
   provenance: {producer: "alc-render-browser"}
 };
 var baseDigest = "d".repeat(64);
@@ -2364,7 +2372,7 @@ var blocks = [
 ];
 function revision(fragmentId, digest, role, target, body, priority, number, parent, title) {
   return {
-    schema_version: "alc.render.fragment_revision.v1",
+    schema_version: "alc.render.fragment_revision.v3",
     source: source,
     fragment_id: fragmentId,
     revision: number,
@@ -2375,6 +2383,8 @@ function revision(fragmentId, digest, role, target, body, priority, number, pare
     language: "zh-CN",
     title: title || null,
     citation_ids: [],
+    appearance: null,
+    deleted: false,
     provenance: {producer: "alc-render-browser"},
     markdown_body: body,
     semantic_digest: digest
@@ -2636,7 +2646,7 @@ globalThis.document = {
 
 (async function () {
   var metadata = {
-    schema_version: "alc.render.fragment_revision.v1",
+    schema_version: "alc.render.fragment_revision.v3",
     source: source,
     fragment_id: "external-note",
     revision: 1,
@@ -2647,6 +2657,8 @@ globalThis.document = {
     language: "en",
     title: "External note",
     citation_ids: [],
+    appearance: null,
+    deleted: false,
     provenance: {producer: "alc-render-browser"}
   };
   var markdown = "new external change";

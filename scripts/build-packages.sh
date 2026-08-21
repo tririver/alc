@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-rm -rf dist
-mkdir -p dist
+root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+python_bin="${PYTHON:-python3}"
+output="${ALC_BUILD_DIR:-$root/local/dist}"
 
-for project in packages/alc-*/pyproject.toml; do
-  python -m build --outdir dist "${project%/pyproject.toml}"
+rm -rf "$output"
+mkdir -p "$output"
+
+for project in "$root"/packages/alc-*/pyproject.toml; do
+  "$python_bin" -m build --outdir "$output" "${project%/pyproject.toml}"
 done

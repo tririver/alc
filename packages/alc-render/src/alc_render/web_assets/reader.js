@@ -3,8 +3,6 @@
 
   var FRONT_BEGIN = "<!-- ALC:FRAGMENT-JSON:BEGIN -->";
   var FRONT_END = "<!-- ALC:FRAGMENT-JSON:END -->";
-  var FRAGMENT_SCHEMA_V1 = "alc.render.fragment_revision.v1";
-  var FRAGMENT_SCHEMA_V2 = "alc.render.fragment_revision.v2";
   var FRAGMENT_SCHEMA = "alc.render.fragment_revision.v3";
   var HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
   var COLOR_PRESETS = [
@@ -4343,10 +4341,7 @@
       "parent_semantic_digest", "anchor", "priority", "role", "language",
       "title", "citation_ids", "provenance"
     ];
-    if ([FRAGMENT_SCHEMA_V2, FRAGMENT_SCHEMA].includes(revision.schema_version)) {
-      keys.push("appearance");
-    }
-    if (revision.schema_version === FRAGMENT_SCHEMA) keys.push("deleted");
+    keys.push("appearance", "deleted");
     var value = {};
     keys.forEach(function (key) { value[key] = revision[key]; });
     return JSON.parse(JSON.stringify(value));
@@ -4472,16 +4467,11 @@
       "parent_semantic_digest", "priority", "provenance", "revision", "role",
       "schema_version", "source", "title"
     ];
-    if ([FRAGMENT_SCHEMA_V2, FRAGMENT_SCHEMA].includes(metadata.schema_version)) {
-      fields.push("appearance");
-    }
-    if (metadata.schema_version === FRAGMENT_SCHEMA) fields.push("deleted");
+    fields.push("appearance", "deleted");
     requireExactObject(metadata, fields, "fragment revision");
     validateIntegerJson(metadata, "fragment revision");
     if (
-      ![FRAGMENT_SCHEMA_V1, FRAGMENT_SCHEMA_V2, FRAGMENT_SCHEMA].includes(
-        metadata.schema_version
-      ) ||
+      metadata.schema_version !== FRAGMENT_SCHEMA ||
       !portableIdentifier(metadata.fragment_id) ||
       !positiveInteger(metadata.revision) ||
       !positiveInteger(metadata.priority) ||
@@ -4518,13 +4508,8 @@
     if (!plainObject(metadata.provenance)) {
       throw new Error("fragment provenance must be an object");
     }
-    if ([FRAGMENT_SCHEMA_V2, FRAGMENT_SCHEMA].includes(metadata.schema_version)) {
-      normalizeAppearance(metadata.appearance);
-    }
-    if (
-      metadata.schema_version === FRAGMENT_SCHEMA &&
-      typeof metadata.deleted !== "boolean"
-    ) {
+    normalizeAppearance(metadata.appearance);
+    if (typeof metadata.deleted !== "boolean") {
       throw new Error("fragment deleted flag must be a boolean");
     }
   }
