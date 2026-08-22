@@ -141,6 +141,19 @@ Reader prose uses the browser's strict East Asian line-breaking mode, which
 keeps common Chinese closing punctuation away from line starts without custom
 text segmentation.
 
+The speaker icon (`Listen` tooltip) uses the browser Web Speech API and never
+bundles a voice model or generated audio. Source is selected by default;
+translation, Companion, guide, note, and dynamically discovered roles can be
+selected independently. Play always starts at the first selected, readable
+source row at the current viewport (below the fixed toolbar), then advances in
+publication order. Each source block or overlay fragment is one speech segment;
+ALC does no sentence tokenization. Headings, prose, lists, and figure or table
+captions are read, while display equations, code, and table bodies are skipped.
+The current segment is outlined and scrolled into view. Voice, rate, previous,
+next, pause/resume, and stop controls are ephemeral browser state. Available voices
+come from the operating system or browser; when Chrome exposes the API but no
+voice, the panel reports that condition without affecting reading or editing.
+
 The browser toolbar calls the directory action `New save location` until a
 project directory is available and `Change save location` afterwards. Export
 first refreshes that connected directory. Per-role Markdown can contain either

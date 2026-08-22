@@ -192,6 +192,15 @@ right edge to resize it from 12rem up to the smaller of 32rem or 45% of the
 viewport. Dragging below the minimum collapses it to the contents button; that
 button restores the previous width. The choice lasts only for the current page.
 
+The speaker icon (`Listen` tooltip) uses Chrome's Web Speech API without
+embedding audio or a speech model. Select source, translation, Companion,
+guide, note, or any discovered custom role. Play begins at the first selected
+readable row in the current viewport, then reads one existing source block or
+overlay fragment at a time. Code, display equations, and table bodies are
+skipped. The panel offers system voice, rate, previous/next, pause/resume, and
+stop controls. If the browser has no usable system voice, it reports that
+limitation and leaves all other reader features available.
+
 ## Printing
 
 `alc-render` v1 has no automated PDF command. Open the standalone HTML in

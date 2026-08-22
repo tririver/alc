@@ -128,7 +128,8 @@ button { cursor: pointer; }
 .alc-note-button,
 .alc-dialog button,
 .alc-inline-actions button,
-.alc-export-panel button {
+.alc-export-panel button,
+.alc-speech-panel button {
   min-height: 2rem;
   padding: .28rem .55rem;
   border: 1px solid #c8d0d7;
@@ -142,14 +143,32 @@ button { cursor: pointer; }
 .alc-note-button:focus-visible,
 .alc-dialog button:focus-visible,
 .alc-inline-actions button:focus-visible,
-.alc-export-panel button:focus-visible {
+.alc-export-panel button:focus-visible,
+.alc-speech-panel button:focus-visible {
   outline: 3px solid #9ec4df;
   outline-offset: 2px;
 }
+.alc-tool-icon-button {
+  display: inline-grid;
+  width: 2rem;
+  padding: .28rem;
+  place-items: center;
+}
+.alc-tool-icon {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
 .alc-export-control { position: relative; }
 .alc-view-control { position: relative; }
+.alc-speech-control { position: relative; }
 .alc-view-panel,
-.alc-export-panel {
+.alc-export-panel,
+.alc-speech-panel {
   position: absolute;
   top: calc(100% + .35rem);
   left: 0;
@@ -161,6 +180,7 @@ button { cursor: pointer; }
   box-shadow: 0 .55rem 1.6rem rgb(28 39 50 / 16%);
 }
 .alc-view-panel { min-width: 11rem; }
+.alc-speech-panel { width: min(22rem, calc(100vw - 1rem)); }
 .alc-view-panel fieldset {
   display: grid;
   gap: .25rem;
@@ -179,6 +199,66 @@ button { cursor: pointer; }
   gap: .4rem;
   align-items: center;
   font-size: .78rem;
+}
+.alc-speech-panel fieldset {
+  display: grid;
+  gap: .25rem;
+  margin: 0 0 .55rem;
+  padding: 0 0 .55rem;
+  border: 0;
+  border-bottom: 1px solid var(--alc-line);
+}
+.alc-speech-panel legend,
+.alc-speech-field > span {
+  color: var(--alc-muted);
+  font-size: .72rem;
+}
+.alc-speech-role-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .25rem .55rem;
+}
+.alc-speech-role-options label {
+  display: flex;
+  gap: .4rem;
+  align-items: center;
+  min-width: 0;
+  font-size: .78rem;
+}
+.alc-speech-field {
+  display: grid;
+  grid-template-columns: 4.2rem minmax(0, 1fr);
+  gap: .35rem .5rem;
+  align-items: center;
+  margin-top: .45rem;
+}
+.alc-speech-field select { min-width: 0; width: 100%; }
+.alc-speech-rate-field {
+  grid-template-columns: 4.2rem minmax(0, 1fr) 2.5rem;
+}
+.alc-speech-rate-field output {
+  color: #44515c;
+  font-size: .75rem;
+  text-align: right;
+}
+.alc-speech-status {
+  min-height: 1.3em;
+  margin: .55rem 0;
+  color: var(--alc-muted);
+  font-size: .75rem;
+}
+.alc-speech-status[data-kind="error"] { color: #862f2f; }
+.alc-speech-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+}
+.alc-speech-actions button { flex: 1 1 auto; }
+.alc-speech-panel button:disabled {
+  color: #8a9299;
+  background: #eceff1;
+  box-shadow: none;
+  cursor: not-allowed;
 }
 .alc-export-panel fieldset {
   display: grid;
@@ -293,6 +373,11 @@ button { cursor: pointer; }
 .alc-fragment[data-role="note"] {
   --alc-fragment-foreground: var(--alc-note-fg);
   --alc-fragment-background: var(--alc-note-bg);
+}
+.alc-source-card.is-speaking,
+.alc-fragment.is-speaking {
+  box-shadow: inset 0 0 0 3px #2f78a5, 0 0 0 2px rgb(47 120 165 / 18%);
+  scroll-margin-block: 5rem;
 }
 .alc-full-rows {
   display: grid;

@@ -724,11 +724,24 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
 </head>
 <body data-publication-digest="{digest}">
   <div class="alc-fixed-tools">
-    <button id="alc-contents-toggle" class="alc-tool-button" type="button"
-      aria-controls="alc-contents" aria-expanded="true">☰</button>
+    <button id="alc-contents-toggle" class="alc-tool-button alc-tool-icon-button"
+      type="button" aria-label="Contents" title="Contents"
+      aria-controls="alc-contents" aria-expanded="true">
+      <svg class="alc-tool-icon" viewBox="0 0 24 24" aria-hidden="true"
+        focusable="false">
+        <path d="M4 6h16M4 12h16M4 18h16"></path>
+      </svg>
+    </button>
     <div class="alc-view-control">
-      <button id="alc-view" class="alc-tool-button" type="button"
-        aria-controls="alc-view-panel" aria-expanded="false">View</button>
+      <button id="alc-view" class="alc-tool-button alc-tool-icon-button"
+        type="button" aria-label="View" title="View"
+        aria-controls="alc-view-panel" aria-expanded="false">
+        <svg class="alc-tool-icon" viewBox="0 0 24 24" aria-hidden="true"
+          focusable="false">
+          <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path>
+          <circle cx="12" cy="12" r="2.75"></circle>
+        </svg>
+      </button>
       <div id="alc-view-panel" class="alc-view-panel" hidden>
         <fieldset>
           <legend id="alc-view-heading">Show</legend>
@@ -736,9 +749,51 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
         </fieldset>
       </div>
     </div>
+    <div class="alc-speech-control">
+      <button id="alc-speech" class="alc-tool-button alc-tool-icon-button"
+        type="button" aria-label="Listen" title="Listen"
+        aria-controls="alc-speech-panel" aria-expanded="false">
+        <svg class="alc-tool-icon" viewBox="0 0 24 24" aria-hidden="true"
+          focusable="false">
+          <path d="M4 10h4l4-3v10l-4-3H4Z"></path>
+          <path d="M15 9a4 4 0 0 1 0 6M17.5 6.5a7.5 7.5 0 0 1 0 11"></path>
+        </svg>
+      </button>
+      <div id="alc-speech-panel" class="alc-speech-panel" hidden>
+        <fieldset>
+          <legend id="alc-speech-content-label">Read content</legend>
+          <div id="alc-speech-role-options" class="alc-speech-role-options"></div>
+        </fieldset>
+        <label class="alc-speech-field">
+          <span id="alc-speech-voice-label">Voice</span>
+          <select id="alc-speech-voice"></select>
+        </label>
+        <label class="alc-speech-field alc-speech-rate-field">
+          <span id="alc-speech-rate-label">Rate</span>
+          <input id="alc-speech-rate" type="range" min="0.6" max="1.6"
+            step="0.1" value="1">
+          <output id="alc-speech-rate-value" for="alc-speech-rate">1.0×</output>
+        </label>
+        <p id="alc-speech-status" class="alc-speech-status"
+          aria-live="polite"></p>
+        <div class="alc-speech-actions">
+          <button id="alc-speech-previous" type="button">Previous</button>
+          <button id="alc-speech-play" type="button">Play</button>
+          <button id="alc-speech-pause" type="button">Pause</button>
+          <button id="alc-speech-next" type="button">Next</button>
+          <button id="alc-speech-stop" type="button">Stop</button>
+        </div>
+      </div>
+    </div>
     <div class="alc-export-control">
-      <button id="alc-export" class="alc-tool-button" type="button"
-        aria-controls="alc-export-panel" aria-expanded="false">Export</button>
+      <button id="alc-export" class="alc-tool-button alc-tool-icon-button"
+        type="button" aria-label="Export" title="Export"
+        aria-controls="alc-export-panel" aria-expanded="false">
+        <svg class="alc-tool-icon" viewBox="0 0 24 24" aria-hidden="true"
+          focusable="false">
+          <path d="M12 3v11M8 10l4 4 4-4M4 18v2h16v-2"></path>
+        </svg>
+      </button>
       <div id="alc-export-panel" class="alc-export-panel" hidden>
         <fieldset id="alc-export-scope">
           <legend id="alc-export-scope-label">Markdown content</legend>
@@ -756,7 +811,14 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
         <button id="alc-export-html" type="button">Full text =&gt; Single HTML</button>
       </div>
     </div>
-    <button id="alc-connect" class="alc-tool-button" type="button"></button>
+    <button id="alc-connect" class="alc-tool-button alc-tool-icon-button"
+      type="button" aria-label="New save location" title="New save location">
+      <svg class="alc-tool-icon" viewBox="0 0 24 24" aria-hidden="true"
+        focusable="false">
+        <path d="M3 7h6l2 2h10l-2 10H3Z"></path>
+        <path d="M12 12v5M9.5 14.5h5"></path>
+      </svg>
+    </button>
   </div>
   <p id="alc-storage-status" class="alc-storage-status" hidden></p>
   <div id="alc-shell" class="alc-shell">

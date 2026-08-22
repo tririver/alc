@@ -293,6 +293,18 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-view"' in text
     assert 'id="alc-view-panel"' in text
     assert 'id="alc-view-options"' in text
+    assert 'id="alc-speech"' in text
+    assert 'id="alc-speech-panel"' in text
+    assert 'id="alc-speech-role-options"' in text
+    assert 'id="alc-speech-voice"' in text
+    assert 'id="alc-speech-rate"' in text
+    assert 'id="alc-speech-play"' in text
+    assert 'id="alc-speech-pause"' in text
+    assert 'id="alc-speech-stop"' in text
+    assert text.count('class="alc-tool-icon"') == 5
+    assert text.count('class="alc-tool-button alc-tool-icon-button"') == 5
+    assert 'id="alc-connect" class="alc-tool-button alc-tool-icon-button"' in text
+    assert 'aria-label="New save location" title="New save location"' in text
     assert 'id="alc-contents-resizer"' in text
     assert 'role="separator" aria-orientation="vertical"' in text
     assert 'id="alc-export-panel"' in text

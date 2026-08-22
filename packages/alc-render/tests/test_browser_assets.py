@@ -32,6 +32,194 @@ def test_reader_javascript_passes_node_syntax_check() -> None:
     )
 
 
+def test_reader_speech_uses_structured_paragraphs_and_current_viewport() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    queue_source = javascript[
+        javascript.index("function buildSpeechQueue()") :
+        javascript.index("function speechSegmentText(")
+    ]
+    assert "loadAllPayload(false);" in queue_source
+    assert "renderAllChunks();" not in queue_source
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        + javascript[:startup]
+        + """
+  globalThis.__alcSpeechTest = {
+    normalizeSpeechText: normalizeSpeechText,
+    speechInlineText: speechInlineText,
+    sourceSpeechText: sourceSpeechText,
+    speechLanguage: speechLanguage,
+    viewportNodeIndex: viewportNodeIndex,
+    speakSpeechIndex: speakSpeechIndex,
+    toggleSpeechPause: toggleSpeechPause,
+    state: state
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function row(top, bottom) {
+  return {getBoundingClientRect: function () {
+    return {top: top, bottom: bottom};
+  }};
+}
+var helpers = globalThis.__alcSpeechTest;
+globalThis.innerHeight = 600;
+var controls = {
+  "alc-speech-rate": {value: "1.2"},
+  "alc-speech-play": {disabled: false},
+  "alc-speech-pause": {disabled: false, textContent: ""},
+  "alc-speech-stop": {disabled: false},
+  "alc-speech-previous": {disabled: false},
+  "alc-speech-next": {disabled: false},
+  "alc-speech-status": {textContent: "", dataset: {}}
+};
+var toolbarBottom = 0;
+var speechRows = {};
+globalThis.document = {
+  documentElement: {clientHeight: 600},
+  getElementById: function (id) { return controls[id] || speechRows[id] || null; },
+  querySelector: function (selector) {
+    if (selector !== ".alc-fixed-tools") return null;
+    return {getBoundingClientRect: function () { return {bottom: toolbarBottom}; }};
+  }
+};
+helpers.state.payload = {
+  publication: {
+    labels: {},
+    reader_profile: {source_language: "en", target_language: "zh-CN"}
+  }
+};
+assert(
+  helpers.sourceSpeechText({kind: "paragraph", payload: {text: " A  paragraph. "}}) ===
+    "A paragraph.",
+  "source paragraph was not preserved as one speech segment"
+);
+assert(
+  helpers.sourceSpeechText({
+    kind: "list", payload: {items: [{text: "First"}, {text: "Second"}]}
+  }) === "First\\nSecond",
+  "structured list items were not preserved"
+);
+assert(
+  helpers.sourceSpeechText({kind: "equation", payload: {tex: "x^2"}}) === "",
+  "display equation unexpectedly became a speech paragraph"
+);
+assert(
+  helpers.speechInlineText([
+    {kind: "text", text: "Energy "},
+    {kind: "math", source: "$E=mc^2$"},
+    {kind: "text", text: "."}
+  ], "Energy $E=mc^2$.") === "Energy.",
+  "inline math was spoken instead of using structured prose spans"
+);
+assert(
+  helpers.speechLanguage("source", null) === "en" &&
+    helpers.speechLanguage("translation", null) === "zh-CN",
+  "speech language did not follow content role"
+);
+var above = row(-300, -20);
+var visible = row(-10, 180);
+var below = row(700, 820);
+var queue = [
+  {row: above},
+  {row: visible},
+  {row: visible},
+  {row: below}
+];
+assert(
+  helpers.viewportNodeIndex(queue.map(item => item.row)) === 1,
+  "speech did not start at first selected segment in visible source row"
+);
+above.getBoundingClientRect = function () { return {top: -600, bottom: -500}; };
+visible.getBoundingClientRect = function () { return {top: -300, bottom: -200}; };
+below.getBoundingClientRect = function () { return {top: 40, bottom: 160}; };
+assert(
+  helpers.viewportNodeIndex(queue.map(item => item.row)) === 3,
+  "speech did not follow viewport after scrolling"
+);
+toolbarBottom = 36;
+visible.getBoundingClientRect = function () { return {top: -350, bottom: 16}; };
+below.getBoundingClientRect = function () { return {top: 16, bottom: 94}; };
+assert(
+  helpers.viewportNodeIndex(queue.map(item => item.row)) === 3,
+  "speech treated a sliver hidden behind the toolbar as the current paragraph"
+);
+
+function speakingNode() {
+  return {
+    active: false,
+    scrolled: false,
+    classList: {
+      add: function () { this.owner.active = true; },
+      remove: function () { this.owner.active = false; },
+      owner: null
+    },
+    scrollIntoView: function () { this.scrolled = true; }
+  };
+}
+var firstNode = speakingNode();
+var secondNode = speakingNode();
+firstNode.classList.owner = firstNode;
+secondNode.classList.owner = secondNode;
+speechRows["block-b1"] = {querySelector: function () { return firstNode; }};
+speechRows["block-b2"] = {querySelector: function () { return secondNode; }};
+var spoken = [];
+var pauses = 0;
+var resumes = 0;
+globalThis.matchMedia = function () { return {matches: true}; };
+globalThis.SpeechSynthesisUtterance = function (text) { this.text = text; };
+globalThis.speechSynthesis = {
+  cancel: function () {},
+  speak: function (utterance) { spoken.push(utterance); },
+  pause: function () { pauses += 1; },
+  resume: function () { resumes += 1; }
+};
+helpers.state.speechSupported = true;
+helpers.state.speechReady = true;
+helpers.state.speechVoices = [{
+  name: "System English", lang: "en-US", voiceURI: "system-en", localService: true
+}];
+helpers.state.speechVoiceIdentity = "";
+helpers.state.speechQueue = [
+  {text: "First paragraph.", language: "en", role: "source", blockId: "b1"},
+  {text: "第二段。", language: "zh-CN", role: "translation", blockId: "b2", fragmentId: "f2"}
+];
+helpers.speakSpeechIndex(0);
+assert(
+  spoken.length === 1 && spoken[0].text === "First paragraph." &&
+    spoken[0].lang === "en" && spoken[0].rate === 1.2 &&
+    firstNode.active && firstNode.scrolled,
+  "first speech paragraph was not queued, localized, or highlighted"
+);
+helpers.toggleSpeechPause();
+helpers.toggleSpeechPause();
+assert(pauses === 1 && resumes === 1, "pause/resume did not reach browser speech");
+spoken[0].onend();
+assert(
+  spoken.length === 2 && spoken[1].text === "第二段。" &&
+    spoken[1].lang === "zh-CN" && !firstNode.active && secondNode.active,
+  "speech did not advance by structured paragraph"
+);
+spoken[1].onend();
+assert(
+  !helpers.state.speechPlaying && !secondNode.active &&
+    controls["alc-speech-status"].textContent === "朗读完成。",
+  "speech completion did not clear active state"
+);
+"""
+    )
+    completed = subprocess.run(
+        [node, "-"], input=instrumented, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_reader_contents_sidebar_resizes_and_collapses_under_node() -> None:
     node = shutil.which("node")
     if node is None:
@@ -518,7 +706,11 @@ if (
 ) {
   throw new Error("duplicate bibliography identities were not consolidated");
 }
-var connectControl = {textContent: ""};
+var connectControl = {
+  attrs: {},
+  title: "",
+  setAttribute: function (name, value) { this.attrs[name] = value; }
+};
 var statusControl = {textContent: "", dataset: {}, hidden: true};
 globalThis.document = {
   getElementById: function (id) {
@@ -529,12 +721,18 @@ globalThis.document = {
 };
 helpers.state.directory = null;
 helpers.updateDirectoryControl();
-if (connectControl.textContent !== "新建保存位置") {
+if (
+  connectControl.title !== "新建保存位置" ||
+  connectControl.attrs["aria-label"] !== "新建保存位置"
+) {
   throw new Error("missing-directory button label changed");
 }
 helpers.state.directory = {};
 helpers.updateDirectoryControl();
-if (connectControl.textContent !== "更改保存位置") {
+if (
+  connectControl.title !== "更改保存位置" ||
+  connectControl.attrs["aria-label"] !== "更改保存位置"
+) {
   throw new Error("connected-directory button label changed");
 }
 var statusTimers = [];
@@ -2798,6 +2996,12 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert ".alc-history-compare" in stylesheet
     assert ".alc-section-note-button" not in stylesheet
     assert ".alc-icon-button" in stylesheet
+    assert "function labelToolButton(button, label)" in javascript
+    assert "trigger.textContent = strings.view" not in javascript
+    assert "trigger.textContent = strings.listen" not in javascript
+    assert "trigger.textContent = strings.export" not in javascript
+    assert ".alc-tool-icon-button" in stylesheet
+    assert ".alc-tool-icon" in stylesheet
     assert "position: fixed" in stylesheet
     assert "width: min(29rem, calc(100vw - 2rem))" in stylesheet
     assert "height: min(39.5rem, calc(100dvh - 2rem))" in stylesheet
@@ -2838,7 +3042,7 @@ def test_reader_visibility_is_dynamic_ephemeral_and_book_focused() -> None:
     assert "getBoundingClientRect" not in apply_visibility
     assert "loadAllPayload(false);" not in javascript[
         javascript.index("function setupVisibility()") :
-        javascript.index("function renderContents(")
+        javascript.index("function setupSpeech()")
     ]
     assert ".alc-focused-reading .alc-book-header" in stylesheet
     assert "72ch" in stylesheet
