@@ -203,11 +203,11 @@ limitation and leaves all other reader features available.
 
 ## Printing
 
-`alc-render` v1 has no automated PDF command. Open the standalone HTML in
-Chrome and use Print / Save as PDF. Print styling hides editing/navigation
-controls and stacks source and overlay blocks vertically. The PDF is a
-user-created derivative: ALC does not validate, reproduce, publish, or provide
-durability guarantees for it.
+`alc-render` does not currently provide an automated PDF command. Open the
+standalone HTML in Chrome and use Print / Save as PDF. Print styling hides
+editing/navigation controls and stacks source and overlay blocks vertically.
+The PDF is a user-created derivative: ALC does not validate, reproduce,
+publish, or provide durability guarantees for it.
 
 ## Help
 

@@ -46,11 +46,15 @@ If bare commands are unavailable in an installed ALC Skill, use its runtime:
 <skill-dir>/scripts/alc-runtime alc-render --help
 ```
 
-From this source checkout, the development fallback is:
+From this source checkout, point the launcher at both local repositories:
 
 ```bash
-packages/alc-paper/.venv/bin/ac-document export-rich-document --help
-packages/alc-paper/.venv/bin/alc-render --help
+export AC_INSTALL_SOURCE=local
+export AC_PRODUCT_REPO_ROOT="$PWD"
+export AC_FOUNDATION_REPO_ROOT="/path/to/ac-foundation"
+
+plugins/alc/bin/alc-runtime ac-document export-rich-document --help
+plugins/alc/bin/alc-runtime alc-render --help
 ```
 
 `ac-document export-rich-document` prints a JSON object containing the
