@@ -47,9 +47,9 @@ Markdown, HTML, or flattened single-file TeX is authoritative. For local
 sources, `--pdf note.pdf` supplies an optional validator; PDF is never the
 reader source or output. Use `unrestricted` only when the host explicitly
 grants it. Otherwise use `unknown`, or `restricted` when known, and preserve the
-same authority on resume. Remote academic acquisition belongs to `alc-paper`
-or another host-level research workflow, which must first materialize a local
-source for Companion.
+same authority on resume. Remote academic acquisition belongs to an optional
+host-level ARC research workflow, which must first materialize a local source
+for Companion.
 
 Every command prints an `ac.command_result.v2` envelope. For `build` and
 `resume`, read the selected durable identity at top-level `run.id`, lifecycle at
