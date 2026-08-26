@@ -52,7 +52,9 @@ def test_package_set_metadata_and_dependency_graph() -> None:
             if dependency.startswith("alc-"):
                 assert dependency.endswith(f">={ALC_MAJOR},<{ALC_MAJOR + 1}")
             elif dependency.startswith("ac-"):
-                assert re.search(r">=\d+,<\d+$", dependency)
+                ac_range = re.search(r">=(\d+)(?:\.\d+\.\d+)?,<(\d+)$", dependency)
+                assert ac_range is not None
+                assert int(ac_range[2]) == int(ac_range[1]) + 1
 
 
 def test_learning_packages_have_no_arc_code_dependency() -> None:
