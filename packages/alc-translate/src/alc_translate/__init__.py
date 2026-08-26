@@ -1,6 +1,6 @@
 """Durable scientific translation workflows."""
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 from .contracts import (  # noqa: E402
     GLOSSARY_RESULT_SCHEMA,
