@@ -175,26 +175,72 @@ speech segment; ALC does no sentence tokenization. Headings, prose, lists, and
 figure or table captions are read, while display equations, code, and table
 bodies are skipped. Both players provide the same transport, playlist, 0.5x to
 3x rate, and repeat controls. Per-fragment speaker buttons start from that exact
-segment. On narrow or touch layouts, speaker and edit actions remain available
-without hover. Voice and playback state remain in the browser. If the browser
-reports no voices, the panel shows that condition without affecting reading or
-editing.
+segment. Speaker and edit actions use the same hover/focus disclosure at every
+viewport width. On a non-mouse pointer, the first tap on a non-interactive card
+surface reveals the same compact actions without activating the card; revealed
+touch actions use 44-pixel targets. Voice and playback state remain in the
+browser. If the browser reports no voices, the panel shows that condition
+without affecting reading or editing.
 
 The browser toolbar calls the directory action `New save location` until a
 project directory is available and `Change save location` afterwards. Export
 first refreshes that connected directory. A remembered directory handle is
 scoped to the immutable source identity, so opening another publication does
-not scan revisions from the previous document. Per-role Markdown can contain
-either all currently selected revisions or only selections changed from the
-reader's embedded baseline. Full-text HTML export contains the complete latest
-publication, reader UI, and current appearance snapshot. The action appears
-only for the all-latest scope and only in a standalone reader whose assets are
-already embedded. Directory changes and exports wait until the active draft is
+not scan revisions from the previous document. The Markdown section owns its
+all-latest or latest-changes-only range. Source, translation, guide, companion,
+note, and additional selected roles can be combined with checkboxes. The
+result can be downloaded either as one resource-free Markdown file or as a
+portable Markdown package. Source is unavailable in the changes-only range
+because it is immutable. Full-text HTML and PDF actions are independent of the
+Markdown range. Directory changes and exports wait until the active draft is
 saved or cancelled.
 
-For now, a PDF copy may be made manually with Chrome's Print / Save as PDF
-command. Such a PDF is a user-side derivative, not an ALC release artifact,
-and ALC does not validate, reproduce, or automatically publish it.
+Combined Markdown presents guide, companion, and note fragments as labeled
+blockquotes so supplemental content remains visually distinct from source and
+translation. Every authored Markdown line is quoted, preserving nested lists,
+links, formulas, and fenced code. Translation remains ordinary document
+content; unknown dynamic roles retain the generic bold role/title label.
+For backward compatibility, a legacy whole-line `$$...$$` formula is rendered
+as display math and normalized to line-delimited `$$` when supplemental
+Markdown is exported. Fenced and indented code, plus ordinary same-line code
+spans, are not rewritten.
+
+An all-latest Markdown package reconstructs `document.md` in source-block
+order. When translation is selected without source, a missing one-to-one block
+translation falls back to the frozen source block. The downloaded deterministic
+ZIP includes a manifest and each validated publication resource actually
+referenced by the emitted Markdown below digest-addressed `resources/` paths;
+local Markdown links are rewritten to those paths. Source-only code, equations,
+tables, and selected figures therefore remain present, while translated figure
+captions retain their source image. Glossary
+and deduplicated bibliography are separate, default-selected content options;
+they are omitted when unchecked and unavailable in the changes-only range.
+Bibliography titles remain canonical source titles because the publication
+contract has no translated-title field. Footnote syntax is preserved when it
+exists in source or fragment Markdown; the render contract has no separate
+footnote model from which to reconstruct omitted definitions.
+The single-file mode omits Markdown and HTML images, retains readable figure
+descriptions and captions, and turns links to bundled local resources into
+plain labels. Formulas, code, tables, footnotes, and external links remain
+Markdown. The changes-only range exports only checked revisions that differ
+from the reader's embedded baseline. Both Markdown package ranges include only
+resources referenced by the emitted `document.md`; unchecked content and
+unreferenced publication resources are omitted and are not decoded while the
+package is assembled. Single-file Markdown does not decode publication resource
+payloads.
+
+Resource portability intentionally follows the Markdown shapes emitted by ALC:
+inline links and images, same-line reference definitions, and HTML `src`/`href`
+attributes outside ordinary code spans or code blocks. Multiline code spans and
+multiline or duplicate reference definitions are outside this export contract;
+use fenced code and ordinary inline links when a local resource must be
+portable.
+
+HTML export contains the complete latest standalone Reader, including its UI
+and current appearance snapshot. The PDF action renders all remaining Reader
+chunks and opens the browser's Print / Save as PDF dialog for the current
+visible content. That PDF is a user-side derivative, not an ALC release
+artifact, and ALC does not validate, reproduce, or automatically publish it.
 
 Command help is available without opening the manual:
 
