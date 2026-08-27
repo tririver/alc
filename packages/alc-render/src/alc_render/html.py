@@ -787,21 +787,88 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
           <path d="M12 3v11M8 10l4 4 4-4M4 18v2h16v-2"></path>
         </svg>
       </button>
-      <div id="alc-export-panel" class="alc-export-panel" hidden>
-        <fieldset id="alc-export-scope">
-          <legend id="alc-export-scope-label">Markdown content</legend>
-          <label>
-            <input type="radio" name="alc-export-scope" value="all" checked>
-            <span id="alc-export-all-label">All latest</span>
-          </label>
-          <label>
-            <input type="radio" name="alc-export-scope" value="changed">
-            <span id="alc-export-changed-label">Latest changes only</span>
-          </label>
-        </fieldset>
-        <div id="alc-export-role-options" class="alc-export-options"></div>
-        <p id="alc-export-empty" class="alc-export-empty" hidden></p>
-        <button id="alc-export-html" type="button">Full text =&gt; Single HTML</button>
+      <div id="alc-export-panel" class="alc-export-panel" hidden
+        role="dialog" aria-modal="false" aria-labelledby="alc-export-heading">
+        <header class="alc-tool-panel-header alc-export-header">
+          <h2 id="alc-export-heading">Export content</h2>
+        </header>
+        <div class="alc-tool-panel-body alc-export-body">
+          <section id="alc-export-markdown-section" class="alc-export-section"
+            aria-labelledby="alc-export-markdown-heading">
+            <h3 id="alc-export-markdown-heading">Markdown</h3>
+          <fieldset id="alc-export-scope">
+            <legend id="alc-export-scope-label">Export range</legend>
+            <label>
+              <input type="radio" name="alc-export-scope" value="all" checked>
+              <span id="alc-export-all-label">All latest</span>
+            </label>
+            <label>
+              <input type="radio" name="alc-export-scope" value="changed">
+              <span id="alc-export-changed-label">Latest changes only</span>
+            </label>
+          </fieldset>
+          <fieldset id="alc-export-content">
+            <legend id="alc-export-content-label">Include</legend>
+            <div id="alc-export-role-options"
+              class="alc-export-content-options"></div>
+          </fieldset>
+          <fieldset id="alc-export-markdown-mode">
+            <legend id="alc-export-markdown-mode-label">Output</legend>
+            <label>
+              <input type="radio" name="alc-export-markdown-mode" value="file">
+              <span id="alc-export-markdown-file-label">Single Markdown</span>
+            </label>
+            <label>
+              <input type="radio" name="alc-export-markdown-mode"
+                value="package" checked>
+              <span id="alc-export-markdown-package-label">Markdown package</span>
+            </label>
+          </fieldset>
+          <div class="alc-export-actions">
+            <button id="alc-export-markdown-package"
+              class="alc-export-action" type="button">
+              <svg class="alc-export-action-icon" viewBox="0 0 24 24"
+                aria-hidden="true" focusable="false">
+                <path d="M12 3v12M8 11l4 4 4-4M4 20h16"></path>
+              </svg>
+              <span id="alc-export-markdown-label">Export Markdown</span>
+            </button>
+          </div>
+          </section>
+          <section id="alc-export-html-section"
+            class="alc-export-section alc-export-format-section"
+            aria-labelledby="alc-export-html-heading">
+            <div class="alc-export-section-copy">
+              <h3 id="alc-export-html-heading">HTML</h3>
+              <p id="alc-export-html-description"
+                class="alc-export-description"></p>
+            </div>
+            <button id="alc-export-html" class="alc-export-action" type="button">
+              <svg class="alc-export-action-icon" viewBox="0 0 24 24"
+                aria-hidden="true" focusable="false">
+                <path d="M6 2h8l4 4v16H6Z M14 2v5h5"></path>
+                <path d="M10 11l-2 2 2 2M14 11l2 2-2 2"></path>
+              </svg>
+              <span id="alc-export-html-label">Export HTML</span>
+            </button>
+          </section>
+          <section id="alc-export-pdf-section"
+            class="alc-export-section alc-export-format-section"
+            aria-labelledby="alc-export-pdf-heading">
+            <div class="alc-export-section-copy">
+              <h3 id="alc-export-pdf-heading">PDF</h3>
+              <p id="alc-export-pdf-description"
+                class="alc-export-description"></p>
+            </div>
+            <button id="alc-export-pdf" class="alc-export-action" type="button">
+              <svg class="alc-export-action-icon" viewBox="0 0 24 24"
+                aria-hidden="true" focusable="false">
+                <path d="M7 8V3h10v5M6 17H4v-6h16v6h-2M7 14h10v7H7Z"></path>
+              </svg>
+              <span id="alc-export-pdf-label">Export PDF</span>
+            </button>
+          </section>
+        </div>
       </div>
     </div>
     <button id="alc-connect" class="alc-tool-button alc-tool-icon-button"

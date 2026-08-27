@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import io
+import json
 from pathlib import Path
 import shutil
 import subprocess
+import zipfile
 
 import pytest
 
@@ -3023,17 +3027,21 @@ def test_reader_markdown_export_uses_latest_or_embedded_change_scope() -> None:
     if node is None:
         pytest.skip("Node is unavailable")
     javascript = _text("reader.js")
+    markdown_it = _text("markdown-it/markdown-it.min.js")
     startup = javascript.rfind("\n  if (document.readyState")
     assert startup > 0
     instrumented = (
-        """
-globalThis.window = globalThis;
-"""
+        "globalThis.window = globalThis;\n"
+        "module = undefined; exports = undefined; define = undefined;\n"
+        + markdown_it
+        + "\n"
         + javascript[:startup]
         + """
   globalThis.__alcReaderTest = {
     state: state,
-    buildRoleMarkdown: buildRoleMarkdown,
+    setupMarkdown: setupMarkdown,
+    buildMarkdownPackage: buildMarkdownPackage,
+    buildPlainMarkdown: buildPlainMarkdown,
     captureInitialSelection: captureInitialSelection,
     exportRevisionState: exportRevisionState
   };
@@ -3043,6 +3051,7 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 var helpers = globalThis.__alcReaderTest;
+helpers.setupMarkdown();
 var source = {
   source_format: "markdown",
   media_type: "text/markdown",
@@ -3061,7 +3070,11 @@ function revision(fragmentId, digest, role, target, body, priority, number, pare
     fragment_id: fragmentId,
     revision: number,
     parent_semantic_digest: parent,
-    anchor: {kind: "block", target_id: target, related_blocks: []},
+    anchor: {
+      kind: "block",
+      target_id: target,
+      related_blocks: [{block_id: target}]
+    },
     priority: priority,
     role: role,
     language: "zh-CN",
@@ -3076,11 +3089,46 @@ function revision(fragmentId, digest, role, target, body, priority, number, pare
 }
 var first = revision("translation-1", "1".repeat(64), "translation", "block-1", "旧译文", 10, 1, null);
 var unchanged = revision("translation-2", "2".repeat(64), "translation", "block-2", "未改译文", 10, 1, null);
-var companion = revision("companion-1", "3".repeat(64), "companion", "block-1", "未改伴读", 20, 1, null);
+var companion = revision(
+  "companion-1", "3".repeat(64), "companion", "block-1",
+  "未改伴读\\n\\n$$q(z)=-1。$$", 20, 1, null
+);
+var reportDigest = "d".repeat(64);
+var unusedDigest = "e".repeat(64);
+var htmlDigest = "f".repeat(64);
+var guide = revision(
+  "guide-1", "6".repeat(64), "guide", "block-2",
+  "导读正文\\n\\n- 第一项\\n- 第二项\\n\\n```text\\n示例\\n```" +
+    "\\n\\n[报告][asset]\\n\\n[asset]: report.json",
+  30, 1, null, "阅读提示"
+);
 helpers.state.payload = {
+  source_identity: source,
+  resources: [{
+    artifact_digest: reportDigest,
+    media_type: "application/json",
+    logical_name: "report.json",
+    size: 3,
+    data_uri: "data:application/json;base64,e30K"
+  }, {
+    artifact_digest: unusedDigest,
+    media_type: "image/png",
+    logical_name: "unused.png",
+    size: 1,
+    data_uri: "data:image/png;base64,AA=="
+  }, {
+    artifact_digest: htmlDigest,
+    media_type: "image/png",
+    logical_name: "html.png",
+    size: 1,
+    data_uri: "data:image/png;base64,AA=="
+  }],
   publication: {
-    source_document: {blocks: blocks},
+    publication_digest: "c".repeat(64),
+    source_document: {blocks: blocks, metadata: {}},
     outline: [],
+    glossary: [],
+    bibliography: [],
     labels: {document_title: "Fearful Symmetry", translation: "译名"},
     reader_profile: {target_language: "zh-CN"}
   }
@@ -3088,51 +3136,196 @@ helpers.state.payload = {
 helpers.state.selected = new Map([
   [first.fragment_id, first],
   [unchanged.fragment_id, unchanged],
-  [companion.fragment_id, companion]
+  [companion.fragment_id, companion],
+  [guide.fragment_id, guide]
 ]);
 helpers.captureInitialSelection();
 var revised = revision(
   first.fragment_id, "4".repeat(64), "translation", "block-1",
   "最新译文", 10, 2, first.semantic_digest, "改动标题"
 );
-var note = revision("note-1", "5".repeat(64), "note", "block-2", "新增笔记", 110, 1, null);
+var note = revision(
+  "note-1", "5".repeat(64), "note", "block-2",
+  "新增笔记\\n\\n[报告][asset]\\n\\n[asset]: report.json" +
+    "\\n\\n<img src=\\\"html.png\\\" alt=\\\"HTML image\\\">" +
+    "\\n\\n`<img src=\\\"resources/" + unusedDigest +
+    "/unused.png\\\">`" +
+    "\\n\\n    <img src=\\\"resources/" + unusedDigest +
+    "/unused.png\\\">" +
+    "\\n\\n```text\\n[ignored](resources/" + unusedDigest +
+    "/unused.png)\\n```", 110, 1, null
+);
 helpers.state.selected = new Map([
   [first.fragment_id, revised],
   [unchanged.fragment_id, unchanged],
   [companion.fragment_id, companion],
+  [guide.fragment_id, guide],
   [note.fragment_id, note]
 ]);
 helpers.state.revisions = new Map([
   [first.fragment_id, [first, revised]],
   [unchanged.fragment_id, [unchanged]],
   [companion.fragment_id, [companion]],
+  [guide.fragment_id, [guide]],
   [note.fragment_id, [note]]
 ]);
 helpers.state.activeFragmentIds = new Set([
-  first.fragment_id, unchanged.fragment_id, companion.fragment_id
+  first.fragment_id, unchanged.fragment_id, companion.fragment_id,
+  guide.fragment_id
 ]);
-var all = helpers.buildRoleMarkdown("translation", "all");
-var changed = helpers.buildRoleMarkdown("translation", "changed");
-assert(all.includes("# Fearful Symmetry — 译文"), "role label did not use 译文");
-assert(all.includes("最新译文") && all.includes("未改译文"), "all-latest Markdown omitted content");
-assert(changed.includes("最新译文"), "changed Markdown omitted the revised fragment");
-assert(!changed.includes("未改译文"), "changed Markdown included an unchanged fragment");
-assert(changed.includes("## 改动标题"), "fragment title was not exported");
+var translationOnly = helpers.buildMarkdownPackage(
+  "all", new Set(["translation"])
+).markdown;
+var changedTranslation = helpers.buildMarkdownPackage(
+  "changed", new Set(["translation"])
+).markdown;
 assert(
-  helpers.buildRoleMarkdown("companion", "changed") === "",
+  translationOnly.includes("最新译文") && translationOnly.includes("未改译文"),
+  "all-latest translation package omitted content"
+);
+assert(
+  changedTranslation.includes("最新译文") &&
+    !changedTranslation.includes("未改译文") &&
+    changedTranslation.includes("## 改动标题"),
+  "changed translation package does not match current selections"
+);
+assert(
+  helpers.buildMarkdownPackage("changed", new Set(["companion"])) === null,
   "unchanged companion content was exported as changed"
 );
 assert(
-  helpers.buildRoleMarkdown("note", "changed").includes("新增笔记"),
+  helpers.buildMarkdownPackage(
+    "changed", new Set(["note"])
+  ).markdown.includes("新增笔记"),
   "new browser fragment was not exported as changed"
 );
+var combined = helpers.buildMarkdownPackage(
+  "all", new Set(["source", "translation", "guide", "companion"])
+);
+var reportPath = "resources/" + reportDigest + "/report.json";
+var htmlPath = "resources/" + htmlDigest + "/html.png";
+assert(
+  combined.markdown.includes("one") && combined.markdown.includes("two"),
+  "combined Markdown omitted selected source content"
+);
+assert(
+    combined.markdown.includes("最新译文") &&
+    combined.markdown.includes("未改译文") &&
+    combined.markdown.includes("未改伴读") &&
+    combined.markdown.includes("导读正文"),
+    "combined Markdown omitted a checked overlay category"
+  );
+assert(
+  combined.markdown.includes("> **伴读**\\n>\\n> 未改伴读") &&
+    combined.markdown.includes(
+      "> **导读 · 阅读提示**\\n>\\n> 导读正文\\n>\\n> - 第一项"
+    ) && combined.markdown.includes("> ```text\\n> 示例\\n> ```"),
+  "combined Markdown did not quote companion and guide content"
+);
+assert(
+  combined.markdown.includes("> $$\\n> q(z)=-1。\\n> $$") &&
+    !combined.markdown.includes("> $$q(z)=-1。$$"),
+  "combined Markdown did not canonicalize legacy companion display math"
+);
+assert(
+  combined.markdown.includes("> [报告][asset]") &&
+    combined.markdown.includes("> [asset]: " + reportPath),
+  "combined package did not preserve a quoted local reference link"
+);
+assert(
+  combined.manifest.resources.length === 1 &&
+    combined.manifest.resources[0].path === reportPath,
+  "all-latest package did not limit resources to selected referenced content"
+);
+var guideOnlyPackage = helpers.buildMarkdownPackage(
+  "all", new Set(["guide"])
+);
+assert(
+  guideOnlyPackage.manifest.resources.length === 1 &&
+    guideOnlyPackage.manifest.resources[0].path === reportPath,
+  "guide-only package did not retain only its referenced resource"
+);
+var companionOnlyPackage = helpers.buildMarkdownPackage(
+  "all", new Set(["companion"])
+);
+assert(
+  companionOnlyPackage.manifest.resources.length === 0,
+  "companion-only package retained unrelated publication resources"
+);
+var plainSupplements = helpers.buildPlainMarkdown(
+  "all", new Set(["source", "guide"])
+);
+assert(
+  plainSupplements.includes("> 报告") &&
+    !plainSupplements.includes(reportPath) &&
+    !plainSupplements.includes("[asset]:"),
+  "plain Markdown did not degrade a quoted local reference link"
+);
+assert(!combined.markdown.includes("新增笔记"), "combined Markdown included an unchecked role");
+var staleRole = helpers.buildMarkdownPackage(
+  "all", new Set(["source", "retired-dynamic-role"])
+);
+assert(
+  staleRole.manifest.selected_content.join(",") === "source",
+  "all-latest manifest retained a role absent from the current selection"
+);
+var changesPackage = helpers.buildMarkdownPackage(
+  "changed", new Set(["source", "translation", "note"])
+);
+var changes = changesPackage.markdown;
+assert(changes.includes("最新译文") && changes.includes("新增笔记"), "changed package omitted selected changes");
+assert(!changes.includes("未改译文") && !changes.includes("one"), "changed package included unchanged or source content");
+assert(
+  changes.includes("## 改动标题") && !changes.includes("## 译文") &&
+    changes.includes("> **笔记**\\n>\\n> 新增笔记") &&
+    changes.includes("> [asset]: " + reportPath) &&
+    changes.includes('<img src="' + htmlPath + '" alt="HTML image">'),
+  "changed package did not preserve translation titles or quote notes"
+);
+assert(
+  changesPackage.manifest.selected_content.join(",") === "translation,note",
+  "changed manifest content selection does not match emitted roles"
+);
+assert(
+  changesPackage.manifest.resources.length === 2 &&
+    changesPackage.manifest.resources.map(function (item) {
+      return item.path;
+    }).join(",") === [reportPath, htmlPath].join(","),
+  "changed package did not limit resources to referenced content"
+);
+var plainChanges = helpers.buildPlainMarkdown(
+  "changed", new Set(["source", "translation", "note"])
+);
+assert(
+  plainChanges.includes("最新译文") && plainChanges.includes("新增笔记"),
+  "plain changed Markdown omitted selected changes"
+);
+assert(
+  !plainChanges.includes("未改译文") && !plainChanges.includes("one"),
+  "plain changed Markdown included unchanged or source content"
+);
+assert(
+  plainChanges.includes("> **笔记**\\n>\\n> 新增笔记"),
+  "plain changed Markdown did not quote note content"
+);
+assert(
+  plainChanges.includes("> 报告") &&
+    !plainChanges.includes(reportPath) && !plainChanges.includes("[asset]:"),
+  "plain changed Markdown retained a quoted local reference dependency"
+);
+assert(
+  plainChanges.includes("[Figure: HTML image]") &&
+    !plainChanges.includes(htmlPath),
+  "plain changed Markdown did not strip a rewritten HTML image"
+);
 var exported = helpers.exportRevisionState();
-assert(exported.revisions.length === 5, "full export omitted a revision history entry");
+assert(exported.revisions.length === 6, "full export omitted a revision history entry");
 assert(
   exported.selected_revision_digests.join(",") === [
     revised.semantic_digest,
     unchanged.semantic_digest,
     companion.semantic_digest,
+    guide.semantic_digest,
     note.semantic_digest
   ].join(","),
   "full export selected digest order changed"
@@ -3147,6 +3340,515 @@ assert(
         capture_output=True,
         text=True,
     )
+
+
+def test_reader_builds_complete_portable_markdown_package_under_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    markdown_it = _text("markdown-it/markdown-it.min.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        "module = undefined; exports = undefined; define = undefined;\n"
+        + markdown_it
+        + "\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcReaderTest = {
+    state: state,
+    setupMarkdown: setupMarkdown,
+    buildMarkdownPackage: buildMarkdownPackage,
+    buildPlainMarkdown: buildPlainMarkdown,
+    buildStoredZip: buildStoredZip,
+    rewriteMarkdownResourceTargets: rewriteMarkdownResourceTargets,
+    markdownReferencedResourcePaths: markdownReferencedResourcePaths,
+    stripPortableMarkdownResources: stripPortableMarkdownResources,
+    portableResourceBasename: portableResourceBasename,
+    portableResourceTarget: portableResourceTarget
+  };
+}());
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function revision(fragmentId, digest, target, body, priority, deleted) {
+  return {
+    schema_version: "alc.render.fragment_revision.v3",
+    fragment_id: fragmentId,
+    revision: 2,
+    parent_semantic_digest: "f".repeat(64),
+    anchor: {
+      kind: "block",
+      target_id: target,
+      related_blocks: [{block_id: target}]
+    },
+    priority: priority,
+    role: "translation",
+    language: "zh-CN",
+    title: null,
+    citation_ids: [],
+    appearance: null,
+    deleted: Boolean(deleted),
+    provenance: {producer: "alc-render-browser"},
+    markdown_body: body,
+    semantic_digest: digest
+  };
+}
+function bytesEqual(left, right) {
+  if (left.length !== right.length) return false;
+  return left.every(function (value, index) { return value === right[index]; });
+}
+function storedZipEntries(bytes) {
+  var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  var decoder = new TextDecoder();
+  var entries = new Map();
+  var offset = 0;
+  while (view.getUint32(offset, true) === 0x04034b50) {
+    var size = view.getUint32(offset + 18, true);
+    var nameSize = view.getUint16(offset + 26, true);
+    var extraSize = view.getUint16(offset + 28, true);
+    var nameStart = offset + 30;
+    var dataStart = nameStart + nameSize + extraSize;
+    var name = decoder.decode(bytes.slice(nameStart, nameStart + nameSize));
+    entries.set(name, {
+      crc32: view.getUint32(offset + 14, true),
+      bytes: bytes.slice(dataStart, dataStart + size)
+    });
+    offset = dataStart + size;
+  }
+  assert(view.getUint32(offset, true) === 0x02014b50, "ZIP central directory is missing");
+  return entries;
+}
+
+var imageDigest = "a".repeat(64);
+var reportDigest = "b".repeat(64);
+var blocks = [
+  {
+    block_id: "heading", ordinal: 0, kind: "heading", payload: {
+      text: "Source title", level: 1
+    }
+  },
+  {
+    block_id: "paragraph", ordinal: 1, kind: "paragraph", payload: {
+      text: "Fallback x report",
+      inline_spans: [
+        {kind: "text", text: "Fallback "},
+        {kind: "math", tex: "x"},
+        {kind: "text", text: " "},
+        {kind: "link", text: "report", target: "report.json"}
+      ]
+    }
+  },
+  {
+    block_id: "list", ordinal: 2, kind: "list", payload: {
+      ordered: false,
+      items: [{text: "one", inline_spans: [{kind: "text", text: "one"}]}]
+    }
+  },
+  {
+    block_id: "code", ordinal: 3, kind: "code", payload: {
+      text: "value = ```", language: "python"
+    }
+  },
+  {
+    block_id: "source-list", ordinal: 4, kind: "list", payload: {
+      ordered: true,
+      items: [{
+        text: "first\ncontinued",
+        inline_spans: [{kind: "text", text: "first\ncontinued"}]
+      }]
+    }
+  },
+  {
+    block_id: "equation", ordinal: 4, kind: "equation", payload: {
+      tex: "y=1", display: true, label: "old"
+    }
+  },
+  {
+    block_id: "table", ordinal: 5, kind: "table", payload: {
+      headers: ["A|B", "C\\D"],
+      rows: [["line 1\nline 2", "value"]],
+      caption: "Source table"
+    }
+  },
+  {
+    block_id: "figure", ordinal: 6, kind: "figure", payload: {
+      asset_digest: imageDigest,
+      alt_text: "A diagram",
+      caption: "Source caption",
+      target: "images/private.png",
+      logical_name: "figure.png"
+    }
+  },
+  {
+    block_id: "linked", ordinal: 7, kind: "paragraph", payload: {
+      text: "Source linked paragraph", inline_spans: []
+    }
+  },
+  {
+    block_id: "page", ordinal: 8, kind: "paragraph", payload: {
+      text: "<!-- PDF_PAGE: 2 -->", inline_spans: []
+    }
+  },
+  {
+    block_id: "comment", ordinal: 9, kind: "paragraph", payload: {
+      text: "<!-- internal parser marker -->", inline_spans: []
+    }
+  }
+];
+var preferredHeading = revision(
+  "translation-heading-a", "1".repeat(64), "heading", "# 译题\n", 10
+);
+var laterHeading = revision(
+  "translation-heading-b", "2".repeat(64), "heading", "# 次选题\n", 10
+);
+var list = revision(
+  "translation-list", "3".repeat(64), "list", "- 甲\n", 10
+);
+var code = revision(
+  "translation-code", "8".repeat(64), "code",
+  "````\nvalue = ```\n````\n", 10
+);
+var equation = revision(
+  "translation-equation", "7".repeat(64), "equation", "$$\ny=1\n$$\n", 10
+);
+var figure = revision(
+  "translation-figure", "4".repeat(64), "figure", "译图注\n", 10
+);
+var linked = revision(
+  "translation-linked", "5".repeat(64), "linked",
+  "参见 [报告](report.json)、[网站](https://example.test) 与 `[_](report.json)`.\n\n" +
+    "![Remote diagram](https://example.test/diagram.png)\n\n" +
+    "<img src=\"report.json\" alt=\"HTML diagram\">\n\n" +
+    "[![Nested remote](https://example.test/nested.png)](report.json)\n\n" +
+    "<img title=\"a > b\" alt=\"Quoted diagram\"> trailing\n\n" +
+    "`<img src=\"report.json\" alt=\"Inline code image\">`\n\n" +
+    "> [quoted-asset]: report.json \"Quoted title\"\n" +
+    "> [quoted-report][quoted-asset]\n\n" +
+    "```text\n[report]: resources/" + reportDigest + "/report.json\n```\n\n" +
+    "[report]\n\n" +
+    "~~~text\n[raw](report.json)\n~~~\n\n    [indent](report.json)\n\n" +
+    "[^asset]: report.json\n",
+  10
+);
+var deletedParagraph = revision(
+  "translation-paragraph", "6".repeat(64), "paragraph", "", 1, true
+);
+var helpers = globalThis.__alcReaderTest;
+helpers.setupMarkdown();
+helpers.state.payload = {
+  publication: {
+    publication_digest: "c".repeat(64),
+    source_document: {
+      document_digest: "d".repeat(64),
+      blocks: blocks,
+      metadata: {
+        equation_label_reconciliation: {
+          equation: {effective_label: "(7)"}
+        },
+        document_notes: {
+          schema_version: "ac.document.document_notes.v1",
+          items: [
+            {kind: "metadata", text: "Metadata note", before_block_id: "code"},
+            {kind: "metadata", text: "Marker-bound note", before_block_id: "page"},
+            {kind: "source_page", page_number: 2, before_block_id: "code"}
+          ]
+        }
+      }
+    },
+    outline: [],
+    glossary: [
+      {entry_id: "term-reader", term: "Reader", translated_term: "读者", definition: "阅读者", anchor_ids: ["paragraph"], citations: []},
+      {entry_id: "term-opaque", extra: "kept"}
+    ],
+    bibliography: [
+      {evidence_id: "ref-1", title: "Reference", source: "https://example.test/ref", dois: ["10.1/x"], arxiv_ids: ["1234.5678"], cached_document: null},
+      {evidence_id: "ref-alias", title: "Duplicate", source: "https://example.test/ref/", dois: ["10.1/x", "10.2/y"], arxiv_ids: ["1234.5678"]},
+      {title: "Title only", year: 2024},
+      {title: "Title only", year: 2025},
+      {opaque: "reference-data"}
+    ],
+    labels: {document_title: "Portable", glossary: "术语表", references: "参考文献"},
+    reader_profile: {title: "Portable", target_language: "zh-CN"}
+  },
+  source_identity: {rich_document_digest: "d".repeat(64)},
+  resources: [
+    {
+      artifact_digest: imageDigest,
+      media_type: "image/png",
+      logical_name: "figure.png",
+      size: 2,
+      data_uri: "data:image/png;base64,AAE="
+    },
+    {
+      artifact_digest: reportDigest,
+      media_type: "application/json",
+      logical_name: "report.json",
+      size: 3,
+      data_uri: "data:application/json;base64,e30K"
+    }
+  ]
+};
+helpers.state.selected = new Map([
+  [laterHeading.fragment_id, laterHeading],
+  [preferredHeading.fragment_id, preferredHeading],
+  [list.fragment_id, list],
+  [code.fragment_id, code],
+  [equation.fragment_id, equation],
+  [figure.fragment_id, figure],
+  [linked.fragment_id, linked],
+  [deletedParagraph.fragment_id, deletedParagraph]
+]);
+
+(async function () {
+  var localeCompare = String.prototype.localeCompare;
+  String.prototype.localeCompare = function () {
+    throw new Error("portable export used locale-sensitive ordering");
+  };
+  var first;
+  var second;
+  try {
+    first = helpers.buildMarkdownPackage(
+      "all", new Set(["translation", "glossary", "references"])
+    );
+    second = helpers.buildMarkdownPackage(
+      "all", new Set(["translation", "glossary", "references"])
+    );
+  } finally {
+    String.prototype.localeCompare = localeCompare;
+  }
+  var markdown = first.markdown;
+  var imagePath = "resources/" + imageDigest + "/figure.png";
+  var reportPath = "resources/" + reportDigest + "/report.json";
+  assert(markdown.startsWith("# 译题\n"), "preferred translated heading was not first");
+  assert(!markdown.includes("次选题"), "lower-precedence translation was exported");
+  assert(markdown.includes("Fallback $x$ [report](" + reportPath + ")"), "source fallback lost inline structure");
+  assert(markdown.includes("- 甲"), "selected list translation was omitted");
+  assert(markdown.includes("1. first\n   continued"), "source list continuation indentation is wrong");
+  assert(markdown.includes("````python\nvalue = ```\n````"), "source code fence was not preserved");
+  assert(markdown.includes("$$\ny=1\n$$\n\nEquation label: (7)"), "effective equation label was omitted");
+  assert(markdown.includes("| A\\|B | C\\\\D |"), "table headers were not escaped");
+  assert(markdown.includes("| line 1<br>line 2 | value |"), "table newlines were not portable");
+  assert(markdown.includes("![A diagram](" + imagePath + ")"), "figure resource path was not packaged");
+  assert(markdown.includes("译图注") && !markdown.includes("Source caption"), "translated figure caption was not recombined");
+  assert(markdown.includes("[报告](" + reportPath + ")"), "fragment resource link was not rewritten");
+  assert(
+    markdown.includes("> [quoted-asset]: " + reportPath + " \"Quoted title\"") &&
+      markdown.includes("> [quoted-report][quoted-asset]"),
+    "blockquote reference definition was not rewritten"
+  );
+  assert(markdown.includes("[网站](https://example.test)"), "external link was rewritten");
+  assert(markdown.includes("`[_](report.json)`"), "inline code was rewritten");
+  assert(markdown.includes("[raw](report.json)"), "fenced code was rewritten");
+  assert(markdown.includes("    [indent](report.json)"), "indented code was rewritten");
+  assert(markdown.includes("[^asset]: report.json"), "footnote definition was rewritten");
+  assert(markdown.includes("> Metadata note") && !markdown.includes("Document page"), "document-note boundary changed");
+  assert(markdown.includes("> Marker-bound note"), "note before a technical marker was dropped");
+  assert(!markdown.includes("PDF_PAGE") && !markdown.includes("internal parser marker"), "technical marker leaked into Markdown");
+  assert(markdown.includes("## 术语表") && markdown.includes("Reader / 读者"), "glossary was omitted");
+  assert(markdown.includes('"extra":"kept"'), "unknown glossary data was dropped");
+  assert(!markdown.includes('"anchor_ids"'), "glossary leaked internal anchor metadata");
+  assert(markdown.includes("## 参考文献"), "bibliography was omitted");
+  assert(!markdown.includes('"cached_document"'), "bibliography leaked internal cache metadata");
+  assert(markdown.includes('"opaque":"reference-data"'), "unknown bibliography data was dropped");
+  assert((markdown.match(/[*][*]Title only[*][*]/g) || []).length === 2, "title-only references collapsed");
+  assert(markdown.includes("DOI: 10.2/y"), "bibliography aliases lost a DOI");
+  assert(markdown.match(/https:\/\/example[.]test\/ref/g).length === 1, "bibliography aliases were not deduplicated");
+
+  var manifest = first.manifest;
+  assert(manifest.schema_version === "alc.render.markdown_export.v1", "manifest schema is wrong");
+  assert(manifest.document === "document.md", "manifest document path is wrong");
+  assert(
+    manifest.selected_content.join(",") === "translation,glossary,references",
+    "default complete package did not retain appendix selections"
+  );
+  assert(manifest.resources.length === 2, "manifest omitted a referenced resource");
+  assert(manifest.selected_translation_revision_digests.join(",") === [
+    preferredHeading.semantic_digest,
+    list.semantic_digest,
+    code.semantic_digest,
+    equation.semantic_digest,
+    figure.semantic_digest,
+    linked.semantic_digest
+  ].join(","), "manifest translation selection is not in source order");
+  assert(
+    manifest.selected_revision_digests.join(",") ===
+      manifest.selected_translation_revision_digests.join(","),
+    "complete manifest did not expose all selected revisions"
+  );
+
+  var bilingual = helpers.buildMarkdownPackage(
+    "all", new Set(["source", "translation"])
+  );
+  assert(
+    bilingual.manifest.selected_content.join(",") === "source,translation",
+    "combined manifest content selection is wrong"
+  );
+  assert(
+    (bilingual.markdown.match(/[*][*]译文(?: ·[^*]+)?[*][*]/g) || []).length === 0,
+    "combined Markdown included a translation role label"
+  );
+  assert(
+    bilingual.markdown.includes("Source caption") &&
+      bilingual.markdown.includes("译图注"),
+    "combined source and translation figure captions were not both exported"
+  );
+  assert(
+    bilingual.markdown.split("![A diagram](" + imagePath + ")").length === 2,
+    "combined source and translation duplicated the figure asset"
+  );
+  assert(
+    !bilingual.markdown.includes("## 术语表") &&
+      !bilingual.markdown.includes("## 参考文献"),
+    "unchecked appendices were included in combined Markdown"
+  );
+  var glossaryOnlyPackage = helpers.buildMarkdownPackage(
+    "all", new Set(["glossary"])
+  );
+  var glossaryOnly = glossaryOnlyPackage.markdown;
+  assert(
+    glossaryOnly.startsWith("## 术语表") &&
+      !glossaryOnly.includes("Source title") &&
+      !glossaryOnly.includes("## 参考文献"),
+    "glossary-only export included document or bibliography content"
+  );
+  assert(
+    glossaryOnlyPackage.manifest.resources.length === 0,
+    "glossary-only package retained unrelated publication resources"
+  );
+  var referencesOnlyPackage = helpers.buildMarkdownPackage(
+    "all", new Set(["references"])
+  );
+  var referencesOnly = referencesOnlyPackage.markdown;
+  assert(
+    referencesOnly.startsWith("## 参考文献") &&
+      !referencesOnly.includes("Source title") &&
+      !referencesOnly.includes("## 术语表"),
+    "references-only export included document or glossary content"
+  );
+  assert(
+    referencesOnlyPackage.manifest.resources.length === 0,
+    "references-only package retained unrelated publication resources"
+  );
+  var plain = helpers.buildPlainMarkdown(
+    "all", new Set(["translation"])
+  );
+  assert(!plain.includes("!["), "plain Markdown retained image syntax");
+  assert(
+    !plain.includes("## 术语表") && !plain.includes("## 参考文献"),
+    "plain Markdown included unchecked appendices"
+  );
+  assert(
+    !plain.includes(imagePath) && !plain.includes("](" + reportPath + ")"),
+    "plain Markdown retained a packaged resource dependency"
+  );
+  assert(
+      plain.includes("[Figure: A diagram]") &&
+      plain.includes("[Figure: Remote diagram]") &&
+      plain.includes("[Figure: HTML diagram]") && plain.includes("译图注"),
+    "plain Markdown lost the readable figure description or caption"
+  );
+  assert(
+    plain.includes("[Figure: Nested remote]") &&
+      plain.includes("[Figure: Quoted diagram] trailing") &&
+      !plain.includes('title="a > b"'),
+    "plain Markdown retained a nested or quoted-attribute image"
+  );
+  assert(
+    plain.includes("\n[report]\n"),
+    "a fenced pseudo reference definition changed plain body text"
+  );
+  assert(
+    plain.includes("参见 报告、[网站](https://example.test)") &&
+      plain.includes("`[_](report.json)`") &&
+      plain.includes("`<img src=\"report.json\" alt=\"Inline code image\">`") &&
+      plain.includes("[raw](report.json)") &&
+      plain.includes("    [indent](report.json)"),
+    "plain Markdown did not degrade local links or preserve external/code links"
+  );
+
+  assert(first.archive.type === "application/zip", "archive media type is wrong");
+  var firstBytes = new Uint8Array(await first.archive.arrayBuffer());
+  var secondBytes = new Uint8Array(await second.archive.arrayBuffer());
+  assert(bytesEqual(firstBytes, secondBytes), "identical exports were not byte deterministic");
+  var entries = storedZipEntries(firstBytes);
+  assert(entries.size === 4, "ZIP entry count is wrong");
+  assert(entries.has("document.md") && entries.has("manifest.json"), "ZIP metadata files are missing");
+  assert(entries.has(imagePath) && entries.has(reportPath), "ZIP resource entries are missing");
+  assert(entries.get(imagePath).crc32 === 0x36de2269, "ZIP entry CRC-32 is wrong");
+  assert(bytesEqual(entries.get(imagePath).bytes, new Uint8Array([0, 1])), "image bytes changed");
+  assert(new TextDecoder().decode(entries.get(reportPath).bytes) === "{}\n", "report bytes changed");
+  var rejectedLongName = false;
+  try {
+    helpers.buildStoredZip([{
+      path: "x".repeat(0x10000),
+      bytes: new Uint8Array([1])
+    }]);
+  } catch (_error) {
+    rejectedLongName = true;
+  }
+  assert(rejectedLongName, "ZIP accepted a filename larger than its 16-bit field");
+  assert(
+    helpers.portableResourceBasename("figure #1(draft).png") ===
+      "figure--1-draft-.png",
+    "portable basename retained Markdown or URL delimiters"
+  );
+  assert(
+    Array.from(
+      helpers.portableResourceBasename("a😀" + "b".repeat(159))
+    )[0] === "😀",
+    "portable basename split an astral Unicode character"
+  );
+  var navigationAliases = new Map([
+    ["https://example.test", "resources/external"],
+    ["#section", "resources/anchor"],
+    ["/absolute", "resources/absolute"],
+    ["?query", "resources/query"],
+    ["report.json", reportPath]
+  ]);
+  ["https://example.test", "#section", "/absolute", "?query"].forEach(
+    function (target) {
+      assert(
+        helpers.portableResourceTarget(target, navigationAliases) === target,
+        "navigation target was rewritten as a resource"
+      );
+    }
+  );
+  assert(
+    helpers.portableResourceTarget("report.json", navigationAliases) === reportPath,
+    "relative resource alias was not rewritten"
+  );
+  console.log(Buffer.from(firstBytes).toString("base64"));
+})().catch(function (error) {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+'''
+    )
+
+    completed = subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    archive = base64.b64decode(completed.stdout.strip(), validate=True)
+    with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+        assert bundle.testzip() is None
+        assert bundle.namelist() == [
+            "document.md",
+            "manifest.json",
+            f"resources/{'a' * 64}/figure.png",
+            f"resources/{'b' * 64}/report.json",
+        ]
+        assert bundle.read(f"resources/{'a' * 64}/figure.png") == b"\x00\x01"
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert manifest["schema_version"] == "alc.render.markdown_export.v1"
 
 
 def test_reader_scans_nested_revision_directories_with_bounded_concurrency() -> None:
@@ -3278,7 +3980,8 @@ helpers.state.payload = {
       }]
     },
     outline: [],
-    bibliography: [],
+    glossary: [{term: "Reader", translated_term: "读者", definition: "A reader"}],
+    bibliography: [{evidence_id: "ref-1", title: "Reference"}],
     labels: {},
     reader_profile: {title: "Reader", target_language: "en"}
   }
@@ -3288,9 +3991,12 @@ helpers.state.activeFragmentIds = new Set();
 helpers.state.readerShellReady = false;
 helpers.state.initialSelectedDigests = new Map();
 
-var roleButtons = [];
+globalThis.print = function () {};
+var contentOptions = [];
 var scopeInput = {value: "changed", checked: true, disabled: false};
 var otherScopeInput = {value: "all", checked: false, disabled: false};
+var packageModeInput = {value: "package", checked: true, disabled: false};
+var fileModeInput = {value: "file", checked: false, disabled: false};
 var nodes = {
   "alc-export": {
     attrs: {},
@@ -3298,11 +4004,13 @@ var nodes = {
   },
   "alc-export-panel": {hidden: true},
   "alc-export-role-options": {
-    replaceChildren: function () { roleButtons = []; },
-    appendChild: function (child) { roleButtons.push(child); }
+    replaceChildren: function () { contentOptions = []; },
+    appendChild: function (child) { contentOptions.push(child); }
   },
-  "alc-export-empty": {hidden: true},
+  "alc-export-markdown-package": {disabled: false, hidden: false},
+  "alc-export-markdown-label": {textContent: ""},
   "alc-export-html": {disabled: false, hidden: false},
+  "alc-export-pdf": {disabled: false, hidden: false},
   "alc-storage-status": {textContent: "", dataset: {}, hidden: true}
 };
 globalThis.document = {
@@ -3311,19 +4019,31 @@ globalThis.document = {
     if (selector.includes("alc-export-scope")) {
       return scopeInput.checked ? scopeInput : otherScopeInput;
     }
+    if (selector.includes("alc-export-markdown-mode")) {
+      return fileModeInput.checked ? fileModeInput : packageModeInput;
+    }
     throw new Error("unexpected selector: " + selector);
   },
   querySelectorAll: function (selector) {
     if (selector.includes("alc-export-scope")) {
       return [scopeInput, otherScopeInput];
     }
+    if (selector.includes("alc-export-markdown-mode")) {
+      return [packageModeInput, fileModeInput];
+    }
     throw new Error("unexpected selector: " + selector);
   },
   createElement: function (tag) {
     return {
       tagName: tag,
+      children: [],
+      textContent: "",
       disabled: false,
-      addEventListener: function () {}
+      addEventListener: function () {},
+      appendChild: function (child) {
+        this.children.push(child);
+        if (child.textContent) this.textContent += child.textContent;
+      }
     };
   }
 };
@@ -3371,23 +4091,64 @@ globalThis.document = {
     }
   };
   helpers.state.exportStandaloneSupported = true;
-  assert(roleButtons.length === 0, "fixture unexpectedly started with a role");
+  assert(contentOptions.length === 0, "fixture unexpectedly started with content options");
   await helpers.openExportPanel();
   assert(
     helpers.state.selected.get("external-note").semantic_digest === digest,
     "opening export did not synchronize the external latest revision"
   );
   assert(
-    roleButtons.length === 1 && roleButtons[0].textContent === "Note => MD",
-    "export roles were rendered before the synchronized selection"
+    contentOptions.length === 4 &&
+      contentOptions[0].textContent === "Source" &&
+      contentOptions[1].textContent === "Note" &&
+      contentOptions[2].textContent === "Glossary" &&
+      contentOptions[3].textContent === "References",
+    "export content options were not rendered after synchronization"
+  );
+  assert(
+    contentOptions[0].children[0].checked &&
+      contentOptions[0].children[0].disabled,
+    "changed-only scope did not retain and disable the source selection"
+  );
+  assert(
+    contentOptions[1].children[0].checked &&
+      !contentOptions[1].children[0].disabled,
+    "changed note was not selected and available"
+  );
+  assert(
+    contentOptions[2].children[0].checked &&
+      contentOptions[2].children[0].disabled &&
+      contentOptions[3].children[0].checked &&
+      contentOptions[3].children[0].disabled,
+    "changed-only scope did not retain and disable appendix selections"
   );
   assert(
     nodes["alc-export"].attrs["aria-expanded"] === "true",
     "synchronized export panel did not remain open"
   );
   assert(
-    nodes["alc-export-html"].hidden,
-    "changed-only Markdown scope exposed the full HTML action"
+    !nodes["alc-export-html"].hidden && !nodes["alc-export-html"].disabled,
+    "Markdown scope incorrectly changed the independent HTML action"
+  );
+  assert(
+    !nodes["alc-export-pdf"].hidden && !nodes["alc-export-pdf"].disabled,
+    "Markdown scope incorrectly changed the independent PDF action"
+  );
+  assert(
+    !nodes["alc-export-markdown-package"].hidden &&
+      !nodes["alc-export-markdown-package"].disabled,
+    "changed-only Markdown package was not available for a checked change"
+  );
+  assert(
+    nodes["alc-export-markdown-label"].textContent === "Export Markdown",
+    "default package mode did not use the generic Markdown action label"
+  );
+  packageModeInput.checked = false;
+  fileModeInput.checked = true;
+  helpers.renderExportOptions();
+  assert(
+    nodes["alc-export-markdown-label"].textContent === "Export Markdown",
+    "single-file mode changed the generic Markdown action label"
   );
   scopeInput.checked = false;
   otherScopeInput.checked = true;
@@ -3395,6 +4156,21 @@ globalThis.document = {
   assert(
     !nodes["alc-export-html"].hidden && !nodes["alc-export-html"].disabled,
     "all-latest scope did not restore the full HTML action"
+  );
+  assert(
+    !nodes["alc-export-markdown-package"].hidden &&
+      !nodes["alc-export-markdown-package"].disabled,
+    "all-latest scope did not restore the complete package action"
+  );
+  assert(
+    contentOptions[0].children[0].checked &&
+      !contentOptions[0].children[0].disabled,
+    "all-latest scope did not restore the retained source selection"
+  );
+  assert(
+    !contentOptions[2].children[0].disabled &&
+      !contentOptions[3].children[0].disabled,
+    "all-latest scope did not restore appendix selections"
   );
 })().catch(function (error) {
   console.error(error.stack || error);

@@ -70,6 +70,8 @@
     directorySelectionInProgress: false,
     saveInProgress: false,
     exportInProgress: false,
+    exportMarkdownRoles: null,
+    exportMarkdownKnownRoles: new Set(),
     activeDraft: null,
     editorGeneration: 0,
     editorPreviewDirty: true,
@@ -489,11 +491,27 @@
       speechProgress: traditional ?
         "第 {current}/{total} 段" : "第 {current}/{total} 段",
       export: "导出",
-      markdownScope: "Markdown 内容",
-      allLatest: "全部最新版",
-      changedLatest: "仅最新版改动",
+      exportPanelHeading: "导出内容",
+      markdownScope: "导出范围",
+      markdownContent: "包含内容",
+      markdownOutput: "输出方式",
+      singleMarkdown: "单个 Markdown",
+      markdownPackage: traditional ? "Markdown 套件" : "Markdown 包",
+      allLatest: "全部",
+      changedLatest: traditional ? "僅最新改動" : "仅最新改动",
       noExportChanges: "没有可导出的改动",
-      fullHtml: "全文 => 单个 HTML",
+      selectExportContent: "请至少选择一项可导出的内容",
+      fullMarkdown: traditional ?
+        "导出Markdown" : "导出Markdown",
+      exportMarkdownFile: "导出Markdown",
+      htmlExport: "HTML",
+      htmlExportDescription: "导出包含完整交互功能的单个阅读器文件。",
+      fullHtml: "导出HTML",
+      pdfExport: "PDF",
+      pdfExportDescription: "打印当前显示的阅读器内容，也可在浏览器中保存为 PDF。",
+      printPdf: "导出PDF",
+      printOpened: "已打开打印对话框。",
+      changedContent: "最新版改动",
       exportUnavailable: "当前页面不是完整的单文件阅读器，无法导出单个 HTML。",
       exportLoading: "正在同步最新版内容……",
       exportSyncFailed: "未能同步最新版内容，导出已取消。",
@@ -613,11 +631,26 @@
       speechError: "Speech failed: ",
       speechProgress: "Paragraph {current} of {total}",
       export: "Export",
-      markdownScope: "Markdown content",
+      exportPanelHeading: "Export content",
+      markdownScope: "Export range",
+      markdownContent: "Include",
+      markdownOutput: "Output",
+      singleMarkdown: "Single Markdown",
+      markdownPackage: "Markdown package",
       allLatest: "All latest",
       changedLatest: "Latest changes only",
       noExportChanges: "No changed content to export",
-      fullHtml: "Full text => Single HTML",
+      selectExportContent: "Select at least one available content type",
+      fullMarkdown: "Export Markdown package",
+      exportMarkdownFile: "Export Markdown",
+      htmlExport: "HTML",
+      htmlExportDescription: "Export the complete interactive Reader as one file.",
+      fullHtml: "Export HTML",
+      pdfExport: "PDF",
+      pdfExportDescription: "Print the currently visible Reader, or save it as PDF in the browser.",
+      printPdf: "Export PDF",
+      printOpened: "Print dialog opened.",
+      changedContent: "Latest changes",
       exportUnavailable: "This page is not a complete standalone reader and cannot export a single HTML file.",
       exportLoading: "Synchronizing latest content…",
       exportSyncFailed: "Latest content could not be synchronized; export was cancelled.",
@@ -674,6 +707,21 @@
   function labelToolButton(button, label) {
     button.setAttribute("aria-label", label);
     button.title = label;
+  }
+
+  function positionToolPanel(panel) {
+    if (
+      !panel || panel.hidden || !panel.style ||
+      typeof panel.getBoundingClientRect !== "function"
+    ) return;
+    var viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    panel.style.maxWidth = Math.max(0, viewportWidth - 16) + "px";
+    panel.style.transform = "";
+    var rectangle = panel.getBoundingClientRect();
+    var overflow = rectangle.right - (viewportWidth - 8);
+    if (overflow > 0) {
+      panel.style.transform = "translateX(-" + overflow + "px)";
+    }
   }
 
   function boundedReaderNumber(value, fallback, minimum, maximum) {
@@ -1333,16 +1381,7 @@
 
   function canonicalizeLegacyDisplayMath(markdown) {
     var normalized = normalizeMarkdown(markdown);
-    var codeLines = new Set();
-    state.md.parse(normalized, {}).forEach(function (token) {
-      if (
-        ["fence", "code_block"].indexOf(token.type) < 0 ||
-        !Array.isArray(token.map)
-      ) return;
-      for (var index = token.map[0]; index < token.map[1]; index += 1) {
-        codeLines.add(index);
-      }
-    });
+    var codeLines = markdownCodeLineIndexes(normalized);
     var output = [];
     normalized.split("\n").forEach(function (line, lineNumber) {
       if (codeLines.has(lineNumber)) {
@@ -4869,18 +4908,45 @@
     var trigger = document.getElementById("alc-export");
     var panel = document.getElementById("alc-export-panel");
     labelToolButton(trigger, strings.export);
+    document.getElementById("alc-export-heading").textContent =
+      strings.exportPanelHeading;
+    document.getElementById("alc-export-markdown-heading").textContent =
+      strings.markdown;
     document.getElementById("alc-export-scope-label").textContent =
       strings.markdownScope;
+    document.getElementById("alc-export-content-label").textContent =
+      strings.markdownContent;
+    document.getElementById("alc-export-markdown-mode-label").textContent =
+      strings.markdownOutput;
+    document.getElementById("alc-export-markdown-file-label").textContent =
+      strings.singleMarkdown;
+    document.getElementById("alc-export-markdown-package-label").textContent =
+      strings.markdownPackage;
     document.getElementById("alc-export-all-label").textContent =
       strings.allLatest;
     document.getElementById("alc-export-changed-label").textContent =
       strings.changedLatest;
-    document.getElementById("alc-export-empty").textContent =
-      strings.noExportChanges;
+    var markdownPackageButton = document.getElementById(
+      "alc-export-markdown-package"
+    );
+    document.getElementById("alc-export-markdown-label").textContent =
+      strings.fullMarkdown;
     var htmlButton = document.getElementById("alc-export-html");
-    htmlButton.textContent = strings.fullHtml;
+    document.getElementById("alc-export-html-heading").textContent =
+      strings.htmlExport;
+    document.getElementById("alc-export-html-description").textContent =
+      strings.htmlExportDescription;
+    document.getElementById("alc-export-html-label").textContent =
+      strings.fullHtml;
     htmlButton.title = state.exportStandaloneSupported ? "" :
       strings.exportUnavailable;
+    var pdfButton = document.getElementById("alc-export-pdf");
+    document.getElementById("alc-export-pdf-heading").textContent =
+      strings.pdfExport;
+    document.getElementById("alc-export-pdf-description").textContent =
+      strings.pdfExportDescription;
+    document.getElementById("alc-export-pdf-label").textContent =
+      strings.printPdf;
     trigger.addEventListener("click", function () {
       if (panel.hidden) {
         openExportPanel();
@@ -4891,9 +4957,19 @@
     document.getElementById("alc-export-scope").addEventListener(
       "change", renderExportOptions
     );
+    document.getElementById("alc-export-markdown-mode").addEventListener(
+      "change", renderExportOptions
+    );
+    markdownPackageButton.addEventListener("click", function () {
+      runExport({kind: "markdown-package"});
+    });
     htmlButton.addEventListener("click", function () {
       runExport({kind: "html"});
     });
+    pdfButton.addEventListener("click", function () {
+      runExport({kind: "pdf"});
+    });
+    window.addEventListener("resize", function () { positionToolPanel(panel); });
     document.addEventListener("click", function (event) {
       if (!panel.hidden && !control.contains(event.target)) closeExportPanel(false);
     });
@@ -4924,6 +5000,7 @@
     loadAllPayload(false);
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
+    positionToolPanel(panel);
     if (!state.directory) {
       renderExportOptions();
       return;
@@ -4957,6 +5034,13 @@
     return checked && checked.value === "changed" ? "changed" : "all";
   }
 
+  function markdownOutputMode() {
+    var checked = document.querySelector(
+      'input[name="alc-export-markdown-mode"]:checked'
+    );
+    return checked && checked.value === "file" ? "file" : "package";
+  }
+
   function selectedForMarkdown(scope) {
     var values = Array.from(state.selected.values()).filter(fragmentIsVisible);
     if (scope === "changed") {
@@ -4970,40 +5054,72 @@
 
   function renderExportOptions() {
     var root = document.getElementById("alc-export-role-options");
-    var empty = document.getElementById("alc-export-empty");
     root.replaceChildren();
-    var roles = Array.from(new Set(selectedForMarkdown(exportScope()).map(
-      function (revision) { return revision.role; }
-    )));
-    var preferred = ["translation", "companion", "guide", "note"];
-    roles.sort(function (left, right) {
-      var leftIndex = preferred.indexOf(left);
-      var rightIndex = preferred.indexOf(right);
-      if (leftIndex < 0) leftIndex = preferred.length;
-      if (rightIndex < 0) rightIndex = preferred.length;
-      return leftIndex - rightIndex || left.localeCompare(right);
-    });
+    var availableRoles = ["source"].concat(
+      selectedForMarkdown("all").map(function (revision) {
+        return revision.role;
+      })
+    );
+    var publication = state.payload.publication;
+    if ((publication.glossary || []).length) availableRoles.push("glossary");
+    if ((publication.bibliography || []).length) availableRoles.push("references");
+    var roles = orderedExportCategories(new Set(availableRoles));
+    if (!state.exportMarkdownRoles) state.exportMarkdownRoles = new Set();
     roles.forEach(function (role) {
-      var button = element("button", "", roleLabel(role) + " => MD");
-      button.type = "button";
-      button.disabled = state.exportInProgress;
-      button.addEventListener("click", function () {
-        runExport({kind: "markdown", role: role});
-      });
-      root.appendChild(button);
+      if (!state.exportMarkdownKnownRoles.has(role)) {
+        state.exportMarkdownKnownRoles.add(role);
+        state.exportMarkdownRoles.add(role);
+      }
     });
-    empty.hidden = roles.length > 0 || exportScope() !== "changed";
+    var changedRoles = new Set(selectedForMarkdown("changed").map(
+      function (revision) { return revision.role; }
+    ));
+    var changedOnly = exportScope() === "changed";
+    var usableRoles = [];
+    roles.forEach(function (role) {
+      var label = element("label", "alc-export-content-option");
+      var input = element("input");
+      input.type = "checkbox";
+      input.value = role;
+      input.checked = state.exportMarkdownRoles.has(role);
+      var unavailable = changedOnly && (
+        role === "source" || !changedRoles.has(role)
+      );
+      input.disabled = state.exportInProgress || unavailable;
+      input.addEventListener("change", function () {
+        if (input.checked) state.exportMarkdownRoles.add(role);
+        else state.exportMarkdownRoles.delete(role);
+        renderExportOptions();
+      });
+      label.appendChild(input);
+      label.appendChild(element("span", "", roleLabel(role)));
+      root.appendChild(label);
+      if (input.checked && !unavailable) usableRoles.push(role);
+    });
     var scopeControls = document.querySelectorAll(
       'input[name="alc-export-scope"]'
     );
     Array.prototype.forEach.call(scopeControls, function (input) {
       input.disabled = state.exportInProgress;
     });
+    var modeControls = document.querySelectorAll(
+      'input[name="alc-export-markdown-mode"]'
+    );
+    Array.prototype.forEach.call(modeControls, function (input) {
+      input.disabled = state.exportInProgress;
+    });
     var htmlButton = document.getElementById("alc-export-html");
-    var changedOnly = exportScope() === "changed";
-    htmlButton.hidden = changedOnly;
-    htmlButton.disabled = changedOnly || state.exportInProgress ||
+    var markdownPackageButton = document.getElementById(
+      "alc-export-markdown-package"
+    );
+    document.getElementById("alc-export-markdown-label").textContent =
+      labels().exportMarkdownFile;
+    markdownPackageButton.disabled = state.exportInProgress || !usableRoles.length;
+    htmlButton.disabled = state.exportInProgress ||
       !state.exportStandaloneSupported;
+    var pdfButton = document.getElementById("alc-export-pdf");
+    pdfButton.disabled = state.exportInProgress ||
+      typeof window.print !== "function";
   }
 
   async function runExport(request) {
@@ -5022,25 +5138,38 @@
     state.exportInProgress = true;
     renderExportOptions();
     try {
-      loadAllPayload(request.kind === "html");
+      loadAllPayload(request.kind !== "markdown-package");
       if (state.directory) {
         setStatus(labels().exportLoading);
         if (!await loadDirectoryRevisions(state.directory)) {
           throw new Error(labels().exportSyncFailed);
         }
       }
-      if (request.kind === "markdown") {
-        var markdown = buildRoleMarkdown(request.role, exportScope());
-        if (!markdown) {
-          setStatus(labels().noExportChanges);
+      var successStatus = labels().exportStarted;
+      if (request.kind === "markdown-package") {
+        var scope = exportScope();
+        var markdownMode = markdownOutputMode();
+        var complete = markdownMode === "file" ?
+          buildPlainMarkdown(scope, state.exportMarkdownRoles) :
+          buildMarkdownPackage(scope, state.exportMarkdownRoles);
+        if (!complete) {
+          setStatus(scope === "changed" ?
+            labels().noExportChanges : labels().selectExportContent);
           return;
         }
-        downloadText(
-          exportFilename(request.role, "md"),
-          markdown,
-          "text/markdown;charset=utf-8"
-        );
-      } else {
+        if (markdownMode === "file") {
+          downloadText(
+            exportFilename(scope === "changed" ? "changes" : "latest", "md"),
+            complete,
+            "text/markdown;charset=utf-8"
+          );
+        } else {
+          downloadBlob(
+            exportFilename(scope === "changed" ? "changes" : "complete", "zip"),
+            complete.archive
+          );
+        }
+      } else if (request.kind === "html") {
         if (!state.exportStandaloneSupported) {
           throw new Error(labels().exportUnavailable);
         }
@@ -5049,9 +5178,14 @@
           buildStandaloneExportHtml(),
           "text/html;charset=utf-8"
         );
+      } else {
+        renderAllChunks();
+        closeExportPanel(false);
+        window.print();
+        successStatus = labels().printOpened;
       }
-      closeExportPanel(false);
-      setStatus(labels().exportStarted);
+      if (request.kind !== "pdf") closeExportPanel(false);
+      setStatus(successStatus);
     } catch (error) {
       setStatus(String(error.message || error), "error");
     } finally {
@@ -5060,30 +5194,1437 @@
     }
   }
 
-  function buildRoleMarkdown(role, scope) {
-    var revisions = selectedForMarkdown(scope).filter(function (revision) {
-      return revision.role === role;
+  function orderedExportCategories(categories) {
+    var preferred = [
+      "source", "translation", "guide", "companion", "note",
+      "glossary", "references"
+    ];
+    return Array.from(categories || []).sort(function (left, right) {
+      var leftIndex = preferred.indexOf(left);
+      var rightIndex = preferred.indexOf(right);
+      if (leftIndex < 0) leftIndex = preferred.length;
+      if (rightIndex < 0) rightIndex = preferred.length;
+      return leftIndex - rightIndex || comparePortableText(left, right);
     });
-    if (!revisions.length) return "";
-    var blockOrder = new Map(
-      (state.payload.publication.source_document.blocks || []).map(
-        function (block, index) { return [block.block_id, index]; }
-      )
+  }
+
+  function selectedMarkdownCategories(scope, selectedCategories) {
+    var categories = new Set(selectedCategories || []);
+    if (scope === "changed") {
+      var changedRoles = new Set(selectedForMarkdown("changed").map(
+        function (revision) { return revision.role; }
+      ));
+      categories = new Set(Array.from(categories).filter(function (role) {
+        return role !== "source" && changedRoles.has(role);
+      }));
+    } else {
+      var availableValues = ["source"].concat(
+        selectedForMarkdown("all").map(function (revision) {
+          return revision.role;
+        })
+      );
+      var publication = state.payload.publication;
+      if ((publication.glossary || []).length) availableValues.push("glossary");
+      if ((publication.bibliography || []).length) {
+        availableValues.push("references");
+      }
+      var availableRoles = new Set(availableValues);
+      categories = new Set(Array.from(categories).filter(function (role) {
+        return availableRoles.has(role);
+      }));
+    }
+    return categories;
+  }
+
+  function buildMarkdownPackage(scope, selectedCategories) {
+    var categories = selectedMarkdownCategories(scope, selectedCategories);
+    if (!categories.size) return null;
+    var resourceValues = state.payload.resources || [];
+    var resourcePaths = portableMarkdownResourcePaths(resourceValues);
+    var complete = scope === "changed" ?
+      buildChangedMarkdown(resourcePaths, categories) :
+      buildCompleteMarkdown(resourcePaths, categories);
+    if (!complete.markdown) return null;
+    var includedResourcePaths = markdownReferencedResourcePaths(
+      complete.markdown, resourcePaths
     );
+    var resources = portableMarkdownResources(
+      resourceValues, includedResourcePaths
+    );
+    var publication = state.payload.publication;
+    var manifest = {
+      schema_version: "alc.render.markdown_export.v1",
+      document: "document.md",
+      scope: scope === "changed" ? "changed" : "all",
+      selected_content: orderedExportCategories(categories),
+      publication_digest: publication.publication_digest || null,
+      source_identity: state.payload.source_identity || null,
+      selected_revision_digests: complete.selectedRevisionDigests,
+      selected_translation_revision_digests:
+        complete.selectedTranslationDigests,
+      resources: resources.manifest
+    };
+    var files = [
+      {path: "document.md", bytes: utf8Bytes(complete.markdown)},
+      {
+        path: "manifest.json",
+        bytes: utf8Bytes(JSON.stringify(manifest, null, 2) + "\n")
+      }
+    ].concat(resources.files);
+    return {
+      markdown: complete.markdown,
+      manifest: manifest,
+      archive: buildStoredZip(files)
+    };
+  }
+
+  function buildPlainMarkdown(scope, selectedCategories) {
+    var categories = selectedMarkdownCategories(scope, selectedCategories);
+    if (!categories.size) return "";
+    var resourcePaths = portableMarkdownResourcePaths(
+      state.payload.resources || []
+    );
+    var complete = scope === "changed" ?
+      buildChangedMarkdown(resourcePaths, categories) :
+      buildCompleteMarkdown(resourcePaths, categories);
+    if (!complete.markdown) return "";
+    return stripPortableMarkdownResources(complete.markdown, resourcePaths);
+  }
+
+  function buildCompleteMarkdown(resourcePaths, selectedCategories) {
+    var publication = state.payload.publication;
+    var documentValue = publication.source_document;
+    var blocks = documentValue.blocks || [];
+    var categories = selectedCategories || new Set(["translation"]);
+    var sourceSelected = categories.has("source");
+    var translationSelected = categories.has("translation");
+    var supplementSelected = Array.from(categories).some(function (role) {
+      return [
+        "source", "translation", "glossary", "references"
+      ].indexOf(role) < 0;
+    });
+    var translations = translationSelected ?
+      completeTranslationSelections(blocks) : new Map();
+    var supplements = completeSupplementSelections(categories);
+    var selectedTranslationDigests = [];
+    var selectedRevisionDigests = [];
+    var parts = [];
+    blocks.forEach(function (block) {
+      if (sourceSelected || translationSelected) {
+        exportDocumentNotesBefore(documentValue, block.block_id).forEach(
+          function (note) { parts.push(note); }
+        );
+      }
+      if (isPdfPageMarkerBlock(block) || isStandaloneHtmlCommentBlock(block)) {
+        return;
+      }
+      var translation = translations.get(block.block_id) || null;
+      var sourceMarkdown = exportSourceBlockMarkdown(
+        block, documentValue, resourcePaths
+      );
+      if (sourceSelected) pushExportPart(parts, sourceMarkdown);
+      if (translationSelected) {
+        if (translation) {
+          var translatedMarkdown = exportSelectedRevisionMarkdown(
+            block, documentValue, translation, resourcePaths
+          );
+          if (sourceSelected) {
+            if (block.kind === "figure") {
+              translatedMarkdown = rewriteMarkdownResourceTargets(
+                normalizeMarkdown(translation.markdown_body), resourcePaths
+              );
+            }
+            translatedMarkdown = exportOverlayMarkdown(
+              "", translation.title, translatedMarkdown
+            );
+          }
+          pushExportPart(parts, translatedMarkdown);
+          selectedTranslationDigests.push(translation.semantic_digest);
+          selectedRevisionDigests.push(translation.semantic_digest);
+        } else if (!sourceSelected) {
+          pushExportPart(parts, sourceMarkdown);
+        }
+      } else if (
+        !sourceSelected && supplementSelected && block.kind === "heading"
+      ) {
+        pushExportPart(parts, sourceMarkdown);
+      }
+      (supplements.get(block.block_id) || []).forEach(function (revision) {
+        pushExportPart(parts, exportSupplementMarkdown(
+          revision,
+          rewriteMarkdownResourceTargets(
+            normalizeMarkdown(revision.markdown_body), resourcePaths
+          )
+        ));
+        selectedRevisionDigests.push(revision.semantic_digest);
+      });
+    });
+    var glossary = categories.has("glossary") ?
+      exportGlossaryMarkdown(publication.glossary || []) : "";
+    if (glossary) parts.push(glossary);
+    var bibliography = categories.has("references") ?
+      exportBibliographyMarkdown(publication.bibliography || []) : "";
+    if (bibliography) parts.push(bibliography);
+    return {
+      markdown: parts.join("\n\n").replace(/\n+$/, "") + "\n",
+      selectedTranslationDigests: selectedTranslationDigests,
+      selectedRevisionDigests: selectedRevisionDigests
+    };
+  }
+
+  function pushExportPart(parts, markdown) {
+    markdown = String(markdown || "").replace(/\n+$/, "");
+    if (markdown) parts.push(markdown);
+  }
+
+  function exportSelectedRevisionMarkdown(
+    block, documentValue, revision, resourcePaths
+  ) {
+    if (block.kind === "figure") {
+      return exportFigureMarkdown(block, revision, resourcePaths);
+    }
+    if (block.kind === "equation") {
+      return exportSelectedEquationMarkdown(
+        block, documentValue, revision, resourcePaths
+      );
+    }
+    if (block.kind === "code") {
+      return exportSelectedCodeMarkdown(block, revision, resourcePaths);
+    }
+    return rewriteMarkdownResourceTargets(
+      normalizeMarkdown(revision.markdown_body), resourcePaths
+    );
+  }
+
+  function exportOverlayMarkdown(role, title, markdown) {
+    var label = [role, title].filter(Boolean).map(function (value) {
+      return escapeMarkdownStrong(String(value).replace(/\s+/g, " ").trim());
+    }).join(" · ");
+    markdown = String(markdown || "").replace(/\n+$/, "");
+    if (!markdown) return "";
+    return label ? "**" + label + "**\n\n" + markdown : markdown;
+  }
+
+  function exportSupplementMarkdown(revision, markdown) {
+    if (["guide", "companion", "note"].indexOf(revision.role) < 0) {
+      return exportOverlayMarkdown(
+        roleLabel(revision.role), revision.title, markdown
+      );
+    }
+    var label = [roleLabel(revision.role), revision.title].filter(Boolean).map(
+      function (value) {
+        return escapeMarkdownStrong(
+          String(value).replace(/\s+/g, " ").trim()
+        );
+      }
+    ).join(" · ");
+    markdown = canonicalizeLegacyDisplayMath(
+      String(markdown || "")
+    ).replace(/\n+$/, "");
+    if (!markdown) return "";
+    return ["**" + label + "**", ""].concat(markdown.split("\n")).map(
+      function (line) { return line ? "> " + line : ">"; }
+    ).join("\n");
+  }
+
+  function completeSupplementSelections(categories) {
+    var selected = new Map();
+    selectedForMarkdown("all").forEach(function (revision) {
+      if (
+        !categories.has(revision.role) ||
+        revision.role === "translation" || revision.role === "source"
+      ) {
+        return;
+      }
+      var target = fragmentTargetId(revision);
+      if (!target) return;
+      var values = selected.get(target) || [];
+      values.push(revision);
+      selected.set(target, values);
+    });
+    selected.forEach(function (values) {
+      values.sort(function (left, right) {
+        return left.priority - right.priority ||
+          comparePortableText(left.fragment_id, right.fragment_id);
+      });
+    });
+    return selected;
+  }
+
+  function buildChangedMarkdown(resourcePaths, categories) {
+    var documentValue = state.payload.publication.source_document;
+    var blocks = documentValue.blocks || [];
+    var blockById = new Map(blocks.map(function (block) {
+      return [block.block_id, block];
+    }));
+    var blockOrder = new Map(blocks.map(function (block, index) {
+      return [block.block_id, index];
+    }));
+    var revisions = selectedForMarkdown("changed").filter(function (revision) {
+      return categories.has(revision.role) && revision.role !== "source";
+    });
     revisions.sort(function (left, right) {
       var leftTarget = fragmentTargetId(left);
       var rightTarget = fragmentTargetId(right);
       var leftOrder = blockOrder.has(leftTarget) ? blockOrder.get(leftTarget) : Infinity;
       var rightOrder = blockOrder.has(rightTarget) ? blockOrder.get(rightTarget) : Infinity;
       return leftOrder - rightOrder || left.priority - right.priority ||
-        left.fragment_id.localeCompare(right.fragment_id);
+        comparePortableText(left.fragment_id, right.fragment_id);
     });
-    var parts = ["# " + markdownHeading(readerTitle() + " — " + roleLabel(role))];
+    if (!revisions.length) {
+      return {
+        markdown: "",
+        selectedTranslationDigests: [],
+        selectedRevisionDigests: []
+      };
+    }
+    var parts = [
+      "# " + markdownHeading(readerTitle() + " — " + labels().changedContent)
+    ];
+    var selectedTranslationDigests = [];
+    var selectedRevisionDigests = [];
     revisions.forEach(function (revision) {
-      if (revision.title) parts.push("## " + markdownHeading(revision.title));
-      parts.push(normalizeMarkdown(revision.markdown_body).replace(/\n+$/, ""));
+      var block = blockById.get(fragmentTargetId(revision));
+      var markdown = block && revision.role === "translation" ?
+        exportSelectedRevisionMarkdown(
+          block, documentValue, revision, resourcePaths
+        ) : rewriteMarkdownResourceTargets(
+          normalizeMarkdown(revision.markdown_body), resourcePaths
+        );
+      if (["guide", "companion", "note"].indexOf(revision.role) >= 0) {
+        pushExportPart(parts, exportSupplementMarkdown(revision, markdown));
+      } else {
+        var heading = revision.role === "translation" ? revision.title :
+          roleLabel(revision.role) +
+            (revision.title ? " · " + revision.title : "");
+        if (heading) parts.push("## " + markdownHeading(heading));
+        pushExportPart(parts, markdown);
+      }
+      selectedRevisionDigests.push(revision.semantic_digest);
+      if (revision.role === "translation") {
+        selectedTranslationDigests.push(revision.semantic_digest);
+      }
     });
-    return parts.filter(function (part) { return part !== ""; }).join("\n\n") + "\n";
+    return {
+      markdown: parts.join("\n\n").replace(/\n+$/, "") + "\n",
+      selectedTranslationDigests: selectedTranslationDigests,
+      selectedRevisionDigests: selectedRevisionDigests
+    };
+  }
+
+  function completeTranslationSelections(blocks) {
+    var blockIds = new Set(blocks.map(function (block) {
+      return block.block_id;
+    }));
+    var candidates = new Map();
+    state.selected.forEach(function (revision) {
+      var anchor = revision && revision.anchor || {};
+      var related = anchor.related_blocks;
+      if (
+        !fragmentIsVisible(revision) ||
+        revision.role !== "translation" ||
+        anchor.kind !== "block" ||
+        !blockIds.has(anchor.target_id) ||
+        !Array.isArray(related) || related.length !== 1 ||
+        related[0].block_id !== anchor.target_id ||
+        !normalizeMarkdown(revision.markdown_body).trim()
+      ) {
+        return;
+      }
+      var values = candidates.get(anchor.target_id) || [];
+      values.push(revision);
+      candidates.set(anchor.target_id, values);
+    });
+    var selected = new Map();
+    candidates.forEach(function (values, blockId) {
+      values.sort(function (left, right) {
+        return left.priority - right.priority ||
+          comparePortableText(left.fragment_id, right.fragment_id);
+      });
+      selected.set(blockId, values[0]);
+    });
+    return selected;
+  }
+
+  function exportDocumentNotesBefore(documentValue, blockId) {
+    var notes = (documentValue.metadata || {}).document_notes || {};
+    if (
+      notes.schema_version !== "ac.document.document_notes.v1" ||
+      !Array.isArray(notes.items)
+    ) {
+      return [];
+    }
+    return notes.items.filter(function (item) {
+      return item && item.kind === "metadata" &&
+        item.before_block_id === blockId && String(item.text || "").trim();
+    }).map(function (item) {
+      return normalizeMarkdown(String(item.text)).replace(/\n/g, "\n> ")
+        .replace(/^/, "> ");
+    });
+  }
+
+  function exportSourceBlockMarkdown(block, documentValue, resourcePaths) {
+    var payload = block.payload || {};
+    if (block.kind === "heading") {
+      var level = Math.max(1, Math.min(6, Number(payload.level) || 1));
+      return "#".repeat(level) + " " + rewriteMarkdownResourceTargets(
+        String(payload.text || ""), resourcePaths
+      ) + "\n";
+    }
+    if (block.kind === "paragraph") {
+      return exportInlineSpansMarkdown(
+        payload.inline_spans, payload.text, resourcePaths
+      ) + "\n";
+    }
+    if (block.kind === "list") {
+      return (payload.items || []).map(function (item, index) {
+        var prefix = payload.ordered ? String(index + 1) + ". " : "- ";
+        var content = exportInlineSpansMarkdown(
+          item.inline_spans, item.text, resourcePaths
+        ).replace(/\n/g, "\n" + " ".repeat(prefix.length));
+        return prefix + content;
+      }).join("\n") + "\n";
+    }
+    if (block.kind === "code") {
+      var code = normalizeMarkdown(String(payload.text || ""));
+      var fence = "`".repeat(Math.max(3, longestRun(code, "`") + 1));
+      var language = String(payload.language || "").trim()
+        .replace(/[`\r\n]/g, "");
+      return fence + language + "\n" + code +
+        (code.endsWith("\n") ? "" : "\n") + fence + "\n";
+    }
+    if (block.kind === "equation") {
+      var equation = "$$\n" + String(payload.tex || "").trim() + "\n$$";
+      var equationLabel = exportEquationLabel(block, documentValue);
+      return equation + (equationLabel ?
+        "\n\nEquation label: " + equationLabel : "") + "\n";
+    }
+    if (block.kind === "table") {
+      return exportSourceTableMarkdown(payload, resourcePaths);
+    }
+    if (block.kind === "figure") {
+      return exportFigureMarkdown(block, null, resourcePaths);
+    }
+    throw new Error("unsupported RichDocument block kind: " + block.kind);
+  }
+
+  function exportInlineSpansMarkdown(spans, fallback, resourcePaths) {
+    if (!Array.isArray(spans) || !spans.length) {
+      return rewriteMarkdownResourceTargets(
+        normalizeMarkdown(String(fallback || "")), resourcePaths
+      );
+    }
+    return spans.map(function (span) {
+      if (span.kind === "math") {
+        var tex = String(span.tex || span.source || "");
+        return containsUnescapedDollar(tex) ? "\\(" + tex + "\\)" :
+          "$" + tex + "$";
+      }
+      if (span.kind === "link") {
+        var target = portableResourceTarget(
+          String(span.target || ""), resourcePaths
+        );
+        return "[" + escapeMarkdownLinkLabel(
+          String(span.text || span.target || "")
+        ) + "](" + markdownLinkDestination(target) + ")";
+      }
+      return escapeMarkdownInlineText(String(span.text || ""));
+    }).join("");
+  }
+
+  function exportEquationLabel(block, documentValue) {
+    var reconciliation = (
+      (documentValue.metadata || {}).equation_label_reconciliation || {}
+    )[block.block_id];
+    if (
+      reconciliation &&
+      typeof reconciliation.effective_label === "string" &&
+      reconciliation.effective_label.trim()
+    ) {
+      return reconciliation.effective_label.trim();
+    }
+    return String((block.payload || {}).label || "").trim();
+  }
+
+  function exportSelectedEquationMarkdown(
+    block, documentValue, translation, resourcePaths
+  ) {
+    var markdown = rewriteMarkdownResourceTargets(
+      normalizeMarkdown(translation.markdown_body), resourcePaths
+    ).replace(/\n+$/, "");
+    var label = exportEquationLabel(block, documentValue);
+    var labelLine = label ? "Equation label: " + label : "";
+    if (labelLine && !markdown.endsWith(labelLine)) {
+      markdown += "\n\n" + labelLine;
+    }
+    return markdown + "\n";
+  }
+
+  function exportSelectedCodeMarkdown(block, translation, resourcePaths) {
+    var markdown = rewriteMarkdownResourceTargets(
+      normalizeMarkdown(translation.markdown_body), resourcePaths
+    ).replace(/\n+$/, "");
+    var language = String((block.payload || {}).language || "").trim()
+      .replace(/[`\r\n]/g, "");
+    var lines = markdown.split("\n");
+    var opening = /^(`{3,}|~{3,})(.*)$/.exec(lines[0] || "");
+    if (language && opening && !opening[2].trim()) {
+      lines[0] = opening[1] + language;
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  function exportSourceTableMarkdown(payload, resourcePaths) {
+    var headers = Array.isArray(payload.headers) ? payload.headers : [];
+    var rows = Array.isArray(payload.rows) ? payload.rows : [];
+    var width = headers.length || (rows[0] || []).length;
+    var lines = [];
+    if (width) {
+      var normalizedHeaders = headers.length ? headers : Array(width).fill("");
+      lines.push("| " + normalizedHeaders.map(function (value) {
+        return exportTableCell(value, resourcePaths);
+      }).join(" | ") + " |");
+      lines.push("| " + Array(width).fill("---").join(" | ") + " |");
+      rows.forEach(function (row) {
+        lines.push("| " + row.map(function (value) {
+          return exportTableCell(value, resourcePaths);
+        }).join(" | ") + " |");
+      });
+    }
+    var caption = rewriteMarkdownResourceTargets(
+      String(payload.caption || "").trim(), resourcePaths
+    );
+    if (caption) lines.push("", "Table: " + caption);
+    return (lines.join("\n") || "[Empty table]") + "\n";
+  }
+
+  function exportTableCell(value, resourcePaths) {
+    return rewriteMarkdownResourceTargets(String(value), resourcePaths)
+      .replace(/\\/g, "\\\\")
+      .replace(/\|/g, "\\|")
+      .replace(/\r?\n/g, "<br>");
+  }
+
+  function exportFigureMarkdown(block, translation, resourcePaths) {
+    var payload = block.payload || {};
+    var resourcePath = portableResourceTarget(
+      String(payload.asset_digest || ""), resourcePaths
+    );
+    var alt = escapeMarkdownLinkLabel(String(payload.alt_text || ""));
+    var parts = [];
+    if (resourcePath && resourcePath !== String(payload.asset_digest || "")) {
+      parts.push("![" + alt + "](" + markdownLinkDestination(resourcePath) + ")");
+    } else {
+      var description = String(
+        payload.alt_text || payload.caption || payload.logical_name || ""
+      ).trim();
+      if (description) parts.push("[Figure: " + description + "]");
+    }
+    var caption = translation ?
+      normalizeMarkdown(translation.markdown_body).replace(/\n+$/, "") :
+      String(payload.caption || "").trim();
+    caption = rewriteMarkdownResourceTargets(caption, resourcePaths);
+    if (caption) parts.push(caption);
+    return parts.join("\n\n") + "\n";
+  }
+
+  function exportGlossaryMarkdown(glossary) {
+    if (!glossary.length) return "";
+    var lines = ["## " + markdownHeading(labels().glossary)];
+    glossary.forEach(function (entry) {
+      var source = String(entry.term || entry.source_term || "").trim();
+      var translated = String(
+        entry.translated_term || entry.translation || ""
+      ).trim();
+      var definition = String(entry.definition || "").trim();
+      var title = [source, translated].filter(Boolean).filter(function (
+        value, index, values
+      ) {
+        return values.indexOf(value) === index;
+      }).join(" / ");
+      if (!title && !definition) {
+        lines.push("- " + markdownInlineCode(stableStringify(entry)));
+        return;
+      }
+      var line = "- " + (title ? "**" + escapeMarkdownStrong(title) + "**" : "");
+      if (definition) {
+        line += (title ? " — " : "") + escapeMarkdownInlineText(definition)
+          .replace(/\n/g, "<br>");
+      }
+      lines.push(line);
+    });
+    return lines.join("\n");
+  }
+
+  function exportBibliographyMarkdown(bibliography) {
+    if (!bibliography.length) return "";
+    var groups = [];
+    var byIdentity = new Map();
+    bibliography.forEach(function (entry, entryIndex) {
+      var id = entry.evidence_id || entry.citation_id || entry.id || "";
+      var dois = Array.isArray(entry.dois) ? entry.dois : [];
+      var arxivIds = Array.isArray(entry.arxiv_ids) ? entry.arxiv_ids : [];
+      var visible = id || entry.title || entry.source || entry.url ||
+        dois.length || arxivIds.length;
+      var identity;
+      if (!visible) {
+        identity = "unknown:" + entryIndex + ":" + stableStringify(entry);
+      } else {
+        identity = bibliographyIdentity(entry);
+        if (identity === "id:" && !id && entry.title) {
+          identity = "entry:" + entryIndex + ":" + stableStringify(entry);
+        }
+      }
+      var group = byIdentity.get(identity);
+      if (!group) {
+        group = {
+          entry: entry,
+          ids: [],
+          dois: [],
+          arxivIds: [],
+          unknown: !visible
+        };
+        byIdentity.set(identity, group);
+        groups.push(group);
+      }
+      if (id && group.ids.indexOf(id) < 0) group.ids.push(String(id));
+      dois.forEach(function (doi) {
+        var value = String(doi);
+        if (group.dois.indexOf(value) < 0) group.dois.push(value);
+      });
+      arxivIds.forEach(function (identifier) {
+        var value = String(identifier);
+        if (group.arxivIds.indexOf(value) < 0) group.arxivIds.push(value);
+      });
+    });
+    var lines = ["## " + markdownHeading(labels().references)];
+    groups.forEach(function (group, index) {
+      var entry = group.entry;
+      if (group.unknown) {
+        lines.push(
+          String(index + 1) + ". " +
+          markdownInlineCode(stableStringify(entry))
+        );
+        return;
+      }
+      var title = String(entry.title || entry.source || entry.url || "").trim();
+      var source = String(entry.source || entry.url || "").trim();
+      var markers = group.ids.map(function (id) { return "[@" + id + "]"; })
+        .join(", ");
+      var content = "";
+      if (/^https?:\/\//i.test(source)) {
+        content = "[" + escapeMarkdownLinkLabel(title || source) + "](" +
+          markdownLinkDestination(source) + ")";
+      } else {
+        content = title ? "**" + escapeMarkdownStrong(title) + "**" : "";
+        if (source && source !== title) content += " — " + source;
+      }
+      var details = [];
+      group.dois.forEach(function (doi) {
+        details.push("DOI: " + String(doi));
+      });
+      group.arxivIds.forEach(function (identifier) {
+        details.push("arXiv: " + String(identifier));
+      });
+      lines.push(
+        String(index + 1) + ". " + [markers, content].filter(Boolean).join(" ") +
+        (details.length ? " — " + details.join("; ") : "")
+      );
+    });
+    return lines.join("\n");
+  }
+
+  function escapeMarkdownInlineText(value) {
+    return String(value).replace(/([\\`*_[\]<>])/g, "\\$1");
+  }
+
+  function escapeMarkdownLinkLabel(value) {
+    return String(value).replace(/([\\\]])/g, "\\$1").replace(/\r?\n/g, " ");
+  }
+
+  function escapeMarkdownStrong(value) {
+    return String(value).replace(/([\\*_])/g, "\\$1").replace(/\r?\n/g, " ");
+  }
+
+  function markdownInlineCode(value) {
+    var text = String(value);
+    var fence = "`".repeat(Math.max(1, longestRun(text, "`") + 1));
+    return fence + (text.startsWith("`") || text.endsWith("`") ?
+      " " + text + " " : text) + fence;
+  }
+
+  function markdownLinkDestination(value) {
+    var target = String(value || "");
+    return /[\s()<>]/.test(target) ?
+      "<" + target.replace(/>/g, "%3E") + ">" : target;
+  }
+
+  function containsUnescapedDollar(value) {
+    var text = String(value);
+    for (var index = 0; index < text.length; index += 1) {
+      if (text.charAt(index) !== "$") continue;
+      var slashes = 0;
+      for (
+        var cursor = index - 1;
+        cursor >= 0 && text.charAt(cursor) === "\\";
+        cursor -= 1
+      ) {
+        slashes += 1;
+      }
+      if (slashes % 2 === 0) return true;
+    }
+    return false;
+  }
+
+  function longestRun(value, character) {
+    var longest = 0;
+    var current = 0;
+    String(value).split("").forEach(function (item) {
+      current = item === character ? current + 1 : 0;
+      longest = Math.max(longest, current);
+    });
+    return longest;
+  }
+
+  function comparePortableText(left, right) {
+    var leftText = String(left);
+    var rightText = String(right);
+    return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
+  }
+
+  function portableMarkdownResourceIdentity(resource) {
+    var digest = String(
+      resource.artifact_digest || resource.digest || ""
+    ).toLowerCase();
+    var logicalName = String(resource.logical_name || "");
+    var mediaType = String(resource.media_type || "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) {
+      throw new Error("Markdown export resource digest is invalid");
+    }
+    if (!logicalName || !mediaType) {
+      throw new Error("Markdown export resource metadata is incomplete");
+    }
+    return {
+      digest: digest,
+      logicalName: logicalName,
+      mediaType: mediaType,
+      path: "resources/" + digest + "/" +
+        portableResourceBasename(logicalName)
+    };
+  }
+
+  function portableMarkdownResourcePaths(resources) {
+    return portableMarkdownPathByAlias(resources.map(
+      portableMarkdownResourceIdentity
+    ));
+  }
+
+  function portableMarkdownPathByAlias(values) {
+    var pathByAlias = new Map();
+    values.forEach(function (item) {
+      [item.digest, item.logicalName].forEach(function (alias) {
+        var existing = pathByAlias.get(alias);
+        if (existing && existing !== item.path) {
+          throw new Error("Markdown export resource alias is ambiguous");
+        }
+        pathByAlias.set(alias, item.path);
+      });
+      var slashName = item.logicalName.replace(/\\/g, "/");
+      if (!pathByAlias.has(slashName)) {
+        pathByAlias.set(slashName, item.path);
+      }
+      try {
+        var encoded = encodeURI(item.logicalName);
+        if (!pathByAlias.has(encoded)) pathByAlias.set(encoded, item.path);
+      } catch (_error) {
+        /* The exact validated logical name remains available as an alias. */
+      }
+    });
+    return pathByAlias;
+  }
+
+  function portableMarkdownResources(resources, includedPaths) {
+    var values = resources.map(function (resource) {
+      return {
+        identity: portableMarkdownResourceIdentity(resource),
+        resource: resource
+      };
+    }).filter(function (value) {
+      return !includedPaths || includedPaths.has(value.identity.path);
+    }).map(function (value) {
+      var identity = value.identity;
+      var resource = hydrateResource(value.resource);
+      var bytes = dataUriBytes(resource.data_uri, identity.mediaType);
+      if (
+        Number.isInteger(resource.size) && resource.size >= 0 &&
+        bytes.length !== resource.size
+      ) {
+        throw new Error("Markdown export resource size does not match metadata");
+      }
+      return {
+        digest: identity.digest,
+        logicalName: identity.logicalName,
+        mediaType: identity.mediaType,
+        size: bytes.length,
+        path: identity.path,
+        bytes: bytes
+      };
+    }).sort(function (left, right) {
+      return comparePortableText(left.path, right.path);
+    });
+    return {
+      files: values.map(function (item) {
+        return {path: item.path, bytes: item.bytes};
+      }),
+      manifest: values.map(function (item) {
+        return {
+          artifact_digest: item.digest,
+          media_type: item.mediaType,
+          logical_name: item.logicalName,
+          size: item.size,
+          path: item.path
+        };
+      })
+    };
+  }
+
+  function portableResourceBasename(logicalName) {
+    var normalized = String(logicalName).normalize("NFC").replace(/\\/g, "/");
+    var name = normalized.split("/").filter(Boolean).pop() || "resource";
+    name = name.replace(/[\u0000-\u001f<>:"/\\|?*#%()[\]{}]/g, "-")
+      .replace(/\s+/g, "-")
+      .replace(/^[. -]+|[. ]+$/g, "");
+    if (!name) name = "resource";
+    var characters = Array.from(name);
+    if (characters.length > 160) name = characters.slice(-160).join("");
+    return name;
+  }
+
+  function dataUriBytes(value, expectedMediaType) {
+    var uri = String(value || "");
+    var comma = uri.indexOf(",");
+    if (comma < 0 || uri.slice(0, 5).toLowerCase() !== "data:") {
+      throw new Error("Markdown export resource data URI is missing");
+    }
+    var header = uri.slice(5, comma);
+    var parts = header.split(";");
+    if (
+      String(parts.shift() || "").toLowerCase() !== expectedMediaType ||
+      !parts.some(function (part) { return part.toLowerCase() === "base64"; })
+    ) {
+      throw new Error("Markdown export resource data URI is invalid");
+    }
+    var decoded;
+    try {
+      decoded = atob(uri.slice(comma + 1));
+    } catch (error) {
+      throw new Error("Markdown export resource base64 is invalid");
+    }
+    var bytes = new Uint8Array(decoded.length);
+    for (var index = 0; index < decoded.length; index += 1) {
+      bytes[index] = decoded.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  function portableResourceTarget(target, resourcePaths) {
+    var value = String(target || "");
+    if (/^(?:[#/?]|[A-Za-z][A-Za-z0-9+.-]*:)/.test(value)) return value;
+    var direct = resourcePaths.get(value);
+    if (direct) return direct;
+    if (value.slice(0, 2) === "./" && resourcePaths.has(value.slice(2))) {
+      return resourcePaths.get(value.slice(2));
+    }
+    try {
+      var decoded = decodeURIComponent(value);
+      if (resourcePaths.has(decoded)) return resourcePaths.get(decoded);
+    } catch (_error) {
+      /* Preserve malformed or non-URL resource spelling verbatim. */
+    }
+    return value;
+  }
+
+  function rewriteMarkdownResourceTargets(markdown, resourcePaths) {
+    var normalized = normalizeMarkdown(String(markdown || ""));
+    var codeLines = markdownCodeLineIndexes(normalized);
+    return normalized.split("\n").map(
+      function (line, lineNumber) {
+        if (codeLines.has(lineNumber)) return line;
+        return rewriteMarkdownHtmlTargets(rewriteMarkdownInlineTargets(
+          rewriteMarkdownReferenceTarget(line, resourcePaths),
+          resourcePaths
+        ), resourcePaths);
+      }
+    ).join("\n");
+  }
+
+  function rewriteMarkdownHtmlTargets(line, resourcePaths) {
+    return mapMarkdownOutsideCodeSpans(line, function (segment) {
+      return transformMarkdownHtmlTags(segment, function (tag) {
+        return tag.replace(
+          /\b(src|href)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+          function (_match, name, separator, doubleQuoted, singleQuoted, bare) {
+            var target = doubleQuoted !== undefined ? doubleQuoted :
+              singleQuoted !== undefined ? singleQuoted : bare;
+            var replacement = portableResourceTarget(target, resourcePaths);
+            if (replacement === target) return _match;
+            if (doubleQuoted !== undefined) {
+              return name + separator + '"' + replacement + '"';
+            }
+            if (singleQuoted !== undefined) {
+              return name + separator + "'" + replacement + "'";
+            }
+            return name + separator + replacement;
+          }
+        );
+      });
+    });
+  }
+
+  function mapMarkdownOutsideCodeSpans(line, transform) {
+    var value = String(line);
+    var output = "";
+    var position = 0;
+    var plainStart = 0;
+    while (position < value.length) {
+      if (value.charAt(position) !== "`") {
+        position += 1;
+        continue;
+      }
+      var run = 1;
+      while (value.charAt(position + run) === "`") run += 1;
+      var codeEnd = markdownCodeSpanEnd(value, position + run, run);
+      if (codeEnd < 0) return output + transform(value.slice(plainStart));
+      output += transform(value.slice(plainStart, position));
+      output += value.slice(position, codeEnd + run);
+      position = codeEnd + run;
+      plainStart = position;
+    }
+    return output + transform(value.slice(plainStart));
+  }
+
+  function transformMarkdownHtmlTags(value, transform) {
+    var text = String(value);
+    var output = "";
+    var position = 0;
+    var tagStart = /<[A-Za-z][A-Za-z0-9:-]*(?=[\s/>])/g;
+    while (position < text.length) {
+      tagStart.lastIndex = position;
+      var match = tagStart.exec(text);
+      if (!match) return output + text.slice(position);
+      output += text.slice(position, match.index);
+      var quote = null;
+      var end = -1;
+      for (var index = tagStart.lastIndex; index < text.length; index += 1) {
+        var character = text.charAt(index);
+        if (quote) {
+          if (character === quote) quote = null;
+        } else if (character === '"' || character === "'") {
+          quote = character;
+        } else if (character === ">") {
+          end = index;
+          break;
+        }
+      }
+      if (end < 0) return output + text.slice(match.index);
+      output += transform(text.slice(match.index, end + 1), match.index);
+      position = end + 1;
+    }
+    return output;
+  }
+
+  function markdownHtmlResourceTargets(tag) {
+    var targets = [];
+    var attribute = /\b(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+    var match;
+    while ((match = attribute.exec(String(tag)))) {
+      targets.push(
+        match[1] !== undefined ? match[1] :
+          match[2] !== undefined ? match[2] : match[3] || ""
+      );
+    }
+    return targets;
+  }
+
+  function markdownCodeLineIndexes(markdown) {
+    if (!state.md || typeof state.md.parse !== "function") {
+      throw new Error("Markdown parser is required for export");
+    }
+    var lines = new Set();
+    state.md.parse(normalizeMarkdown(String(markdown || "")), {}).forEach(
+      function (token) {
+        if (
+          ["fence", "code_block"].indexOf(token.type) < 0 ||
+          !Array.isArray(token.map)
+        ) return;
+        for (var index = token.map[0]; index < token.map[1]; index += 1) {
+          lines.add(index);
+        }
+      }
+    );
+    return lines;
+  }
+
+  function markdownReferencedResourcePaths(markdown, resourcePaths) {
+    var candidates = new Set(Array.from(resourcePaths.values()));
+    var referenced = new Set();
+    var normalized = normalizeMarkdown(String(markdown || ""));
+    var codeLines = markdownCodeLineIndexes(normalized);
+    normalized.split("\n").forEach(
+      function (line, lineNumber) {
+        if (codeLines.has(lineNumber)) return;
+        var definition = markdownReferenceDefinition(line);
+        if (definition && candidates.has(definition.target)) {
+          referenced.add(definition.target);
+        }
+        collectMarkdownInlineResourcePaths(line, candidates, referenced);
+        collectHtmlResourcePaths(line, candidates, referenced);
+      }
+    );
+    return referenced;
+  }
+
+  function collectMarkdownInlineResourcePaths(line, candidates, referenced) {
+    var position = 0;
+    while (position < line.length) {
+      if (line.charAt(position) === "`") {
+        var run = 1;
+        while (line.charAt(position + run) === "`") run += 1;
+        var codeEnd = markdownCodeSpanEnd(line, position + run, run);
+        if (codeEnd < 0) return;
+        position = codeEnd + run;
+        continue;
+      }
+      var bracket = line.charAt(position) === "[" ? position :
+        line.slice(position, position + 2) === "![" ? position + 1 : -1;
+      if (bracket >= 0 && !markdownCharacterEscaped(line, bracket)) {
+        var labelEnd = markdownLabelEnd(line, bracket);
+        if (labelEnd >= 0 && line.charAt(labelEnd + 1) === "(") {
+          var destination = markdownDestinationRange(line, labelEnd + 2);
+          if (destination) {
+            var target = line.slice(destination.start, destination.end);
+            if (candidates.has(target)) referenced.add(target);
+          }
+        }
+      }
+      position += 1;
+    }
+  }
+
+  function collectHtmlResourcePaths(line, candidates, referenced) {
+    mapMarkdownOutsideCodeSpans(line, function (segment) {
+      return transformMarkdownHtmlTags(segment, function (tag) {
+        markdownHtmlResourceTargets(tag).forEach(function (target) {
+          if (candidates.has(target)) referenced.add(target);
+        });
+        return tag;
+      });
+    });
+  }
+
+  function stripPortableMarkdownResources(markdown, resourcePaths) {
+    var bundledPaths = new Set(Array.from(resourcePaths.values()));
+    var normalized = normalizeMarkdown(String(markdown || ""));
+    var lines = normalized.split("\n");
+    var codeLines = markdownCodeLineIndexes(normalized);
+    var localReferences = new Set();
+    lines.forEach(function (line, lineNumber) {
+      if (codeLines.has(lineNumber)) return;
+      var definition = markdownReferenceDefinition(line);
+      if (
+        definition && definition.label.charAt(0) !== "^" &&
+        bundledPaths.has(definition.target)
+      ) {
+        localReferences.add(markdownReferenceKey(definition.label));
+      }
+    });
+    return lines.map(function (line, lineNumber) {
+      if (codeLines.has(lineNumber)) return line;
+      var definition = markdownReferenceDefinition(line);
+      if (
+        definition && definition.label.charAt(0) !== "^" &&
+        bundledPaths.has(definition.target)
+      ) {
+        return "";
+      }
+      return mapMarkdownOutsideCodeSpans(
+        stripMarkdownInlineResources(line, bundledPaths, localReferences),
+        stripMarkdownHtmlImages
+      );
+    }).join("\n");
+  }
+
+  function markdownReferenceDefinition(line) {
+    var match = /^((?: {0,3}> ?)*(?: {0,3})\[([^\]\n]+)\]:[ \t]*)(<([^>\n]+)>|([^ \t\n]+))(.*)$/.exec(
+      line
+    );
+    if (!match) return null;
+    return {
+      head: match[1],
+      label: match[2],
+      target: match[4] === undefined ? match[5] : match[4],
+      angled: match[4] !== undefined,
+      trailing: match[6]
+    };
+  }
+
+  function markdownReferenceKey(value) {
+    return String(value).trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  function stripMarkdownInlineResources(line, bundledPaths, localReferences) {
+    var output = "";
+    var position = 0;
+    while (position < line.length) {
+      if (line.charAt(position) === "`") {
+        var run = 1;
+        while (line.charAt(position + run) === "`") run += 1;
+        var codeEnd = markdownCodeSpanEnd(line, position + run, run);
+        if (codeEnd < 0) return output + line.slice(position);
+        output += line.slice(position, codeEnd + run);
+        position = codeEnd + run;
+        continue;
+      }
+      var isImage = line.slice(position, position + 2) === "![";
+      var bracket = line.charAt(position) === "[" ? position :
+        isImage ? position + 1 : -1;
+      if (bracket >= 0 && !markdownCharacterEscaped(line, bracket)) {
+        var labelEnd = markdownLabelEnd(line, bracket);
+        if (labelEnd >= 0) {
+          var label = line.slice(bracket + 1, labelEnd);
+          if (line.charAt(labelEnd + 1) === "(") {
+            var destination = markdownDestinationRange(line, labelEnd + 2);
+            var linkEnd = markdownInlineLinkEnd(line, labelEnd + 1);
+            if (destination && linkEnd >= 0) {
+              var target = line.slice(destination.start, destination.end);
+              if (isImage || bundledPaths.has(target)) {
+                output += isImage ? markdownFigureText(label) :
+                  stripMarkdownResourceLabel(
+                    label, bundledPaths, localReferences
+                  );
+                position = linkEnd + 1;
+                continue;
+              }
+            }
+          } else if (line.charAt(labelEnd + 1) === "[") {
+            var referenceEnd = markdownLabelEnd(line, labelEnd + 1);
+            if (referenceEnd >= 0) {
+              var reference = line.slice(labelEnd + 2, referenceEnd) || label;
+              if (
+                isImage ||
+                localReferences.has(markdownReferenceKey(reference))
+              ) {
+                output += isImage ? markdownFigureText(label) :
+                  stripMarkdownResourceLabel(
+                    label, bundledPaths, localReferences
+                  );
+                position = referenceEnd + 1;
+                continue;
+              }
+            }
+          } else if (
+            isImage || localReferences.has(markdownReferenceKey(label))
+          ) {
+            output += isImage ? markdownFigureText(label) :
+              stripMarkdownResourceLabel(label, bundledPaths, localReferences);
+            position = labelEnd + 1;
+            continue;
+          }
+        }
+      }
+      output += line.charAt(position);
+      position += 1;
+    }
+    return output;
+  }
+
+  function stripMarkdownResourceLabel(label, bundledPaths, localReferences) {
+    return mapMarkdownOutsideCodeSpans(
+      stripMarkdownInlineResources(label, bundledPaths, localReferences),
+      stripMarkdownHtmlImages
+    );
+  }
+
+  function markdownInlineLinkEnd(line, openParenthesis) {
+    var depth = 0;
+    for (var index = openParenthesis; index < line.length; index += 1) {
+      if (markdownCharacterEscaped(line, index)) continue;
+      if (line.charAt(index) === "(") {
+        depth += 1;
+      } else if (line.charAt(index) === ")") {
+        depth -= 1;
+        if (depth === 0) return index;
+      }
+    }
+    return -1;
+  }
+
+  function markdownFigureText(label) {
+    var value = String(label || "").trim();
+    return value ? "[Figure: " + value + "]" : "";
+  }
+
+  function stripMarkdownHtmlImages(line) {
+    var value = String(line);
+    var output = "";
+    var position = 0;
+    var imageStart = /<img(?=[\s/>])/ig;
+    while (position < value.length) {
+      imageStart.lastIndex = position;
+      var match = imageStart.exec(value);
+      if (!match) return output + value.slice(position);
+      output += value.slice(position, match.index);
+      var quote = null;
+      var end = -1;
+      for (var index = imageStart.lastIndex; index < value.length; index += 1) {
+        var character = value.charAt(index);
+        if (quote) {
+          if (character === quote) quote = null;
+        } else if (character === '"' || character === "'") {
+          quote = character;
+        } else if (character === ">") {
+          end = index;
+          break;
+        }
+      }
+      if (end < 0) return output + value.slice(match.index);
+      var tag = value.slice(match.index, end + 1);
+      var alt = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag);
+      output += markdownFigureText(alt ? alt[1] || alt[2] || alt[3] : "");
+      position = end + 1;
+    }
+    return output;
+  }
+
+  function rewriteMarkdownReferenceTarget(line, resourcePaths) {
+    var definition = markdownReferenceDefinition(line);
+    if (!definition || definition.label.charAt(0) === "^") return line;
+    var replacement = portableResourceTarget(
+      definition.target, resourcePaths
+    );
+    if (replacement === definition.target) return line;
+    return definition.head + (definition.angled ?
+      "<" + replacement + ">" : replacement) + definition.trailing;
+  }
+
+  function rewriteMarkdownInlineTargets(line, resourcePaths) {
+    var output = "";
+    var position = 0;
+    while (position < line.length) {
+      if (line.charAt(position) === "`") {
+        var run = 1;
+        while (line.charAt(position + run) === "`") run += 1;
+        var codeEnd = markdownCodeSpanEnd(line, position + run, run);
+        if (codeEnd < 0) return output + line.slice(position);
+        output += line.slice(position, codeEnd + run);
+        position = codeEnd + run;
+        continue;
+      }
+      var bracket = line.charAt(position) === "[" ? position :
+        line.slice(position, position + 2) === "![" ? position + 1 : -1;
+      if (bracket >= 0 && !markdownCharacterEscaped(line, bracket)) {
+        var labelEnd = markdownLabelEnd(line, bracket);
+        if (labelEnd >= 0 && line.charAt(labelEnd + 1) === "(") {
+          var destination = markdownDestinationRange(line, labelEnd + 2);
+          if (destination) {
+            var raw = line.slice(destination.start, destination.end);
+            var replacement = portableResourceTarget(raw, resourcePaths);
+            if (replacement !== raw) {
+              output += line.slice(position, destination.start) + replacement;
+              position = destination.end;
+              continue;
+            }
+          }
+        }
+      }
+      output += line.charAt(position);
+      position += 1;
+    }
+    return output;
+  }
+
+  function markdownCodeSpanEnd(line, start, delimiterLength) {
+    var position = start;
+    while (position < line.length) {
+      if (line.charAt(position) !== "`") {
+        position += 1;
+        continue;
+      }
+      var run = 1;
+      while (line.charAt(position + run) === "`") run += 1;
+      if (run === delimiterLength) return position;
+      position += run;
+    }
+    return -1;
+  }
+
+  function markdownLabelEnd(line, start) {
+    var depth = 0;
+    for (var index = start; index < line.length; index += 1) {
+      if (markdownCharacterEscaped(line, index)) continue;
+      if (line.charAt(index) === "[") depth += 1;
+      if (line.charAt(index) === "]") {
+        depth -= 1;
+        if (depth === 0) return index;
+      }
+    }
+    return -1;
+  }
+
+  function markdownDestinationRange(line, start) {
+    while (line.charAt(start) === " " || line.charAt(start) === "\t") {
+      start += 1;
+    }
+    if (line.charAt(start) === "<") {
+      for (var angle = start + 1; angle < line.length; angle += 1) {
+        if (
+          line.charAt(angle) === ">" &&
+          !markdownCharacterEscaped(line, angle)
+        ) {
+          return {start: start + 1, end: angle};
+        }
+      }
+      return null;
+    }
+    var depth = 0;
+    for (var index = start; index < line.length; index += 1) {
+      var character = line.charAt(index);
+      if (markdownCharacterEscaped(line, index)) continue;
+      if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        if (depth === 0) return {start: start, end: index};
+        depth -= 1;
+      } else if ((character === " " || character === "\t") && depth === 0) {
+        return {start: start, end: index};
+      }
+    }
+    return null;
+  }
+
+  function markdownCharacterEscaped(value, index) {
+    var slashes = 0;
+    for (
+      var cursor = index - 1;
+      cursor >= 0 && value.charAt(cursor) === "\\";
+      cursor -= 1
+    ) {
+      slashes += 1;
+    }
+    return slashes % 2 === 1;
+  }
+
+  function utf8Bytes(value) {
+    return new TextEncoder().encode(String(value));
+  }
+
+  var zipCrcTable = null;
+
+  function buildStoredZip(files) {
+    if (!Array.isArray(files) || files.length > 0xffff) {
+      throw new Error("Markdown export has too many ZIP entries");
+    }
+    var ordered = files.map(function (file) {
+      var path = String(file.path || "");
+      if (
+        !path || path.charAt(0) === "/" || path.indexOf("\\") >= 0 ||
+        path.split("/").some(function (part) {
+          return !part || part === "." || part === "..";
+        })
+      ) {
+        throw new Error("Markdown export ZIP path is unsafe");
+      }
+      var bytes = file.bytes instanceof Uint8Array ?
+        file.bytes : utf8Bytes(file.bytes);
+      if (bytes.length > 0xffffffff) {
+        throw new Error("Markdown export ZIP entry is too large");
+      }
+      var name = utf8Bytes(path);
+      if (name.length > 0xffff) {
+        throw new Error("Markdown export ZIP filename is too long");
+      }
+      return {path: path, name: name, bytes: bytes};
+    }).sort(function (left, right) {
+      return comparePortableText(left.path, right.path);
+    });
+    var localParts = [];
+    var centralParts = [];
+    var offset = 0;
+    ordered.forEach(function (file) {
+      var checksum = zipCrc32(file.bytes);
+      var local = new Uint8Array(30 + file.name.length);
+      var localView = new DataView(local.buffer);
+      localView.setUint32(0, 0x04034b50, true);
+      localView.setUint16(4, 20, true);
+      localView.setUint16(6, 0x0800, true);
+      localView.setUint16(8, 0, true);
+      localView.setUint16(10, 0, true);
+      localView.setUint16(12, 0x0021, true);
+      localView.setUint32(14, checksum, true);
+      localView.setUint32(18, file.bytes.length, true);
+      localView.setUint32(22, file.bytes.length, true);
+      localView.setUint16(26, file.name.length, true);
+      local.set(file.name, 30);
+
+      var central = new Uint8Array(46 + file.name.length);
+      var centralView = new DataView(central.buffer);
+      centralView.setUint32(0, 0x02014b50, true);
+      centralView.setUint16(4, 20, true);
+      centralView.setUint16(6, 20, true);
+      centralView.setUint16(8, 0x0800, true);
+      centralView.setUint16(10, 0, true);
+      centralView.setUint16(12, 0, true);
+      centralView.setUint16(14, 0x0021, true);
+      centralView.setUint32(16, checksum, true);
+      centralView.setUint32(20, file.bytes.length, true);
+      centralView.setUint32(24, file.bytes.length, true);
+      centralView.setUint16(28, file.name.length, true);
+      centralView.setUint32(42, offset, true);
+      central.set(file.name, 46);
+
+      localParts.push(local, file.bytes);
+      centralParts.push(central);
+      offset += local.length + file.bytes.length;
+      if (offset > 0xffffffff) {
+        throw new Error("Markdown export ZIP is too large");
+      }
+    });
+    var centralOffset = offset;
+    var centralSize = centralParts.reduce(function (total, part) {
+      return total + part.length;
+    }, 0);
+    if (centralOffset + centralSize > 0xffffffff) {
+      throw new Error("Markdown export ZIP is too large");
+    }
+    var end = new Uint8Array(22);
+    var endView = new DataView(end.buffer);
+    endView.setUint32(0, 0x06054b50, true);
+    endView.setUint16(8, ordered.length, true);
+    endView.setUint16(10, ordered.length, true);
+    endView.setUint32(12, centralSize, true);
+    endView.setUint32(16, centralOffset, true);
+    return new Blob(localParts.concat(centralParts, [end]), {
+      type: "application/zip"
+    });
+  }
+
+  function zipCrc32(bytes) {
+    if (!zipCrcTable) {
+      zipCrcTable = new Uint32Array(256);
+      for (var value = 0; value < 256; value += 1) {
+        var current = value;
+        for (var bit = 0; bit < 8; bit += 1) {
+          current = current & 1 ?
+            0xedb88320 ^ (current >>> 1) : current >>> 1;
+        }
+        zipCrcTable[value] = current >>> 0;
+      }
+    }
+    var crc = 0xffffffff;
+    for (var index = 0; index < bytes.length; index += 1) {
+      crc = zipCrcTable[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
   }
 
   function markdownHeading(value) {
@@ -5114,7 +6655,11 @@
   }
 
   function downloadText(filename, value, mediaType) {
-    var url = URL.createObjectURL(new Blob([value], {type: mediaType}));
+    downloadBlob(filename, new Blob([value], {type: mediaType}));
+  }
+
+  function downloadBlob(filename, blob) {
+    var url = URL.createObjectURL(blob);
     var link = document.createElement("a");
     link.href = url;
     link.download = filename;
