@@ -10,7 +10,11 @@ from urllib.parse import urlparse
 
 from ac_jobs import canonical_json_bytes
 
-from .rich_text import RichTextError, validate_rich_markdown
+from .rich_text import (
+    RichTextError,
+    canonicalize_display_math,
+    validate_rich_markdown,
+)
 
 
 class CompanionContentError(ValueError):
@@ -125,6 +129,7 @@ def validate_chapter_guide(
                 "positional citation refers to a missing reference",
             )
         try:
+            markdown = canonicalize_display_math(markdown)
             citations = validate_rich_markdown(
                 markdown,
                 allowed_evidence_ids=tuple(reference_ids),

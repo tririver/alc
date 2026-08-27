@@ -1151,6 +1151,20 @@
       var begin = parserState.bMarks[startLine] + parserState.tShift[startLine];
       var maximum = parserState.eMarks[startLine];
       var opening = parserState.src.slice(begin, maximum).trim();
+      var legacySingleLine = (
+        opening.length > 4 && opening.slice(0, 2) === "$$" &&
+        opening.slice(-2) === "$$" &&
+        opening.slice(2, -2).indexOf("$$") < 0
+      );
+      if (legacySingleLine) {
+        if (silent) return true;
+        var legacyToken = parserState.push("alc_math_block", "div", 0);
+        legacyToken.block = true;
+        legacyToken.map = [startLine, startLine + 1];
+        legacyToken.content = opening.slice(2, -2).trim();
+        parserState.line = startLine + 1;
+        return true;
+      }
       var closing = opening === "$$" ? "$$" : opening === "\\[" ? "\\]" : null;
       if (!closing) return false;
       var line = startLine + 1;
@@ -1315,6 +1329,36 @@
       throw new Error("Markdown body cannot contain NUL");
     }
     return normalized;
+  }
+
+  function canonicalizeLegacyDisplayMath(markdown) {
+    var normalized = normalizeMarkdown(markdown);
+    var codeLines = new Set();
+    state.md.parse(normalized, {}).forEach(function (token) {
+      if (
+        ["fence", "code_block"].indexOf(token.type) < 0 ||
+        !Array.isArray(token.map)
+      ) return;
+      for (var index = token.map[0]; index < token.map[1]; index += 1) {
+        codeLines.add(index);
+      }
+    });
+    var output = [];
+    normalized.split("\n").forEach(function (line, lineNumber) {
+      if (codeLines.has(lineNumber)) {
+        output.push(line);
+        return;
+      }
+      var match = /^([ \t]*)[$][$](.+)[$][$][ \t]*$/.exec(line);
+      if (match && match[2].trim() && match[2].indexOf("$$") < 0) {
+        output.push(match[1] + "$$");
+        output.push(match[1] + match[2].trim());
+        output.push(match[1] + "$$");
+        return;
+      }
+      output.push(line);
+    });
+    return output.join("\n");
   }
 
   function removeVisibleHtmlTags(root) {

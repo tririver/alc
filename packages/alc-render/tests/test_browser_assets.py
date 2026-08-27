@@ -725,6 +725,7 @@ define = undefined;
     updateDirectoryControl: updateDirectoryControl,
     stableStringify: stableStringify,
     setupMarkdown: setupMarkdown,
+    canonicalizeLegacyDisplayMath: canonicalizeLegacyDisplayMath,
     buildRenderChunks: buildRenderChunks,
     isPdfPageMarkerBlock: isPdfPageMarkerBlock,
     isStandaloneHtmlCommentBlock: isStandaloneHtmlCommentBlock,
@@ -746,6 +747,31 @@ if (
   nestedMathTokens[0].content !== nestedMathTex
 ) {
   throw new Error("old-style nested TeX math shift split Markdown math");
+}
+var legacyDisplayTokens = helpers.state.md.parse(
+  String.raw`$$q(z)=-1+\frac{1+z}{2E(z)^2}。$$`, {}
+);
+if (
+  legacyDisplayTokens.length !== 1 ||
+  legacyDisplayTokens[0].type !== "alc_math_block" ||
+  legacyDisplayTokens[0].content !==
+    String.raw`q(z)=-1+\frac{1+z}{2E(z)^2}。`
+) {
+  throw new Error("legacy single-line display math left visible delimiters");
+}
+if (
+  helpers.canonicalizeLegacyDisplayMath(
+    "推导：\\n\\n$$q(z)=-1。$$\\n\\n完成。"
+  ) !== "推导：\\n\\n$$\\nq(z)=-1。\\n$$\\n\\n完成。"
+) {
+  throw new Error("legacy supplemental display math was not canonicalized");
+}
+var fencedLegacyDisplay = "```text\\n$$q(z)=-1。$$\\n```";
+if (
+  helpers.canonicalizeLegacyDisplayMath(fencedLegacyDisplay) !==
+  fencedLegacyDisplay
+) {
+  throw new Error("fenced legacy display math was rewritten");
 }
 helpers.validateIntegerJson({value: 4, nested: [1, 2]}, "fixture");
 var rejected = false;

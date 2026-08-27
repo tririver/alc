@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from alc_companion.prompts import (
     HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16,
+    HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17,
     HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
+    HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17,
     chapter_guide_proposer_instructions,
     chapter_guide_reviewer_instructions,
 )
@@ -37,6 +39,35 @@ def test_guide_prompts_bind_local_section_numbers() -> None:
         assert "section_number" in prompt
         assert "source heading" in prompt or "source-heading" in prompt
         assert "sections" in prompt
+
+
+def test_current_guide_prompts_require_canonical_display_math() -> None:
+    proposer = chapter_guide_proposer_instructions()
+    reviewer = chapter_guide_reviewer_instructions()
+
+    for prompt in (proposer, reviewer):
+        assert "display-math" in prompt or "display math" in prompt
+        assert "separate lines" in prompt
+
+
+def test_v17_guide_prompt_recipe_remains_decodable() -> None:
+    recipe = CompanionGenerationRecipe(
+        chapter_guide_prompt=HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17,
+        chapter_guide_review_prompt=(
+            HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17
+        ),
+    )
+
+    proposer = chapter_guide_proposer_instructions(
+        recipe.chapter_guide_prompt
+    )
+    reviewer = chapter_guide_reviewer_instructions(
+        recipe.chapter_guide_review_prompt
+    )
+    assert HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17 in proposer
+    assert HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17 in reviewer
+    assert "display-math" not in proposer
+    assert "display-math" not in reviewer
 
 
 def test_historical_guide_prompt_recipe_remains_decodable() -> None:

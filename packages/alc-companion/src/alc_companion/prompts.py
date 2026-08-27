@@ -7,8 +7,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-CHAPTER_GUIDE_PROMPT_VERSION = "alc.companion.chapter-learning-prompt.v17"
+CHAPTER_GUIDE_PROMPT_VERSION = "alc.companion.chapter-learning-prompt.v18"
 CHAPTER_GUIDE_REVIEW_PROMPT_VERSION = (
+    "alc.companion.chapter-learning-review-prompt.v18"
+)
+HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17 = (
+    "alc.companion.chapter-learning-prompt.v17"
+)
+HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17 = (
     "alc.companion.chapter-learning-review-prompt.v17"
 )
 HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16 = (
@@ -279,6 +285,14 @@ who proposes a valuable addition at a new location must inspect and record
 that location first.
 """
 
+_CHAPTER_GUIDE_INSTRUCTION_V17 = _CHAPTER_GUIDE_INSTRUCTION
+_CHAPTER_GUIDE_INSTRUCTION += """
+
+Use `$...$` or `\\(...\\)` for inline math. For display math, put the opening
+and closing `$$` delimiters on separate lines with the TeX body between them.
+Never place display-math content on the same line as either `$$` delimiter.
+"""
+
 
 _CHAPTER_GUIDE_REVIEW_INSTRUCTION = """
 Review the chapter guide, sparse section guides, sparse post-part companions,
@@ -392,15 +406,23 @@ that location too. Avoid reading the whole book when the complete current
 chapter is enough. Never open image or media assets.
 """
 
+_CHAPTER_GUIDE_REVIEW_INSTRUCTION_V17 = _CHAPTER_GUIDE_REVIEW_INSTRUCTION
+_CHAPTER_GUIDE_REVIEW_INSTRUCTION += """
 
-_CHAPTER_GUIDE_INSTRUCTION_V16 = _CHAPTER_GUIDE_INSTRUCTION.replace(
+Treat malformed math delimiters as a material defect. Require `$...$` or
+`\\(...\\)` for inline math and require display-math `$$` delimiters to occupy
+separate lines with only the TeX body between them.
+"""
+
+
+_CHAPTER_GUIDE_INSTRUCTION_V16 = _CHAPTER_GUIDE_INSTRUCTION_V17.replace(
     "Use only the exact local `section_number` values listed in the supplied\n"
     "`sections` context. If that list is empty, `section_guides` must be empty. A\n"
     "numeral printed in the source heading is content, not a local section number.\n\n",
     "",
 )
 _CHAPTER_GUIDE_REVIEW_INSTRUCTION_V16 = (
-    _CHAPTER_GUIDE_REVIEW_INSTRUCTION.replace(
+    _CHAPTER_GUIDE_REVIEW_INSTRUCTION_V17.replace(
         "Reject a proposal that uses a `section_number` absent from the supplied local\n"
         "`sections` context. When that context is empty, both the proposal's\n"
         "`section_guides` and the review payload's `checked_section_numbers` must be\n"
@@ -459,6 +481,8 @@ def chapter_guide_proposer_instructions(
 ) -> str:
     if version == CHAPTER_GUIDE_PROMPT_VERSION:
         instruction = _CHAPTER_GUIDE_INSTRUCTION
+    elif version == HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17:
+        instruction = _CHAPTER_GUIDE_INSTRUCTION_V17
     elif version == HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16:
         instruction = _CHAPTER_GUIDE_INSTRUCTION_V16
     else:
@@ -474,6 +498,8 @@ def chapter_guide_reviewer_instructions(
 ) -> str:
     if version == CHAPTER_GUIDE_REVIEW_PROMPT_VERSION:
         instruction = _CHAPTER_GUIDE_REVIEW_INSTRUCTION
+    elif version == HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17:
+        instruction = _CHAPTER_GUIDE_REVIEW_INSTRUCTION_V17
     elif version == HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16:
         instruction = _CHAPTER_GUIDE_REVIEW_INSTRUCTION_V16
     else:
@@ -601,7 +627,9 @@ __all__ = [
     "EDITORIAL_PROPOSER_PROMPT_VERSION",
     "EDITORIAL_REVIEWER_PROMPT_VERSION",
     "HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16",
+    "HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17",
     "HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16",
+    "HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17",
     "author_identity_prompt",
     "chapter_guide_proposer_instructions",
     "chapter_guide_reviewer_instructions",

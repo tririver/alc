@@ -26,7 +26,9 @@ from .prompts import (
     EDITORIAL_PROPOSER_PROMPT_VERSION,
     EDITORIAL_REVIEWER_PROMPT_VERSION,
     HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16,
+    HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17,
     HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
+    HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17,
 )
 from .reader_labels import resolve_reader_labels
 from .reviewed_supplements import (
@@ -243,10 +245,12 @@ class CompanionGenerationRecipe:
             "author_identity_prompt": {AUTHOR_IDENTITY_PROMPT_VERSION},
             "chapter_guide_prompt": {
                 CHAPTER_GUIDE_PROMPT_VERSION,
+                HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17,
                 HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16,
             },
             "chapter_guide_review_prompt": {
                 CHAPTER_GUIDE_REVIEW_PROMPT_VERSION,
+                HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V17,
                 HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
             },
             "equation_label_visual_prompt": {

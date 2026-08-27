@@ -13,7 +13,7 @@ from typing import Any
 from ac_jobs import canonical_json_bytes
 from alc_render import extract_markdown_citation_ids, normalize_markdown
 
-from .rich_text import RichTextError, parse_markdown
+from .rich_text import RichTextError, canonicalize_display_math, parse_markdown
 
 
 EDITORIAL_INVENTORY_SCHEMA = "alc.companion.editorial_inventory.v1"
@@ -742,7 +742,9 @@ def _validate_edits(
             continue
         edit.title = edit.title.strip()
         try:
-            edit.markdown_body = normalize_markdown(edit.markdown_body)
+            edit.markdown_body = canonicalize_display_math(
+                normalize_markdown(edit.markdown_body)
+            )
             parse_markdown(edit.markdown_body)
         except (RichTextError, ValueError) as exc:
             edit.validation_error = f"editorial replacement Markdown is invalid: {exc}"
