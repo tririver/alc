@@ -819,6 +819,103 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
         <path d="M12 12v5M9.5 14.5h5"></path>
       </svg>
     </button>
+    <div class="alc-settings-control">
+      <button id="alc-settings" class="alc-tool-button alc-tool-icon-button"
+        type="button" aria-label="More settings" title="More settings"
+        aria-controls="alc-settings-panel" aria-expanded="false">
+        <svg class="alc-tool-icon" viewBox="0 0 24 24" aria-hidden="true"
+          focusable="false">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.86 2.86-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.86-2.86.06-.06A1.7 1.7 0 0 0 4.2 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H2.4V9.6h.1A1.7 1.7 0 0 0 4.2 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06L6.66 3.8l.06.06A1.7 1.7 0 0 0 8.6 4.2a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V2.4h4v.1a1.7 1.7 0 0 0 1 1.7 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.86 2.86-.06.06A1.7 1.7 0 0 0 19.4 8.6a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1.1.4h.1v4h-.1a1.7 1.7 0 0 0-1.7 1z"></path>
+        </svg>
+      </button>
+      <section id="alc-settings-panel" class="alc-settings-panel" hidden
+        role="dialog" aria-modal="false" aria-labelledby="alc-settings-heading">
+        <header class="alc-settings-header">
+          <h2 id="alc-settings-heading">More settings</h2>
+          <button id="alc-settings-close" class="alc-settings-close"
+            type="button" aria-label="Close more settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M6 6l12 12M18 6L6 18"></path>
+            </svg>
+          </button>
+        </header>
+        <div class="alc-settings-grid">
+          <label class="alc-settings-field">
+            <span id="alc-settings-layout-label">Translation layout</span>
+            <select id="alc-settings-layout">
+              <option value="parallel">Side by side</option>
+              <option value="stacked">Stacked</option>
+            </select>
+          </label>
+          <label class="alc-settings-field">
+            <span id="alc-settings-edit-label">Enter edit mode</span>
+            <select id="alc-settings-edit">
+              <option value="double">Double click</option>
+              <option value="single">Single click</option>
+            </select>
+          </label>
+          <label class="alc-settings-field">
+            <span id="alc-settings-english-font-label">English font</span>
+            <select id="alc-settings-english-font">
+              <option value="system">System default</option>
+              <option value="arial">Arial</option>
+              <option value="helvetica">Helvetica</option>
+              <option value="georgia">Georgia</option>
+              <option value="times">Times New Roman</option>
+              <option value="charter">Charter</option>
+            </select>
+          </label>
+          <label class="alc-settings-field">
+            <span id="alc-settings-chinese-font-label">Chinese font</span>
+            <select id="alc-settings-chinese-font">
+              <option value="system">System default</option>
+              <option value="pingfang">PingFang SC</option>
+              <option value="heiti">Heiti SC</option>
+              <option value="song">Songti SC</option>
+              <option value="kai">Kaiti SC</option>
+            </select>
+          </label>
+          <label class="alc-settings-field alc-settings-range-field">
+            <span class="alc-settings-range-header">
+              <span id="alc-settings-scale-label">Display scale</span>
+              <output id="alc-settings-scale-value" for="alc-settings-scale">100%</output>
+            </span>
+            <input id="alc-settings-scale" type="range" min="50" max="150"
+              step="5" value="100">
+            <span class="alc-settings-range-scale" aria-hidden="true">
+              <span>50%</span><span>150%</span>
+            </span>
+          </label>
+          <label class="alc-settings-field alc-settings-range-field">
+            <span class="alc-settings-range-header">
+              <span id="alc-settings-line-label">Line height</span>
+              <output id="alc-settings-line-value" for="alc-settings-line">1.65</output>
+            </span>
+            <input id="alc-settings-line" type="range" min="1.3" max="2"
+              step="0.05" value="1.65">
+            <span class="alc-settings-range-scale" aria-hidden="true">
+              <span>1.30</span><span>2.00</span>
+            </span>
+          </label>
+          <label class="alc-settings-field alc-settings-range-field">
+            <span class="alc-settings-range-header">
+              <span id="alc-settings-width-label">Content width</span>
+              <output id="alc-settings-width-value" for="alc-settings-width">100%</output>
+            </span>
+            <input id="alc-settings-width" type="range" min="50" max="150"
+              step="5" value="100">
+            <span class="alc-settings-range-scale" aria-hidden="true">
+              <span>50%</span><span>150%</span>
+            </span>
+          </label>
+        </div>
+        <footer class="alc-settings-footer">
+          <p id="alc-settings-note">Settings affect this preview only and do not modify source.</p>
+          <button id="alc-settings-reset" type="button">Restore recommended values</button>
+        </footer>
+      </section>
+    </div>
   </div>
   <p id="alc-storage-status" class="alc-storage-status" hidden></p>
   <div id="alc-shell" class="alc-shell">
