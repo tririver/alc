@@ -3061,7 +3061,7 @@ def test_reader_equation_rows_and_css_lanes_are_bounded() -> None:
     assert "grid-template-columns: minmax(0, 1fr) max-content" in stylesheet
     assert "white-space: nowrap" in stylesheet
     assert "function setupLaneResponsiveness" not in javascript
-    assert "repeat(auto-fit, minmax(min(100%, 275px), 1fr))" in stylesheet
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in stylesheet
 
 
 def test_matching_overlay_equation_inherits_effective_label_under_node() -> None:

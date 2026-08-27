@@ -15,10 +15,33 @@
   ];
   var ROLE_APPEARANCES = {
     translation: {foreground: "#20262e", background: "#eaf1f8"},
-    companion: {foreground: "#20262e", background: "#fff8e8"},
-    guide: {foreground: "#20262e", background: "#fff8e8"},
+    companion: {foreground: "#46515b", background: "#fffcf5"},
+    guide: {foreground: "#46515b", background: "#fffcf5"},
     note: {foreground: "#f9fafb", background: "#111827"}
   };
+  var READER_FONT_STACKS = {
+    system: 'Inter, ui-sans-serif, system-ui, "PingFang SC", "Noto Sans CJK SC", sans-serif',
+    arial: 'Arial, "Helvetica Neue", Helvetica, ui-sans-serif, sans-serif',
+    helvetica: '"Helvetica Neue", Helvetica, Arial, ui-sans-serif, sans-serif',
+    georgia: 'Georgia, "Times New Roman", Times, serif',
+    times: '"Times New Roman", Times, serif',
+    charter: 'Charter, "Iowan Old Style", "Source Serif 4", Georgia, serif',
+    pingfang: '"PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif',
+    heiti: '"Heiti SC", STHeiti, "Microsoft YaHei", "Noto Sans CJK SC", sans-serif',
+    song: '"Songti SC", STSong, SimSun, "Noto Serif CJK SC", "Source Han Serif SC", serif',
+    kai: '"Kaiti SC", STKaiti, KaiTi, serif'
+  };
+  var READER_PREFERENCE_DEFAULTS = {
+    layout: "parallel",
+    editActivation: "double",
+    englishFont: "system",
+    chineseFont: "system",
+    scale: 100,
+    lineHeight: 1.65,
+    width: 100
+  };
+  var customSelectRegistry = new WeakMap();
+  var customSelectSerial = 0;
   var MAX_BLOCKS_PER_RENDER_CHUNK = 36;
   var CHUNK_BLOCK_HEIGHT_ESTIMATE = 220;
   var DIRECTORY_READ_CONCURRENCY = 8;
@@ -93,6 +116,12 @@
     visibilityContentsSignature: null,
     visibilityReady: false,
     visibilityEmptyRoot: null,
+    primaryTitleBlockId: "",
+    primaryTitleFragmentId: "",
+    readerPreferences: Object.assign({}, READER_PREFERENCE_DEFAULTS),
+    readerSettingsReady: false,
+    pendingReaderLinkTimer: null,
+    pendingReaderLinkHref: "",
     speechSupported: false,
     speechReady: false,
     speechVoices: [],
@@ -470,7 +499,23 @@
       compareCurrent: "当前版本",
       compareHistorical: "历史版本",
       restore: "恢复为新版本",
-      imageOmitted: "图片未加载"
+      imageOmitted: "图片未加载",
+      moreSettings: "更多设置",
+      closeMoreSettings: "关闭更多设置",
+      translationLayout: "译文布局",
+      parallelLayout: "左右对照",
+      stackedLayout: "上下对照",
+      enterEditMode: "进入编辑",
+      doubleClick: "双击",
+      singleClick: "单击",
+      englishFont: "英文字体",
+      chineseFont: "中文字体",
+      systemDefault: "系统默认",
+      displayScale: "显示比例",
+      readerLineHeight: "行距",
+      contentWidth: "正文宽度",
+      settingsNote: "设置仅影响当前预览，不修改源码。",
+      restoreRecommended: "恢复推荐值"
     } : {
       contents: "Contents",
       collapse: "Collapse contents",
@@ -562,7 +607,23 @@
       compareCurrent: "Current revision",
       compareHistorical: "Historical revision",
       restore: "Restore as new revision",
-      imageOmitted: "Image not loaded"
+      imageOmitted: "Image not loaded",
+      moreSettings: "More settings",
+      closeMoreSettings: "Close more settings",
+      translationLayout: "Translation layout",
+      parallelLayout: "Side by side",
+      stackedLayout: "Stacked",
+      enterEditMode: "Enter edit mode",
+      doubleClick: "Double click",
+      singleClick: "Single click",
+      englishFont: "English font",
+      chineseFont: "Chinese font",
+      systemDefault: "System default",
+      displayScale: "Display scale",
+      readerLineHeight: "Line height",
+      contentWidth: "Content width",
+      settingsNote: "Settings affect this preview only and do not modify source.",
+      restoreRecommended: "Restore recommended values"
     };
     Object.keys(publication.labels || {}).forEach(function (key) {
       defaults[key] = publication.labels[key];
@@ -579,6 +640,419 @@
   function labelToolButton(button, label) {
     button.setAttribute("aria-label", label);
     button.title = label;
+  }
+
+  function boundedReaderNumber(value, fallback, minimum, maximum) {
+    var number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return Math.min(maximum, Math.max(minimum, number));
+  }
+
+  function readerPreferenceSnapshot() {
+    var data = document.body.dataset;
+    var layout = data.alcReaderLayout;
+    var activation = data.alcReaderEditActivation;
+    var englishFont = data.alcReaderEnglishFont;
+    var chineseFont = data.alcReaderChineseFont;
+    return {
+      layout: layout === "stacked" ? "stacked" : "parallel",
+      editActivation: activation === "single" ? "single" : "double",
+      englishFont: READER_FONT_STACKS[englishFont] ? englishFont : "system",
+      chineseFont: READER_FONT_STACKS[chineseFont] ? chineseFont : "system",
+      scale: boundedReaderNumber(
+        data.alcReaderScale, READER_PREFERENCE_DEFAULTS.scale, 50, 150
+      ),
+      lineHeight: boundedReaderNumber(
+        data.alcReaderLineHeight,
+        READER_PREFERENCE_DEFAULTS.lineHeight,
+        1.3,
+        2
+      ),
+      width: boundedReaderNumber(
+        data.alcReaderWidth, READER_PREFERENCE_DEFAULTS.width, 50, 150
+      )
+    };
+  }
+
+  function applyReaderPreferences(preferences) {
+    var root = document.documentElement;
+    var body = document.body;
+    var next = Object.assign({}, READER_PREFERENCE_DEFAULTS, preferences || {});
+    state.readerPreferences = next;
+    root.style.setProperty(
+      "--alc-source-font", READER_FONT_STACKS[next.englishFont]
+    );
+    root.style.setProperty(
+      "--alc-target-font", READER_FONT_STACKS[next.chineseFont]
+    );
+    root.style.setProperty("--alc-font-scale", String(next.scale / 100));
+    root.style.setProperty(
+      "--alc-reader-line-height", String(next.lineHeight)
+    );
+    root.style.setProperty(
+      "--alc-reader-width", String(96 * next.width / 100) + "rem"
+    );
+    body.classList.toggle("alc-stacked-layout", next.layout === "stacked");
+    body.dataset.alcReaderLayout = next.layout;
+    body.dataset.alcReaderEditActivation = next.editActivation;
+    body.dataset.alcReaderEnglishFont = next.englishFont;
+    body.dataset.alcReaderChineseFont = next.chineseFont;
+    body.dataset.alcReaderScale = String(next.scale);
+    body.dataset.alcReaderLineHeight = String(next.lineHeight);
+    body.dataset.alcReaderWidth = String(next.width);
+    syncReaderPreferenceControls();
+  }
+
+  function syncReaderPreferenceControls() {
+    var preferences = state.readerPreferences;
+    var values = {
+      "alc-settings-layout": preferences.layout,
+      "alc-settings-edit": preferences.editActivation,
+      "alc-settings-english-font": preferences.englishFont,
+      "alc-settings-chinese-font": preferences.chineseFont,
+      "alc-settings-scale": String(preferences.scale),
+      "alc-settings-line": String(preferences.lineHeight),
+      "alc-settings-width": String(preferences.width)
+    };
+    Object.keys(values).forEach(function (identifier) {
+      var control = document.getElementById(identifier);
+      if (control) {
+        control.value = values[identifier];
+        syncCustomSelect(control);
+      }
+    });
+    var scale = document.getElementById("alc-settings-scale-value");
+    var line = document.getElementById("alc-settings-line-value");
+    var width = document.getElementById("alc-settings-width-value");
+    if (scale) scale.textContent = Math.round(preferences.scale) + "%";
+    if (line) line.textContent = Number(preferences.lineHeight).toFixed(2);
+    if (width) width.textContent = Math.round(preferences.width) + "%";
+  }
+
+  function setupReaderSettings() {
+    var strings = labels();
+    var control = document.querySelector(".alc-settings-control");
+    var trigger = document.getElementById("alc-settings");
+    var panel = document.getElementById("alc-settings-panel");
+    var close = document.getElementById("alc-settings-close");
+    labelToolButton(trigger, strings.moreSettings);
+    document.getElementById("alc-settings-heading").textContent =
+      strings.moreSettings;
+    close.setAttribute("aria-label", strings.closeMoreSettings);
+    document.getElementById("alc-settings-layout-label").textContent =
+      strings.translationLayout;
+    document.getElementById("alc-settings-edit-label").textContent =
+      strings.enterEditMode;
+    document.getElementById("alc-settings-english-font-label").textContent =
+      strings.englishFont;
+    document.getElementById("alc-settings-chinese-font-label").textContent =
+      strings.chineseFont;
+    document.getElementById("alc-settings-scale-label").textContent =
+      strings.displayScale;
+    document.getElementById("alc-settings-line-label").textContent =
+      strings.readerLineHeight;
+    document.getElementById("alc-settings-width-label").textContent =
+      strings.contentWidth;
+    document.getElementById("alc-settings-note").textContent = strings.settingsNote;
+    document.getElementById("alc-settings-reset").textContent =
+      strings.restoreRecommended;
+    var layout = document.getElementById("alc-settings-layout");
+    layout.options[0].textContent = strings.parallelLayout;
+    layout.options[1].textContent = strings.stackedLayout;
+    var activation = document.getElementById("alc-settings-edit");
+    activation.options[0].textContent = strings.doubleClick;
+    activation.options[1].textContent = strings.singleClick;
+    [
+      document.getElementById("alc-settings-english-font"),
+      document.getElementById("alc-settings-chinese-font")
+    ].forEach(function (select) {
+      if (select && select.options.length) {
+        select.options[0].textContent = strings.systemDefault;
+      }
+    });
+    [layout, activation,
+      document.getElementById("alc-settings-english-font"),
+      document.getElementById("alc-settings-chinese-font")
+    ].forEach(installCustomSelect);
+
+    state.readerPreferences = readerPreferenceSnapshot();
+    applyReaderPreferences(state.readerPreferences);
+    state.readerSettingsReady = true;
+
+    trigger.addEventListener("click", function () {
+      panel.hidden = !panel.hidden;
+      trigger.setAttribute("aria-expanded", String(!panel.hidden));
+      if (!panel.hidden) close.focus();
+    });
+    close.addEventListener("click", function () {
+      panel.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.focus();
+    });
+    [layout, activation,
+      document.getElementById("alc-settings-english-font"),
+      document.getElementById("alc-settings-chinese-font")
+    ].forEach(function (select) {
+      select.addEventListener("change", function () {
+        applyReaderPreferences({
+          layout: layout.value,
+          editActivation: activation.value,
+          englishFont: document.getElementById("alc-settings-english-font").value,
+          chineseFont: document.getElementById("alc-settings-chinese-font").value,
+          scale: state.readerPreferences.scale,
+          lineHeight: state.readerPreferences.lineHeight,
+          width: state.readerPreferences.width
+        });
+      });
+    });
+    ["scale", "line", "width"].forEach(function (name) {
+      document.getElementById("alc-settings-" + name).addEventListener(
+        "input", function (event) {
+          var changes = {};
+          if (name === "scale") changes.scale = Number(event.target.value);
+          if (name === "line") changes.lineHeight = Number(event.target.value);
+          if (name === "width") changes.width = Number(event.target.value);
+          applyReaderPreferences(Object.assign({}, state.readerPreferences, changes));
+        }
+      );
+    });
+    document.getElementById("alc-settings-reset").addEventListener(
+      "click", function () {
+        applyReaderPreferences(Object.assign({}, READER_PREFERENCE_DEFAULTS));
+      }
+    );
+    document.addEventListener("click", function (event) {
+      if (!panel.hidden && !control.contains(event.target)) {
+        panel.hidden = true;
+        trigger.setAttribute("aria-expanded", "false");
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && !panel.hidden) {
+        event.preventDefault();
+        panel.hidden = true;
+        trigger.setAttribute("aria-expanded", "false");
+        trigger.focus();
+      }
+    });
+  }
+
+  function selectListbox(wrapper) {
+    return wrapper && (
+      wrapper._alcListbox || wrapper.querySelector(".alc-select-listbox")
+    );
+  }
+
+  function closeCustomSelect(wrapper, restoreFocus) {
+    if (!wrapper) return;
+    var trigger = wrapper.querySelector(".alc-select-trigger");
+    var listbox = selectListbox(wrapper);
+    if (!trigger || !listbox) return;
+    listbox.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (restoreFocus) trigger.focus();
+  }
+
+  function closeOtherCustomSelects(current) {
+    document.querySelectorAll(".alc-custom-select").forEach(function (wrapper) {
+      if (wrapper !== current) closeCustomSelect(wrapper, false);
+    });
+  }
+
+  function customSelectOptions(wrapper) {
+    return Array.prototype.slice.call(
+      selectListbox(wrapper).querySelectorAll('[role="option"]')
+    );
+  }
+
+  function positionCustomSelect(wrapper) {
+    var trigger = wrapper.querySelector(".alc-select-trigger");
+    var listbox = selectListbox(wrapper);
+    if (!trigger || !listbox) return;
+    var rectangle = trigger.getBoundingClientRect();
+    var gutter = 8;
+    var below = window.innerHeight - rectangle.bottom - gutter;
+    var above = rectangle.top - gutter;
+    var opensBelow = below >= 176 || below >= above;
+    var available = Math.max(112, (opensBelow ? below : above) - gutter);
+    var compact = wrapper.dataset.compact === "true";
+    var width = Math.min(
+      compact ? rectangle.width : Math.max(rectangle.width, 176),
+      window.innerWidth - gutter * 2
+    );
+    var left = Math.min(
+      Math.max(gutter, rectangle.left), window.innerWidth - width - gutter
+    );
+    listbox.style.width = width + "px";
+    listbox.style.left = left + "px";
+    listbox.style.right = "auto";
+    listbox.style.maxHeight = Math.min(compact ? 240 : 320, available) + "px";
+    if (opensBelow) {
+      listbox.style.top = rectangle.bottom + 5 + "px";
+      listbox.style.bottom = "auto";
+    } else {
+      listbox.style.top = "auto";
+      listbox.style.bottom = window.innerHeight - rectangle.top + 5 + "px";
+    }
+  }
+
+  function openCustomSelect(wrapper, focusSelected) {
+    var trigger = wrapper.querySelector(".alc-select-trigger");
+    var listbox = selectListbox(wrapper);
+    if (!trigger || !listbox || trigger.disabled) return;
+    closeOtherCustomSelects(wrapper);
+    if (listbox.parentElement !== document.body) document.body.appendChild(listbox);
+    listbox.hidden = false;
+    positionCustomSelect(wrapper);
+    trigger.setAttribute("aria-expanded", "true");
+    if (focusSelected) {
+      var options = customSelectOptions(wrapper);
+      var selected = options.find(function (option) {
+        return option.getAttribute("aria-selected") === "true";
+      }) || options[0];
+      if (selected) selected.focus();
+    }
+  }
+
+  function syncCustomSelect(select) {
+    var wrapper = customSelectRegistry.get(select);
+    if (!wrapper) return;
+    var trigger = wrapper.querySelector(".alc-select-trigger");
+    var value = wrapper.querySelector(".alc-select-value");
+    var listbox = selectListbox(wrapper);
+    var selected = select.options[select.selectedIndex] || select.options[0];
+    trigger.disabled = select.disabled;
+    value.textContent = selected ? selected.textContent : "";
+    listbox.replaceChildren();
+    Array.prototype.forEach.call(select.options, function (nativeOption) {
+      var option = element("button", "alc-select-option", nativeOption.textContent);
+      option.type = "button";
+      option.setAttribute("role", "option");
+      option.setAttribute(
+        "aria-selected", String(nativeOption.value === select.value)
+      );
+      option.dataset.value = nativeOption.value;
+      option.addEventListener("click", function () {
+        select.value = option.dataset.value;
+        select.dispatchEvent(new window.Event("change", {bubbles: true}));
+        syncCustomSelect(select);
+        closeCustomSelect(wrapper, true);
+      });
+      option.addEventListener("keydown", function (event) {
+        var options = customSelectOptions(wrapper);
+        var index = options.indexOf(option);
+        var target = -1;
+        if (event.key === "ArrowDown") {
+          target = Math.min(options.length - 1, index + 1);
+        } else if (event.key === "ArrowUp") {
+          target = Math.max(0, index - 1);
+        } else if (event.key === "Home") target = 0;
+        else if (event.key === "End") target = options.length - 1;
+        else if (event.key === "Escape") {
+          event.preventDefault();
+          closeCustomSelect(wrapper, true);
+          return;
+        }
+        if (target >= 0) {
+          event.preventDefault();
+          options[target].focus();
+        }
+      });
+      listbox.appendChild(option);
+    });
+  }
+
+  function selectChevronMarkup() {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+      '<path d="m7 9.5 5 5 5-5"></path></svg>';
+  }
+
+  function hideNativeSelectForCustomControl(select) {
+    select.classList.add("alc-native-select");
+    select.tabIndex = -1;
+    select.setAttribute("aria-hidden", "true");
+  }
+
+  function installCustomSelect(select) {
+    if (!select || customSelectRegistry.has(select)) return;
+    if (!select.id) {
+      customSelectSerial += 1;
+      select.id = "alc-select-" + customSelectSerial;
+    }
+    var listboxId = select.id + "-listbox";
+    var wrapper = element("div", "alc-custom-select");
+    wrapper.innerHTML =
+      '<button type="button" class="alc-select-trigger" aria-haspopup="listbox" ' +
+        'aria-expanded="false" aria-controls="' + listboxId + '">' +
+        '<span class="alc-select-value"></span>' + selectChevronMarkup() +
+      '</button>' +
+      '<div id="' + listboxId + '" class="alc-select-listbox" ' +
+        'role="listbox" hidden></div>';
+    hideNativeSelectForCustomControl(select);
+    select.insertAdjacentElement("afterend", wrapper);
+    var listbox = wrapper.querySelector(".alc-select-listbox");
+    wrapper._alcListbox = listbox;
+    customSelectRegistry.set(select, wrapper);
+    var trigger = wrapper.querySelector(".alc-select-trigger");
+    var value = wrapper.querySelector(".alc-select-value");
+    value.id = select.id + "-value";
+    var field = select.closest(".alc-settings-field, .alc-speech-field");
+    var label = field && field.querySelector(":scope > span");
+    if (label) {
+      if (!label.id) label.id = select.id + "-label";
+      trigger.setAttribute("aria-labelledby", label.id + " " + value.id);
+      listbox.setAttribute("aria-labelledby", label.id);
+    } else {
+      trigger.setAttribute("aria-labelledby", value.id);
+    }
+    wrapper.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+    listbox.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+    trigger.addEventListener("click", function () {
+      if (listbox.hidden) openCustomSelect(wrapper, false);
+      else closeCustomSelect(wrapper, false);
+    });
+    trigger.addEventListener("keydown", function (event) {
+      if (["ArrowDown", "ArrowUp", "Home", "End"].indexOf(event.key) < 0) return;
+      event.preventDefault();
+      openCustomSelect(wrapper, true);
+      var options = customSelectOptions(wrapper);
+      if (event.key === "End" && options.length) options[options.length - 1].focus();
+      if (event.key === "Home" && options.length) options[0].focus();
+    });
+    syncCustomSelect(select);
+  }
+
+  function setupCustomSelectEvents() {
+    document.addEventListener("pointerdown", function (event) {
+      if (event.target.closest && event.target.closest(
+        ".alc-custom-select, .alc-select-listbox"
+      )) return;
+      closeOtherCustomSelects(null);
+    }, true);
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape") return;
+      var open = Array.prototype.find.call(
+        document.querySelectorAll(".alc-custom-select"), function (wrapper) {
+          return !selectListbox(wrapper).hidden;
+        }
+      );
+      if (open) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeCustomSelect(open, true);
+      }
+    }, true);
+    document.addEventListener("scroll", function (event) {
+      if (event.target.closest && event.target.closest(".alc-select-listbox")) return;
+      closeOtherCustomSelects(null);
+    }, true);
+    window.addEventListener("resize", function () {
+      closeOtherCustomSelects(null);
+    });
   }
 
   function setupMarkdown() {
@@ -999,36 +1473,71 @@
     return {selected: current, diagnostics: diagnostics};
   }
 
+  function updatePrimaryTitleState(documentValue) {
+    var titlePromotion = primaryTitlePromotion(documentValue);
+    state.primaryTitleBlockId = titlePromotion ?
+      titlePromotion.block.block_id : "";
+    state.primaryTitleFragmentId = titlePromotion ?
+      titlePromotion.fragment.fragment_id : "";
+    document.body.dataset.alcPrimaryTitleBlockId = state.primaryTitleBlockId;
+    document.body.dataset.alcPrimaryTitleFragmentId =
+      state.primaryTitleFragmentId;
+    return titlePromotion;
+  }
+
+  function renderBookHeader(documentValue) {
+    var publication = state.payload.publication;
+    var profile = publication.reader_profile || {};
+    var title = readerTitle();
+    document.title = title;
+    document.documentElement.lang = profile.target_language ||
+      profile.source_language || "und";
+    var titlePromotion = updatePrimaryTitleState(documentValue);
+    var header = document.getElementById("alc-book-header");
+    header.replaceChildren();
+    var heading = element("h1", "", title);
+    removeVisibleHtmlTags(heading);
+    header.appendChild(heading);
+    decorateGlossary(heading, "source");
+    decorateGlossary(heading, "target");
+    if (titlePromotion) {
+      var translatedTitle = renderFragment(titlePromotion.fragment);
+      translatedTitle.classList.add("alc-translated-title");
+      translatedTitle.lang = titlePromotion.fragment.language ||
+        profile.target_language || document.documentElement.lang;
+      header.appendChild(translatedTitle);
+    }
+    if (Array.isArray(profile.authors) && profile.authors.length) {
+      header.appendChild(element("p", "alc-authors", profile.authors.join(", ")));
+    }
+  }
+
+  function syncPromotedTitleSurface() {
+    if (!state.payload || !state.fragmentGroups) return;
+    if (
+      typeof document.querySelector !== "function" ||
+      !document.querySelector("#alc-book-header")
+    ) return;
+    renderBookHeader(state.payload.publication.source_document);
+  }
+
   function renderReader() {
     stopProgressiveRendering();
     state.bibliographyIndexCache = null;
     state.glossarySurfaceCache = {source: null, target: null};
     var publication = state.payload.publication;
     var documentValue = publication.source_document;
-    var profile = publication.reader_profile || {};
     var strings = labels();
-    var title = readerTitle();
-    document.title = title;
-    document.documentElement.lang = profile.target_language ||
-      profile.source_language || "und";
 
-    var header = document.getElementById("alc-book-header");
+    loadPayloadForBlockRange(0, 1);
+    state.fragmentGroups = groupedFragments(documentValue);
+    renderBookHeader(documentValue);
+
     var main = document.getElementById("ac-document");
     var contents = document.getElementById("alc-contents-list");
-    header.replaceChildren();
     main.replaceChildren();
     contents.replaceChildren();
 
-    var heading = element("h1", "", title);
-    removeVisibleHtmlTags(heading);
-    header.appendChild(heading);
-    decorateGlossary(heading, "source");
-    decorateGlossary(heading, "target");
-    if (Array.isArray(profile.authors) && profile.authors.length) {
-      header.appendChild(element("p", "alc-authors", profile.authors.join(", ")));
-    }
-
-    state.fragmentGroups = groupedFragments(documentValue);
     state.renderPlan = buildRenderChunks(
       documentValue.blocks || [], publication.outline || []
     );
@@ -1090,6 +1599,45 @@
     var initialChunk = initialRenderChunk();
     state.hydrationOrder = hydrationOrderFrom(initialChunk);
     updateRenderComplete();
+  }
+
+  function primaryTitlePromotion(documentValue) {
+    var block = (documentValue.blocks || []).find(function (candidate) {
+      var payload = candidate && candidate.payload || {};
+      return candidate && candidate.kind === "heading" &&
+        Number(payload.level) === 1;
+    });
+    if (!block) return null;
+    var candidates = (state.fragmentGroups.get(block.block_id) || []).slice();
+    var known = new Set();
+    state.selected.forEach(function (candidate) {
+      if (fragmentTargetId(candidate) === block.block_id) {
+        known.add(candidate.fragment_id);
+      }
+    });
+    candidates.forEach(function (candidate) {
+      known.add(candidate.fragment_id);
+    });
+    (state.payload.selected_heading_fragments || []).forEach(function (candidate) {
+      if (
+        candidate && candidate.target_id === block.block_id &&
+        !known.has(candidate.fragment_id)
+      ) {
+        candidates.push(candidate);
+        known.add(candidate.fragment_id);
+      }
+    });
+    candidates.sort(function (left, right) {
+      return Number(left.priority) - Number(right.priority) ||
+        String(left.fragment_id).localeCompare(String(right.fragment_id));
+    });
+    var fragment = candidates.find(
+      function (candidate) {
+        return fragmentIsVisible(candidate) &&
+          candidate.role === "translation" && candidate.priority <= 100;
+      }
+    );
+    return fragment ? {block: block, fragment: fragment} : null;
   }
 
   function buildRenderChunks(blocks, outline) {
@@ -1301,6 +1849,7 @@
       state.fragmentGroups = groupedFragments(
         state.payload.publication.source_document
       );
+      syncPromotedTitleSurface();
     }
     syncVisibilityRoles();
     renderDiagnostics(state.diagnosticsRoot);
@@ -1321,6 +1870,7 @@
 
   function refreshFragmentGroup(fragmentId, anchor) {
     updateFragmentGroup(fragmentId, anchor);
+    syncPromotedTitleSurface();
   }
 
   function updateFragmentGroup(fragmentId, anchor) {
@@ -1431,16 +1981,36 @@
     row.id = "block-" + safeToken(block.block_id);
     row.dataset.blockId = block.block_id;
     row.dataset.blockKind = block.kind;
+    if (
+      block.block_id === state.primaryTitleBlockId &&
+      state.primaryTitleFragmentId
+    ) {
+      row.classList.add("alc-promoted-title-row");
+    }
     var lanes = element("div", "alc-lanes");
+    lanes.classList.toggle(
+      "has-parallel-translation",
+      fragments.some(function (item) {
+        return item.priority <= 100 && item.role === "translation" &&
+          item.fragment_id !== state.primaryTitleFragmentId;
+      })
+    );
     var source = element("section", "alc-source-card");
     source.dataset.role = "source";
+    source.lang = (state.payload.publication.reader_profile || {}).source_language ||
+      document.documentElement.lang;
     source.appendChild(renderSourceBlock(block));
     lanes.appendChild(source);
 
     fragments.filter(function (item) {
-      return item.priority <= 100;
+      return item.priority <= 100 &&
+        item.fragment_id !== state.primaryTitleFragmentId;
     }).forEach(function (item) {
-      lanes.appendChild(renderFragment(item));
+      var card = renderFragment(item);
+      if (block.kind === "figure" && item.role === "translation") {
+        mirrorSourceFigure(source, card);
+      }
+      lanes.appendChild(card);
     });
     row.appendChild(lanes);
 
@@ -1460,6 +2030,22 @@
     });
     row.appendChild(noteButton);
     return row;
+  }
+
+  function mirrorSourceFigure(source, card) {
+    var sourceFigure = source && source.querySelector("figure");
+    var saved = card && card.querySelector(".alc-fragment-saved-content");
+    if (!sourceFigure || !saved || saved.querySelector("img")) return;
+    var figure = sourceFigure.cloneNode(true);
+    figure.classList.add("alc-translation-figure");
+    if (figure.id) figure.removeAttribute("id");
+    Array.prototype.forEach.call(figure.querySelectorAll("[id]"), function (node) {
+      node.removeAttribute("id");
+    });
+    var caption = figure.querySelector("figcaption");
+    if (caption) caption.remove();
+    saved.insertAdjacentElement("beforebegin", figure);
+    card.classList.add("alc-translation-figure-card");
   }
 
   function documentNotesBefore(blockId) {
@@ -1821,6 +2407,15 @@
     card.dataset.role = visual.role;
     card.dataset.roleSlot = String(roleSlot(visual.role));
     card.dataset.priority = String(visual.priority);
+    card.lang = visual.language ||
+      (state.payload.publication.reader_profile || {}).target_language ||
+      document.documentElement.lang;
+    if (
+      fragment.fragment_id === state.primaryTitleFragmentId &&
+      visual.role === "translation" && visual.priority <= 100
+    ) {
+      card.classList.add("alc-translated-title");
+    }
     if (editing) {
       applyFragmentAppearance(card, visual.role, visual.appearance);
     }
@@ -2059,6 +2654,9 @@
     document.body.classList.toggle("alc-no-visible-content", channels === 0);
     document.body.classList.toggle("alc-source-hidden", !state.sourceVisible);
     document.body.classList.toggle(
+      "alc-translation-hidden", state.hiddenRoles.has("translation")
+    );
+    document.body.classList.toggle(
       "alc-show-page-markers", state.pageMarkersVisible
     );
     if (state.visibilityEmptyRoot) state.visibilityEmptyRoot.hidden = channels !== 0;
@@ -2088,7 +2686,10 @@
     });
     if (!state.sourceVisible) {
       rules.push(".alc-source-card{display:none}");
-      if (channels > 0) {
+      var translationSlot = state.roleSlots.get("translation");
+      var translationVisible = translationSlot !== undefined &&
+        !state.hiddenRoles.has("translation");
+      if (channels > 0 && !translationVisible) {
         rules.push(
           '.alc-source-row[data-block-kind="figure"] .alc-source-card{display:block}'
         );
@@ -2108,10 +2709,8 @@
           '.alc-source-row:not([data-block-kind="figure"]){display:none}'
         );
       }
-      var translationSlot = state.roleSlots.get("translation");
       if (
-        translationSlot !== undefined &&
-        !state.hiddenRoles.has("translation")
+        translationVisible
       ) {
         rules.push(
           '.alc-source-row[data-block-kind="figure"]:has(' +
@@ -2692,7 +3291,8 @@
       var item = element("li");
       item.dataset.level = String(section.level);
       var link = element("a");
-      link.href = "#block-" + safeToken(section.anchor_block_id);
+      link.href = section.anchor_block_id === state.primaryTitleBlockId ?
+        "#alc-book-header" : "#block-" + safeToken(section.anchor_block_id);
       link.dataset.blockId = section.anchor_block_id;
       link.dataset.sourceTitle = String(section.title || "");
       appendTocTitle(link, section.title);
@@ -3328,7 +3928,10 @@
       if (!link) return;
       var href = link.getAttribute("href") || "";
       var targetId = hashTargetId(href);
-      if (!chunkForTargetId(targetId)) return;
+      if (
+        targetId !== "alc-book-header" &&
+        !chunkForTargetId(targetId)
+      ) return;
       event.preventDefault();
       activateHashTarget(href, true);
     });
@@ -3343,6 +3946,18 @@
 
   function activateHashTarget(hash, updateHistory) {
     var targetId = hashTargetId(hash);
+    if (targetId === "alc-book-header") {
+      if (updateHistory) {
+        if (window.location.hash === hash) {
+          window.history.replaceState(null, "", hash);
+        } else {
+          window.history.pushState(null, "", hash);
+        }
+      }
+      state.hashCalibration = null;
+      scrollToReaderTop();
+      return true;
+    }
     var chunk = chunkForTargetId(targetId);
     if (!chunk) return false;
     renderChunk(chunk);
@@ -3356,6 +3971,16 @@
     }
     scrollToHashTarget(targetId);
     return true;
+  }
+
+  function scrollToReaderTop() {
+    window.requestAnimationFrame(function () {
+      var root = document.documentElement;
+      var previousBehavior = root.style.scrollBehavior;
+      root.style.scrollBehavior = "auto";
+      window.scrollTo({top: 0, left: 0, behavior: "auto"});
+      root.style.scrollBehavior = previousBehavior;
+    });
   }
 
   function armHashCalibration(hash) {
@@ -3481,6 +4106,18 @@
     window.addEventListener("resize", function () {
       if (open && !mobile.matches) setWidth(width);
     });
+    if (typeof mobile.addEventListener === "function") {
+      mobile.addEventListener("change", function (event) {
+        if (event.matches) setOpen(false);
+      });
+    }
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("pointerdown", function (event) {
+        if (!mobile.matches || !open) return;
+        if (contents.contains(event.target) || toggle.contains(event.target)) return;
+        setOpen(false);
+      }, true);
+    }
     setWidth(width);
     setOpen(open);
     toggle.onclick = function () { setOpen(!open); };
@@ -5382,6 +6019,8 @@
       setupMarkdown();
       initialRevisions();
       captureInitialSelection();
+      setupCustomSelectEvents();
+      setupReaderSettings();
       renderReader();
       setupVisibility();
       setupSpeech();

@@ -301,8 +301,16 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-speech-play"' in text
     assert 'id="alc-speech-pause"' in text
     assert 'id="alc-speech-stop"' in text
-    assert text.count('class="alc-tool-icon"') == 5
-    assert text.count('class="alc-tool-button alc-tool-icon-button"') == 5
+    assert 'id="alc-settings"' in text
+    assert 'id="alc-settings-panel"' in text
+    assert 'id="alc-settings-layout"' in text
+    assert 'id="alc-settings-english-font"' in text
+    assert 'id="alc-settings-chinese-font"' in text
+    assert 'id="alc-settings-scale"' in text
+    assert 'id="alc-settings-line"' in text
+    assert 'id="alc-settings-width"' in text
+    assert text.count('class="alc-tool-icon"') == 6
+    assert text.count('class="alc-tool-button alc-tool-icon-button"') == 6
     assert 'id="alc-connect" class="alc-tool-button alc-tool-icon-button"' in text
     assert 'aria-label="New save location" title="New save location"' in text
     assert 'id="alc-contents-resizer"' in text
