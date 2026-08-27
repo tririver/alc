@@ -4536,8 +4536,311 @@ def test_reader_lazily_loads_v2_payload_and_exports_v1_snapshot() -> None:
     )
     assert "state.payloadChunks.forEach(loadPayloadChunk)" in javascript
     assert "(state.payload.resources || []).forEach(hydrateResource)" in javascript
+    run_export = javascript[
+        javascript.index("async function runExport") :
+        javascript.index("function orderedExportCategories")
+    ]
+    assert 'loadAllPayload(request.kind !== "markdown-package");' in run_export
+    portable_resources = javascript[
+        javascript.index("function portableMarkdownResources") :
+        javascript.index("function portableResourceBasename")
+    ]
+    assert "hydrateResource(value.resource)" in portable_resources
     assert 'payload.schema_version = "alc.render.reader_payload.v1"' in javascript
     assert ".alc-render-reader-chunk, .alc-render-reader-resource" in javascript
+
+
+def test_markdown_export_hydrates_only_included_v2_resources_under_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcReaderTest = {
+    state: state,
+    loadAllPayload: loadAllPayload,
+    portableMarkdownResources: portableMarkdownResources
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcReaderTest;
+var keepDigest = "a".repeat(64);
+var skipDigest = "b".repeat(64);
+var accesses = [];
+var payloads = {
+  "keep-payload": {
+    schema_version: "alc.render.reader_resource.v1",
+    resource: {
+      artifact_digest: keepDigest,
+      media_type: "image/png",
+      logical_name: "keep.png",
+      size: 1,
+      data_uri: "data:image/png;base64,AA=="
+    }
+  },
+  "skip-payload": {
+    schema_version: "alc.render.reader_resource.v1",
+    resource: {
+      artifact_digest: skipDigest,
+      media_type: "image/png",
+      logical_name: "skip.png",
+      size: 1,
+      data_uri: "data:image/png;base64,AQ=="
+    }
+  }
+};
+globalThis.document = {
+  getElementById: function (id) {
+    accesses.push(id);
+    return {textContent: JSON.stringify(payloads[id])};
+  }
+};
+helpers.state.payloadVersion = "v2";
+helpers.state.payloadChunks = [];
+helpers.state.payload = {
+  resources: [
+    {
+      artifact_digest: keepDigest,
+      media_type: "image/png",
+      logical_name: "keep.png",
+      size: 1,
+      payload_id: "keep-payload"
+    },
+    {
+      artifact_digest: skipDigest,
+      media_type: "image/png",
+      logical_name: "skip.png",
+      size: 1,
+      payload_id: "skip-payload"
+    }
+  ]
+};
+helpers.loadAllPayload(false);
+assert(accesses.length === 0, "plain Markdown eagerly hydrated resources");
+var included = new Set(["resources/" + keepDigest + "/keep.png"]);
+var result = helpers.portableMarkdownResources(
+  helpers.state.payload.resources, included
+);
+assert(
+  accesses.join(",") === "keep-payload",
+  "package export hydrated an unselected resource"
+);
+assert(
+  result.manifest.length === 1 && result.manifest[0].logical_name === "keep.png",
+  "selected resource was not packaged"
+);
+'''
+    )
+
+    subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_reader_hydrates_external_revision_anchor_before_validation() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    parser = javascript[
+        javascript.index("async function parseRevisionFile") :
+        javascript.index("async function semanticDigest")
+    ]
+    assert parser.index("loadPayloadForRevisionMetadata(metadata);") < parser.index(
+        "validateRevisionMetadata(metadata);"
+    )
+    directory_loader = javascript[
+        javascript.index("async function loadDirectoryRevisions") :
+        javascript.index("function commitDirectorySnapshot")
+    ]
+    outcomes = directory_loader.index("var outcomes =")
+    assert directory_loader.index(
+        "state.embeddedRevisions.forEach(function (revision)", outcomes
+    ) > outcomes
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        "globalThis.crypto = require('node:crypto').webcrypto;\n"
+        + javascript[:startup]
+        + """
+  globalThis.__alcReaderTest = {
+    state: state,
+    parseRevisionFile: parseRevisionFile,
+    semanticDigest: semanticDigest,
+    stableStringify: stableStringify
+  };
+}());
+(async function () {
+  var helpers = globalThis.__alcReaderTest;
+  var fingerprint = "a".repeat(64);
+  var source = {
+    artifact_digest: "1".repeat(64),
+    media_type: "text/html",
+    rich_document_digest: "2".repeat(64),
+    size: 10,
+    source_format: "html"
+  };
+  var locator = {
+    column_end: 1,
+    column_start: 1,
+    line_end: 8,
+    line_start: 8,
+    selector: "#target",
+    source_format: "html",
+    source_id: "target"
+  };
+  var manifests = [
+    {block_id: "block-unrelated", kind: "paragraph", ordinal: 0},
+    {block_id: "block-target", kind: "paragraph", ordinal: 1}
+  ];
+  var descriptors = [{
+    chunk_id: "chunk-unrelated",
+    block_start: 0,
+    block_end: 1,
+    payload_id: "payload-unrelated"
+  }, {
+    chunk_id: "chunk-target",
+    block_start: 1,
+    block_end: 2,
+    payload_id: "payload-target"
+  }];
+  var chunks = {
+    "payload-unrelated": {
+      schema_version: "alc.render.reader_chunk.v1",
+      chunk_id: "chunk-unrelated",
+      block_start: 0,
+      block_end: 1,
+      blocks: [{
+        block_id: "block-unrelated", kind: "paragraph", ordinal: 0,
+        locator: Object.assign({}, locator, {selector: "#unrelated"}),
+        payload: {text: "unrelated"}
+      }],
+      block_fingerprints: {"block-unrelated": "c".repeat(64)},
+      revisions: []
+    },
+    "payload-target": {
+      schema_version: "alc.render.reader_chunk.v1",
+      chunk_id: "chunk-target",
+      block_start: 1,
+      block_end: 2,
+      blocks: [{
+        block_id: "block-target", kind: "paragraph", ordinal: 1,
+        locator: locator, payload: {text: "target"}
+      }],
+      block_fingerprints: {"block-target": fingerprint},
+      revisions: []
+    }
+  };
+  globalThis.document = {
+    body: {dataset: {}},
+    getElementById: function (id) {
+      return chunks[id] ? {textContent: JSON.stringify(chunks[id])} : null;
+    }
+  };
+  helpers.state.payloadVersion = "v2";
+  helpers.state.payload = {
+    schema_version: "alc.render.reader_payload.v2",
+    source_identity: source,
+    block_manifest: manifests,
+    block_fingerprints: {},
+    reader_chunks: descriptors,
+    resources: [],
+    diagnostics: [],
+    selected_roles: [],
+    publication: {
+      source_document: {blocks: manifests.slice(), metadata: {}},
+      outline: [],
+      bibliography: [],
+      glossary: [],
+      labels: {},
+      reader_profile: {}
+    }
+  };
+  helpers.state.payloadChunks = descriptors;
+  helpers.state.payloadChunksById = new Map(descriptors.map(function (item) {
+    return [item.chunk_id, item];
+  }));
+  helpers.state.payloadChunkByBlockId = new Map([
+    ["block-unrelated", descriptors[0]],
+    ["block-target", descriptors[1]]
+  ]);
+  helpers.state.loadedPayloadChunkIds = new Set();
+  helpers.state.loadingPayloadChunkIds = new Set();
+  helpers.state.embeddedRevisions = [];
+  helpers.state.revisions = new Map();
+  helpers.state.revisionDigests = new Map();
+  helpers.state.selected = new Map();
+  helpers.state.activeFragmentIds = new Set();
+  helpers.state.sourceIndexes = null;
+  helpers.state.indexedPayload = null;
+  helpers.state.sourceIdentityJson = null;
+  var metadata = {
+    anchor: {
+      kind: "block",
+      related_blocks: [{
+        block_id: "block-target",
+        content_fingerprint: fingerprint,
+        kind: "paragraph",
+        locator: locator,
+        ordinal: 1
+      }],
+      target_id: "block-target"
+    },
+    appearance: null,
+    citation_ids: [],
+    deleted: false,
+    fragment_id: "external-note",
+    language: "zh-CN",
+    parent_semantic_digest: "b".repeat(64),
+    priority: 110,
+    provenance: {producer: "alc-render-browser"},
+    revision: 2,
+    role: "note",
+    schema_version: "alc.render.fragment_revision.v3",
+    source: source,
+    title: "External note"
+  };
+  var markdown = "external revision";
+  var digest = await helpers.semanticDigest(metadata, markdown);
+  var encoded = "<!-- ALC:FRAGMENT-JSON:BEGIN -->\\n" +
+    helpers.stableStringify(metadata) +
+    "\\n<!-- ALC:FRAGMENT-JSON:END -->\\n" + markdown;
+  var parsed = await helpers.parseRevisionFile(
+    encoded, "revision-000002-" + digest + ".md"
+  );
+  if (parsed.fragment_id !== "external-note") {
+    throw new Error("external revision was not parsed after anchor hydration");
+  }
+  if (!helpers.state.loadedPayloadChunkIds.has("chunk-target")) {
+    throw new Error("external revision did not hydrate its anchor chunk");
+  }
+  if (helpers.state.loadedPayloadChunkIds.has("chunk-unrelated")) {
+    throw new Error("external revision hydrated an unrelated chunk");
+  }
+  if (!helpers.state.payload.publication.source_document.blocks[1].locator) {
+    throw new Error("anchor hydration did not replace the block manifest");
+  }
+})().catch(function (error) {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    )
+    subprocess.run(
+        [node, "-"], input=instrumented, check=True, capture_output=True, text=True
+    )
 
 
 def test_reader_hydration_waits_for_quiet_idle_budget_and_activity_reset() -> None:
