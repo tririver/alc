@@ -953,6 +953,88 @@ img.alc-markdown-image {
   box-shadow: 0 1rem 4rem rgb(20 31 42 / 22%);
 }
 .alc-dialog::backdrop { background: rgb(18 26 34 / 35%); }
+.alc-unsaved-dialog {
+  width: min(30rem, calc(100% - 2rem));
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: .75rem;
+  color: var(--alc-ink);
+  background: white;
+  box-shadow: 0 1.25rem 4rem rgb(20 31 41 / 28%);
+}
+.alc-unsaved-dialog::backdrop { background: rgb(18 26 34 / 52%); }
+.alc-unsaved-surface { display: grid; }
+.alc-unsaved-surface > header {
+  display: flex;
+  gap: 1rem;
+  align-items: start;
+  justify-content: space-between;
+  padding: 1.25rem 1.25rem .7rem;
+}
+.alc-unsaved-surface h2 { margin: 0; font-size: 1.1rem; line-height: 1.35; }
+#alc-unsaved-close {
+  display: inline-grid;
+  place-items: center;
+  width: 2.75rem;
+  min-width: 2.75rem;
+  height: 2.75rem;
+  margin: -.55rem -.55rem 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: .5rem;
+  color: #586571;
+  background: transparent;
+}
+#alc-unsaved-close:hover { background: #eef3f6; }
+#alc-unsaved-description {
+  margin: 0;
+  padding: 0 1.25rem 1.25rem;
+  color: #4f5c67;
+  line-height: 1.65;
+}
+.alc-unsaved-error {
+  margin: 0 1.25rem 1.1rem;
+  padding: .7rem .8rem;
+  border: 1px solid #d9aaaa;
+  border-radius: .45rem;
+  color: #862f2f;
+  background: #fff5f5;
+  font-size: .82rem;
+  line-height: 1.5;
+}
+.alc-unsaved-surface > footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .65rem;
+  justify-content: end;
+  padding: 1rem 1.25rem 1.25rem;
+  border-top: 1px solid var(--alc-line);
+}
+.alc-unsaved-surface > footer button {
+  min-height: 2.25rem;
+  padding: .35rem .7rem;
+  border: 1px solid #aeb9c2;
+  border-radius: .5rem;
+  color: #25313c;
+  background: white;
+  font-size: .82rem;
+}
+#alc-unsaved-discard { border-color: #d4a3a3; color: #8a2f2f; }
+#alc-unsaved-save { border-color: #245f86; color: white; background: #245f86; }
+#alc-unsaved-save:hover { background: #194c6e; }
+.alc-unsaved-dialog button:focus-visible {
+  outline: 3px solid #9ec4df;
+  outline-offset: 2px;
+}
+.alc-unsaved-dialog button[data-initial-focus]:focus-visible {
+  outline: none;
+}
+@media (hover: none), (pointer: coarse) {
+  .alc-unsaved-surface > footer button {
+    min-height: 2.75rem;
+  }
+}
 .alc-dialog-form {
   display: block;
   height: 100%;
@@ -975,6 +1057,7 @@ img.alc-markdown-image {
   display: flex;
   align-items: center;
   gap: .7rem;
+  margin-left: auto;
 }
 .alc-dialog-fields {
   display: grid;
@@ -1253,7 +1336,26 @@ img.alc-markdown-image {
     min-height: min(10rem, 40dvh);
     max-height: 62dvh;
   }
-  .alc-inline-actions button { min-height: 2.5rem; }
+  .alc-inline-actions button {
+    position: relative;
+    height: 2.2rem;
+    min-height: 2.2rem;
+  }
+  .alc-inline-actions button::before {
+    position: absolute;
+    inset: -.275rem 0;
+    content: "";
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 @media print {

@@ -492,6 +492,12 @@
       draftRedirected: traditional ?
         "目前編輯有未儲存內容，已返回該編輯框。" :
         "当前编辑有未保存内容，已返回该编辑框。",
+      saveCurrentChanges: "保存当前修改？",
+      saveBeforeExit: "你已修改当前内容。可以保存修改并退出，也可以不保存直接退出。",
+      discardChanges: "不保存",
+      saveChanges: "保存修改",
+      continueEditing: "继续编辑",
+      saveFailedInEditor: "未能完成保存。修改仍保留在编辑区，请检查页面提示后重试。",
       editContent: "编辑这段 Markdown",
       loading: "正在读取版本……",
       historyChanged: "目录中的当前版本已变化；请关闭编辑器并重新打开后再保存。",
@@ -600,6 +606,12 @@
       saveUnchanged: "Content is unchanged.",
       draftActive: "Save or cancel the current edit first.",
       draftRedirected: "The current edit has unsaved changes; returned to it.",
+      saveCurrentChanges: "Save current changes?",
+      saveBeforeExit: "Save the changes before leaving this editor, or leave without saving.",
+      discardChanges: "Don't save",
+      saveChanges: "Save changes",
+      continueEditing: "Continue editing",
+      saveFailedInEditor: "The save could not be completed. Changes remain in the editor; check the page status and try again.",
       editContent: "Edit this Markdown",
       loading: "Loading revisions…",
       historyChanged: "The current directory revision changed; close and reopen the editor before saving.",
@@ -1065,6 +1077,7 @@
       typographer: false,
       breaks: false
     });
+    md.enable("table");
 
     md.inline.ruler.before("escape", "alc_math_inline", function (parserState, silent) {
       var source = parserState.src;
@@ -2447,8 +2460,10 @@
     decorateOverlayEquation(rendered, fragment);
     saved.appendChild(rendered);
     saved.addEventListener("click", function (event) {
-      if (interactiveFragmentTarget(event.target)) return;
-      beginInlineEdit(fragment);
+      handleSavedFragmentClick(event, fragment);
+    });
+    saved.addEventListener("dblclick", function (event) {
+      handleSavedFragmentDoubleClick(event, fragment);
     });
     card.appendChild(saved);
     if (editing) {
@@ -2475,6 +2490,62 @@
     return Boolean(target && target.closest && target.closest(
       "a, button, input, textarea, select, .glossary-term"
     ));
+  }
+
+  function clearPendingReaderLink() {
+    if (state.pendingReaderLinkTimer !== null) {
+      window.clearTimeout(state.pendingReaderLinkTimer);
+      state.pendingReaderLinkTimer = null;
+    }
+    state.pendingReaderLinkHref = "";
+  }
+
+  function followReaderLink(href) {
+    if (!href) return;
+    var url;
+    try {
+      url = new URL(href, window.location.href);
+    } catch (_error) {
+      return;
+    }
+    if (
+      url.origin === window.location.origin &&
+      url.pathname === window.location.pathname &&
+      url.search === window.location.search &&
+      url.hash
+    ) {
+      activateHashTarget(url.hash, true);
+      return;
+    }
+    window.location.assign(url.href);
+  }
+
+  function handleSavedFragmentClick(event, fragment) {
+    if (state.readerPreferences.editActivation === "single") {
+      if (!interactiveFragmentTarget(event.target)) beginInlineEdit(fragment);
+      return;
+    }
+    var link = event.target && event.target.closest && event.target.closest("a[href]");
+    if (!link) return;
+    event.preventDefault();
+    clearPendingReaderLink();
+    state.pendingReaderLinkHref = link.href;
+    state.pendingReaderLinkTimer = window.setTimeout(function () {
+      var href = state.pendingReaderLinkHref;
+      clearPendingReaderLink();
+      followReaderLink(href);
+    }, 260);
+  }
+
+  function handleSavedFragmentDoubleClick(event, fragment) {
+    if (state.readerPreferences.editActivation !== "double") return;
+    if (event.target && event.target.closest && event.target.closest(
+      "button, input, textarea, select"
+    )) return;
+    event.preventDefault();
+    event.stopPropagation();
+    clearPendingReaderLink();
+    beginInlineEdit(fragment);
   }
 
   function appendInlineActions(actions) {
@@ -4187,12 +4258,23 @@
     root.querySelectorAll(
       ".alc-render-reader-chunk, .alc-render-reader-resource"
     ).forEach(function (node) { node.remove(); });
+    root.querySelectorAll(
+      ".alc-select-listbox, .alc-custom-select"
+    ).forEach(function (node) { node.remove(); });
     if (readingArea) readingArea.replaceChildren();
     if (header) header.replaceChildren();
     if (contents) contents.replaceChildren();
+    root.querySelectorAll(
+      ".alc-view-panel, .alc-speech-panel, .alc-export-panel, " +
+      ".alc-settings-panel, .alc-speech-dock"
+    ).forEach(function (panel) { panel.hidden = true; });
+    root.querySelectorAll("[aria-expanded]").forEach(function (trigger) {
+      trigger.setAttribute("aria-expanded", "false");
+    });
     if (body) {
       delete body.dataset.alcRenderReady;
       delete body.dataset.alcRenderComplete;
+      body.classList.remove("alc-speech-dock-open");
     }
     state.exportHtmlTemplate = "<!doctype html>\n" + root.outerHTML;
   }
@@ -4511,7 +4593,11 @@
   }
 
   function buildStandaloneExportHtml() {
-    if (!state.exportHtmlTemplate) captureExportTemplate();
+    if (typeof document !== "undefined" && document.documentElement) {
+      captureExportTemplate();
+    } else if (!state.exportHtmlTemplate) {
+      captureExportTemplate();
+    }
     if (!state.exportStandaloneSupported || !state.exportHtmlTemplate) {
       throw new Error(labels().exportUnavailable);
     }
@@ -4540,8 +4626,105 @@
     });
   }
 
+  function activeInlineDraftCard() {
+    if (!state.activeDraft || !state.activeDraft.base) return null;
+    return document.querySelector(
+      '.alc-fragment[data-fragment-id="' +
+      cssString(state.activeDraft.base.fragment_id) + '"].is-inline-editing'
+    );
+  }
+
+  function closeUnsavedDialog(restoreFocus) {
+    var dialog = document.getElementById("alc-unsaved-dialog");
+    if (dialog && dialog.open) dialog.close();
+    document.getElementById("alc-unsaved-error").hidden = true;
+    if (restoreFocus) focusActiveDraft();
+  }
+
+  function openUnsavedDialog(quietFocus) {
+    var dialog = document.getElementById("alc-unsaved-dialog");
+    if (!dialog || dialog.open) return;
+    document.getElementById("alc-unsaved-error").hidden = true;
+    dialog.showModal();
+    var save = document.getElementById("alc-unsaved-save");
+    save.removeAttribute("data-initial-focus");
+    if (quietFocus) {
+      save.setAttribute("data-initial-focus", "true");
+      save.addEventListener("blur", function () {
+        save.removeAttribute("data-initial-focus");
+      }, {once: true});
+    }
+    save.focus();
+  }
+
+  function attemptInlineDraftExit(event) {
+    var card = activeInlineDraftCard();
+    var advanced = document.getElementById("alc-editor-dialog");
+    var guard = document.getElementById("alc-unsaved-dialog");
+    if (!card || (advanced && advanced.open) || (guard && guard.open)) return;
+    if (card.contains(event.target)) return;
+    if (!activeDraftHasChanges()) {
+      cancelActiveDraft();
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    openUnsavedDialog(event.type === "pointerdown");
+  }
+
+  function guardUnsavedDraftBeforeUnload(event) {
+    if (!activeDraftHasChanges()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  }
+
+  function setupUnsavedDraftDialog() {
+    var strings = labels();
+    document.getElementById("alc-unsaved-heading").textContent =
+      strings.saveCurrentChanges;
+    document.getElementById("alc-unsaved-description").textContent =
+      strings.saveBeforeExit;
+    var close = document.getElementById("alc-unsaved-close");
+    close.setAttribute("aria-label", strings.continueEditing);
+    document.getElementById("alc-unsaved-discard").textContent =
+      strings.discardChanges;
+    document.getElementById("alc-unsaved-save").textContent = strings.saveChanges;
+    close.addEventListener("click", function () {
+      closeUnsavedDialog(true);
+    });
+    document.getElementById("alc-unsaved-discard").addEventListener(
+      "click", function () {
+        closeUnsavedDialog(false);
+        cancelActiveDraft();
+      }
+    );
+    document.getElementById("alc-unsaved-save").addEventListener(
+      "click", async function (event) {
+        var save = event.currentTarget;
+        var discard = document.getElementById("alc-unsaved-discard");
+        var error = document.getElementById("alc-unsaved-error");
+        save.disabled = true;
+        discard.disabled = true;
+        error.hidden = true;
+        await saveEditor(event);
+        save.disabled = false;
+        discard.disabled = false;
+        if (!state.activeDraft) {
+          closeUnsavedDialog(false);
+          return;
+        }
+        error.textContent = strings.saveFailedInEditor;
+        error.hidden = false;
+      }
+    );
+    document.addEventListener("pointerdown", attemptInlineDraftExit, true);
+    document.addEventListener("click", attemptInlineDraftExit, true);
+    window.addEventListener("beforeunload", guardUnsavedDraftBeforeUnload);
+  }
+
   async function setupEditor() {
     var strings = labels();
+    setupUnsavedDraftDialog();
     var connect = document.getElementById("alc-connect");
     updateDirectoryControl();
     if (!window.showDirectoryPicker) {
@@ -5975,11 +6158,18 @@
     });
   }
 
+  function directoryHandleKey() {
+    var identity = state.payload && state.payload.source_identity;
+    return identity ? "source:" + stableStringify(identity) : null;
+  }
+
   async function rememberDirectoryHandle(handle) {
     try {
+      var key = directoryHandleKey();
+      if (!key) return;
       var database = await openDatabase();
       var transaction = database.transaction("handles", "readwrite");
-      transaction.objectStore("handles").put(handle, "project");
+      transaction.objectStore("handles").put(handle, key);
     } catch (_error) {
       /* Handle persistence is a convenience, never a reading requirement. */
     }
@@ -5987,10 +6177,12 @@
 
   async function restoreDirectoryHandle() {
     try {
+      var key = directoryHandleKey();
+      if (!key) return;
       var database = await openDatabase();
       var transaction = database.transaction("handles", "readonly");
       var handle = await new Promise(function (resolve, reject) {
-        var request = transaction.objectStore("handles").get("project");
+        var request = transaction.objectStore("handles").get(key);
         request.onsuccess = function () { resolve(request.result); };
         request.onerror = function () { reject(request.error); };
       });

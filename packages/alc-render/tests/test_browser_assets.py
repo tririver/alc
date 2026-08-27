@@ -32,6 +32,142 @@ def test_reader_javascript_passes_node_syntax_check() -> None:
     )
 
 
+def test_reader_overlay_markdown_supports_tables_under_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        _text("markdown-it/markdown-it.min.js")
+        + "\nglobalThis.window = globalThis;\n"
+        + "globalThis.markdownit = module.exports;\n"
+        + javascript[:startup]
+        + """
+  globalThis.__alcMarkdownTest = {setupMarkdown: setupMarkdown, state: state};
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcMarkdownTest;
+helpers.state.payload = {
+  publication: {labels: {}, reader_profile: {}},
+  resources: [],
+  source_identity: null
+};
+helpers.setupMarkdown();
+var rendered = helpers.state.md.render(
+  "| Material | Use |\\n| --- | --- |\\n| Brass | Ring |\\n"
+);
+assert(
+  rendered.includes("<table>") && rendered.includes("<th>Material</th>") &&
+    rendered.includes("<td>Brass</td>"),
+  "overlay Markdown table was rendered as literal pipe text"
+);
+"""
+    )
+    subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_reader_persists_directory_handles_per_source_under_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        + javascript[:startup]
+        + """
+  globalThis.__alcDirectoryKeyTest = {
+    state: state,
+    directoryHandleKey: directoryHandleKey,
+    rememberDirectoryHandle: rememberDirectoryHandle,
+    restoreDirectoryHandle: restoreDirectoryHandle
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcDirectoryKeyTest;
+var puts = [];
+var gets = [];
+var stored = new Map();
+var database = {
+  objectStoreNames: {contains: function () { return true; }},
+  transaction: function () {
+    return {objectStore: function () {
+      return {
+        put: function (handle, key) {
+          puts.push(key);
+          stored.set(key, handle);
+        },
+        get: function (key) {
+          gets.push(key);
+          var request = {};
+          setTimeout(function () {
+            request.result = stored.get(key);
+            request.onsuccess();
+          }, 0);
+          return request;
+        }
+      };
+    }};
+  }
+};
+globalThis.indexedDB = {open: function () {
+  var request = {result: database};
+  setTimeout(function () { request.onsuccess(); }, 0);
+  return request;
+}};
+function identity(digest) {
+  return {
+    source_format: "markdown",
+    artifact_digest: digest.repeat(64),
+    size: 4,
+    rich_document_digest: digest.repeat(64)
+  };
+}
+var bookHandle = {queryPermission: async function () { return "denied"; }};
+var paperHandle = {queryPermission: async function () { return "denied"; }};
+(async function () {
+  helpers.state.payload = {source_identity: identity("a")};
+  var bookKey = helpers.directoryHandleKey();
+  await helpers.rememberDirectoryHandle(bookHandle);
+  helpers.state.payload = {source_identity: identity("b")};
+  var paperKey = helpers.directoryHandleKey();
+  await helpers.rememberDirectoryHandle(paperHandle);
+  helpers.state.payload = {source_identity: identity("a")};
+  await helpers.restoreDirectoryHandle();
+  assert(bookKey !== paperKey, "different sources shared one directory key");
+  assert(
+    puts.join(",") === [bookKey, paperKey].join(",") &&
+      gets.join(",") === bookKey && !puts.includes("project"),
+    "directory persistence used a global project key"
+  );
+})().catch(function (error) {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    )
+    subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_reader_speech_uses_structured_paragraphs_and_current_viewport() -> None:
     node = shutil.which("node")
     if node is None:
@@ -1706,6 +1842,8 @@ globalThis.window = globalThis;
   globalThis.__alcReaderTest = {
     state: state,
     renderFragment: renderFragment,
+    renderSourceRow: renderSourceRow,
+    primaryTitlePromotion: primaryTitlePromotion,
     beginInlineEdit: beginInlineEdit,
     openAdvancedEditor: openAdvancedEditor,
     closeEditorDialog: closeEditorDialog,
@@ -1721,8 +1859,12 @@ globalThis.window = globalThis;
     renderHistory: renderHistory,
     openExportPanel: openExportPanel,
     connectDirectory: connectDirectory,
+    attemptInlineDraftExit: attemptInlineDraftExit,
+    guardUnsavedDraftBeforeUnload: guardUnsavedDraftBeforeUnload,
+    hideNativeSelectForCustomControl: hideNativeSelectForCustomControl,
     installDraftSpies: function (calls, render) {
       renderMarkdown = render;
+      renderSourceBlock = function () { return new FakeNode("div"); };
       decorateGlossary = function () {};
       typeset = function () {};
       refreshChunkForAnchor = function (anchor) { calls.refresh.push(anchor); };
@@ -1818,6 +1960,10 @@ FakeNode.prototype.querySelector = function (selector) {
   }
   return null;
 };
+FakeNode.prototype.contains = function (candidate) {
+  if (candidate === this) return true;
+  return this.children.some(function (child) { return child.contains(candidate); });
+};
 FakeNode.prototype.focus = function () { this.focused = true; };
 FakeNode.prototype.scrollIntoView = function (options) {
   this.scrollCalls = (this.scrollCalls || 0) + 1;
@@ -1853,6 +1999,9 @@ var nodes = {
   "alc-editor-color-presets": new FakeNode("div"),
   "alc-export": new FakeNode("button"),
   "alc-export-panel": new FakeNode("div"),
+  "alc-unsaved-dialog": new FakeNode("dialog"),
+  "alc-unsaved-error": new FakeNode("p"),
+  "alc-unsaved-save": new FakeNode("button"),
   "alc-storage-status": new FakeNode("div")
 };
 nodes["alc-editor-foreground"].value = "#f9fafb";
@@ -1928,8 +2077,110 @@ helpers.state.payload = {
 };
 helpers.state.revisions = new Map([[first.fragment_id, [historical, first]]]);
 helpers.state.selected = new Map([[first.fragment_id, first]]);
+helpers.state.readerPreferences.editActivation = "single";
+
+var nativeAttrs = {};
+var nativeSelect = {
+  className: "",
+  classList: {
+    add: function (name) { nativeSelect.className = name; }
+  },
+  setAttribute: function (name, value) { nativeAttrs[name] = value; }
+};
+helpers.hideNativeSelectForCustomControl(nativeSelect);
+assert(
+  nativeSelect.tabIndex === -1 && nativeAttrs["aria-hidden"] === "true" &&
+    nativeSelect.className === "alc-native-select",
+  "custom select left its native control focusable or exposed"
+);
 
 (async function () {
+  var titleBlock = {
+    block_id: "title-block",
+    kind: "heading",
+    payload: {level: 1, text: "Source title"}
+  };
+  var titleTranslation = Object.assign({}, first, {
+    fragment_id: "title-translation",
+    anchor: anchor(titleBlock.block_id),
+    role: "translation",
+    priority: 10,
+    title: null,
+    markdown_body: "Translated title"
+  });
+  var titleCompanion = Object.assign({}, first, {
+    fragment_id: "title-companion",
+    anchor: anchor(titleBlock.block_id),
+    role: "companion",
+    priority: 20,
+    title: "Context",
+    markdown_body: "Visible context"
+  });
+  helpers.state.primaryTitleBlockId = titleBlock.block_id;
+  helpers.state.primaryTitleFragmentId = titleTranslation.fragment_id;
+  helpers.state.payload.publication.source_document.blocks = [titleBlock];
+  helpers.state.fragmentGroups = new Map([[
+    titleBlock.block_id, [titleTranslation, titleCompanion]
+  ]]);
+  helpers.state.selected = new Map([
+    [titleTranslation.fragment_id, titleTranslation],
+    [titleCompanion.fragment_id, titleCompanion]
+  ]);
+  assert(
+    helpers.primaryTitlePromotion(
+      helpers.state.payload.publication.source_document
+    ).fragment === titleTranslation,
+    "current translated title was not selected for promotion"
+  );
+  var titleRow = helpers.renderSourceRow(
+    titleBlock, [titleTranslation, titleCompanion]
+  );
+  var titleLanes = titleRow.querySelector(".alc-lanes");
+  assert(
+    titleRow.classList.contains("alc-promoted-title-row") &&
+      titleLanes.children.length === 2 &&
+      titleLanes.children[1].dataset.fragmentId === titleCompanion.fragment_id,
+    "promoting the translated title removed another low-priority fragment"
+  );
+  assert(
+    !titleLanes.classList.contains("has-parallel-translation"),
+    "the promoted title incorrectly reserved an empty translation lane"
+  );
+  var parallelTranslation = Object.assign({}, titleTranslation, {
+    fragment_id: "paragraph-translation",
+    anchor: anchor("paragraph-block")
+  });
+  var sourceOnlyRow = helpers.renderSourceRow({
+    block_id: "paragraph-block", kind: "paragraph", payload: {text: "Source"}
+  }, []);
+  var parallelRow = helpers.renderSourceRow({
+    block_id: "parallel-block", kind: "paragraph", payload: {text: "Source"}
+  }, [Object.assign({}, parallelTranslation, {anchor: anchor("parallel-block")})]);
+  assert(
+    !sourceOnlyRow.querySelector(".alc-lanes").classList.contains(
+      "has-parallel-translation"
+    ) && parallelRow.querySelector(".alc-lanes").classList.contains(
+      "has-parallel-translation"
+    ),
+    "source-only and translated rows did not receive distinct lane states"
+  );
+  helpers.state.payload.selected_heading_fragments = [titleTranslation];
+  helpers.state.selected.set(titleTranslation.fragment_id, Object.assign(
+    {}, titleTranslation, {deleted: true, revision: 3}
+  ));
+  helpers.state.fragmentGroups.set(titleBlock.block_id, [titleCompanion]);
+  assert(
+    helpers.primaryTitlePromotion(
+      helpers.state.payload.publication.source_document
+    ) === null,
+    "a deleted title revision fell back to the stale embedded heading"
+  );
+  helpers.state.primaryTitleBlockId = "";
+  helpers.state.primaryTitleFragmentId = "";
+  helpers.state.payload.selected_heading_fragments = [];
+  helpers.state.fragmentGroups = new Map();
+  helpers.state.selected = new Map([[first.fragment_id, first]]);
+
   var firstCard = helpers.renderFragment(first);
   assert(!firstCard.querySelector(".alc-edit-button"), "fragment retained an edit pencil");
   assert(
@@ -2014,6 +2265,51 @@ helpers.state.selected = new Map([[first.fragment_id, first]]);
   textarea.value = "latest inline draft";
   textarea.dispatch("input");
   assert(!inlineSave.disabled, "changed inline draft did not enable Save");
+  visibleCard = editingCard;
+  var outsidePrevented = 0;
+  var outsideStopped = 0;
+  helpers.attemptInlineDraftExit({
+    target: new FakeNode("a"),
+    preventDefault: function () { outsidePrevented += 1; },
+    stopImmediatePropagation: function () { outsideStopped += 1; }
+  });
+  assert(
+    nodes["alc-unsaved-dialog"].open && outsidePrevented === 1 &&
+      outsideStopped === 1,
+    "keyboard-style outside activation bypassed the dirty draft dialog"
+  );
+  assert(
+    nodes["alc-unsaved-save"].focused &&
+      !nodes["alc-unsaved-save"].attrs["data-initial-focus"],
+    "keyboard-opened dialog hid its initial focus indicator"
+  );
+  nodes["alc-unsaved-dialog"].close();
+  helpers.attemptInlineDraftExit({
+    type: "pointerdown",
+    target: new FakeNode("a"),
+    preventDefault: function () {},
+    stopImmediatePropagation: function () {}
+  });
+  assert(
+    nodes["alc-unsaved-save"].attrs["data-initial-focus"] === "true",
+    "pointer-opened dialog exposed a programmatic focus ring"
+  );
+  nodes["alc-unsaved-save"].dispatch("blur");
+  assert(
+    !nodes["alc-unsaved-save"].attrs["data-initial-focus"],
+    "pointer focus suppression remained after the default action blurred"
+  );
+  nodes["alc-unsaved-dialog"].close();
+  var unloadPrevented = 0;
+  var unloadEvent = {
+    returnValue: null,
+    preventDefault: function () { unloadPrevented += 1; }
+  };
+  helpers.guardUnsavedDraftBeforeUnload(unloadEvent);
+  assert(
+    unloadPrevented === 1 && unloadEvent.returnValue === "",
+    "page unload did not protect a changed draft"
+  );
   textarea.dispatch("keydown", {
     key: "Enter", ctrlKey: true, metaKey: false,
     preventDefault: function () { prevented += 1; }
@@ -2175,13 +2471,13 @@ helpers.state.selected = new Map([[first.fragment_id, first]]);
 """
     )
 
-    subprocess.run(
+    completed = subprocess.run(
         [node, "-"],
         input=instrumented,
-        check=True,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_reader_directory_sync_skips_embedded_and_caches_external_files() -> None:
