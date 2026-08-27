@@ -4264,6 +4264,10 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert "trigger.textContent = strings.export" not in javascript
     assert ".alc-tool-icon-button" in stylesheet
     assert ".alc-tool-icon" in stylesheet
+    assert "scrollbar-color: transparent transparent;" in stylesheet
+    assert ".alc-contents nav::-webkit-scrollbar { width: 6px; }" in stylesheet
+    assert ".alc-contents nav:hover::-webkit-scrollbar-thumb" in stylesheet
+    assert "background: rgb(79 120 150 / 55%);" in stylesheet
     assert "position: fixed" in stylesheet
     assert "width: min(29rem, calc(100vw - 2rem))" in stylesheet
     assert "height: min(39.5rem, calc(100dvh - 2rem))" in stylesheet
@@ -4288,17 +4292,118 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert '"--alc-target-font"' in javascript
     assert '"--alc-font-scale"' in javascript
     assert '"--alc-reader-line-height"' in javascript
+    assert '"--alc-reader-supplement-line-height"' in javascript
+    assert '"--alc-reader-block-padding"' in javascript
+    assert '"--alc-reader-source-block-padding"' in javascript
+    assert '"--alc-reader-supplement-block-padding"' in javascript
+    assert '"--alc-reader-block-gap"' in javascript
+    assert '(1.55 * next.lineHeight / 1.65).toFixed(3)' in javascript
+    assert (
+        'Math.max(0, 0.8 * (next.blockSpacing - 100) / 100).toFixed(3)'
+        in javascript
+    )
     assert '"--alc-reader-width"' in javascript
+    assert 'blockSpacing: 100' in javascript
+    assert 'data.alcReaderBlockSpacing' in javascript
+    assert 'readerLineHeight: traditional ? "行間距" : "行间距"' in javascript
+    assert 'readerBlockSpacing: traditional ? "段間距" : "段间距"' in javascript
+    assert 'traditional ? "同類型與優先級的樣式" : "同类型与优先级的样式"' in javascript
+    assert 'traditional ? "字體顏色" : "字体颜色"' in javascript
+    assert 'traditional ? "背景顏色" : "背景颜色"' in javascript
+    assert '"alc-settings-block-spacing": String(preferences.blockSpacing)' in javascript
+    assert '--alc-reader-block-padding: .4rem;' in stylesheet
+    assert '--alc-reader-source-block-padding: .3rem;' in stylesheet
+    assert '--alc-reader-supplement-block-padding: .45rem;' in stylesheet
+    assert '--alc-reader-block-gap: 0rem;' in stylesheet
+    assert 'padding: var(--alc-reader-block-padding) .65rem;' in stylesheet
+    assert ".alc-dialog .alc-settings-close {" in stylesheet
+    assert ".alc-dialog .alc-settings-close:hover {" in stylesheet
+    assert ".alc-dialog .alc-settings-close svg {" in stylesheet
+    assert (
+        ".alc-editor-grid {\n"
+        "  display: grid;\n"
+        "  grid-template-columns: minmax(0, 1fr);\n"
+        "  min-height: 11rem;"
+    ) in stylesheet
+    assert (
+        ".alc-editor-pane textarea {\n"
+        "  min-height: 11rem;\n"
+        "  height: 11rem;"
+    ) in stylesheet
+    assert ".alc-editor-grid { min-height: 9rem; }" in stylesheet
+    assert "min-height: min(11rem, 24dvh);" in stylesheet
+    assert "height: min(11rem, 24dvh);" in stylesheet
+    assert "min(22rem, 48dvh)" not in stylesheet
+    assert (
+        'padding: var(--alc-reader-source-block-padding) .15rem;'
+        in stylesheet
+    )
+    assert 'margin-top: var(--alc-reader-block-gap);' in stylesheet
+    assert 'row-gap: var(--alc-reader-block-gap);' in stylesheet
+    assert (
+        'line-height: var(--alc-reader-supplement-line-height);'
+        in stylesheet
+    )
+    assert (
+        'padding: var(--alc-reader-supplement-block-padding) .65rem;'
+        in stylesheet
+    )
     assert '".alc-select-listbox, .alc-custom-select"' in javascript
+    assert 'wrapper.closest("dialog[open]") || document.body' in javascript
+    assert (
+        '".alc-settings-field, .alc-speech-field, .alc-dialog-fields label"'
+        in javascript
+    )
+    assert "installCustomSelect(role);" in javascript
+    assert javascript.count("syncCustomSelect(role);") == 2
+    assert 'wrapper.dataset.compact = "true";' in javascript
     assert '".alc-settings-panel, .alc-speech-dock"' in javascript
     assert "localStorage" not in javascript
     assert "contain: inline-size;" in stylesheet
     assert ".alc-speech-player-title {\n  display: block;" in stylesheet
+    assert (
+        ".alc-speech-player-transport {\n"
+        "  display: flex;\n"
+        "  gap: .12rem;\n"
+        "  align-items: center;\n"
+        "  justify-content: center;"
+    ) in stylesheet
     assert ".alc-speech-player-progress {\n  min-height: 1.3em;" in stylesheet
     assert ".alc-speech-status {\n  position: absolute;" in stylesheet
-    assert "#alc-speech-panel-player { margin-top: .7rem; }" in stylesheet
+    assert "#alc-speech-panel-player {\n  margin-top: .35rem;" in stylesheet
+    assert ".alc-tool-panel-header {" in stylesheet
+    assert ".alc-settings-panel {\n  position: absolute;" in stylesheet
+    assert stylesheet.count("width: min(22rem, calc(100vw - 1rem));") == 2
+    assert "@media (max-width: 30rem)" not in stylesheet
+    assert "width: min(25rem, calc(100vw - .5rem));" not in stylesheet
+    assert "function positionToolPanel(panel)" in javascript
+    assert "document.documentElement.clientWidth || window.innerWidth" in javascript
+    assert 'panel.style.maxWidth = Math.max(0, viewportWidth - 16) + "px";' in javascript
+    assert 'rectangle.right - (viewportWidth - 8)' in javascript
+    assert 'panel.style.transform = "translateX(-" + overflow + "px)";' in javascript
+    assert javascript.count(
+        'window.addEventListener("resize", function () { positionToolPanel(panel); });'
+    ) == 4
+    assert ".alc-export-format-section .alc-export-action { justify-self: end; }" in stylesheet
+    assert ".alc-export-format-section .alc-export-action { align-self: end; }" in stylesheet
+    assert (
+        ".alc-export-panel .alc-export-action {\n"
+        "  position: relative;\n"
+        "  display: inline-flex;"
+    ) in stylesheet
+    assert "min-height: 2.25rem;\n  padding: .3rem .5rem;" in stylesheet
+    assert ".alc-export-panel .alc-export-action::before {" in stylesheet
+    assert "inset: -.25rem 0;" in stylesheet
+    assert "html:lang(zh) .alc-view-options" in stylesheet
+    assert "html:lang(zh) .alc-speech-role-options" in stylesheet
     assert 'automaticVoiceSelection: "Automatic (default: {voice})"' in javascript
     assert "function speechVoiceDescription(voice)" in javascript
+    assert (
+        'loopNone: \'<path d="M3 7h15"></path>'
+        '<path d="m14 3 4 4-4 4"></path>\' +'
+        in javascript
+    )
+    assert '<path d="m4 4 16 16"></path>' not in javascript
     assert "function positionSpeechRateMenu(player)" in javascript
     assert 'menu.style.width = triggerRect.width + "px";' in javascript
     assert "spaceAbove >= menuRect.height + spacing" in javascript
@@ -4308,6 +4413,26 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert ".alc-speech-dock .alc-speech-rate-menu" in stylesheet
     assert 'rate-menu[data-layout="grid"]' in stylesheet
     assert ".alc-speech-dock .alc-speech-player-transport { gap: .25rem; }" in stylesheet
+    assert ".alc-speech-panel {\n  overflow-x: hidden;\n  overflow-y: auto;" in stylesheet
+    assert (
+        ".alc-speech-panel .alc-speech-player-transport {\n"
+        "    flex-wrap: nowrap;\n"
+        "    gap: .08rem;\n"
+        "    justify-content: center;"
+    ) in stylesheet
+    assert (
+        '.alc-speech-panel .alc-speech-player-button[data-speech-action="play"] {'
+        "\n    width: 2.15rem;"
+    ) in stylesheet
+    assert ".alc-speech-dock .alc-speech-player-button,\n" in stylesheet
+    assert ".alc-speech-dock .alc-speech-rate-option {\n  min-height: 2rem" in stylesheet
+    assert ".alc-speech-panel .alc-speech-rate-option { min-height: 44px" not in stylesheet
+    assert '@media (max-width: 26.25rem)' in stylesheet
+    assert 'data-speech-action="loop"] {\n    display: none !important;' in stylesheet
+    assert '@media (max-width: 23.75rem)' in stylesheet
+    assert 'data-speech-action="stop"] {\n    display: none !important;' in stylesheet
+    assert '@media (max-width: 21.25rem)' in stylesheet
+    assert 'data-speech-action="beginning"] {\n    display: none !important;' in stylesheet
     assert "min-height: 2.25rem !important;" in stylesheet
     assert 'button[data-speech-action="close"]::before' in stylesheet
     assert "right: .85rem;" in stylesheet
@@ -4316,12 +4441,30 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert ".alc-card-actions {" in stylesheet
     assert "opacity: 0;\n  pointer-events: none;" in stylesheet
     assert "opacity: .85;\n  pointer-events: auto;" in stylesheet
-    assert "@media (max-width: 899px), (hover: none), (pointer: coarse)" in stylesheet
+    assert "setupTouchCardActions(source);" in javascript
+    assert "setupTouchCardActions(card);" in javascript
+    assert ".is-touch-actions-revealed > .alc-card-actions" in stylesheet
+    assert "width: 44px;\n    min-width: 44px;" in stylesheet
+    touch_actions = stylesheet[
+        stylesheet.index(
+            ".is-touch-actions-revealed > .alc-card-actions { gap: 0; }"
+        ) : stylesheet.index(".alc-source-card {", stylesheet.index(
+            ".is-touch-actions-revealed > .alc-card-actions { gap: 0; }"
+        ))
+    ]
+    assert "@media" not in touch_actions
+    assert "gap: .75rem;" not in stylesheet
+    assert "gap: .08rem;" in stylesheet
+    assert "right: 2.35rem;" not in stylesheet
+    assert 'last-child:is([data-role="companion"], [data-role="guide"])' in stylesheet
+    assert ") > .alc-note-button {\n  bottom: .4rem;" in stylesheet
+    assert "bottom: -.3rem;" not in stylesheet
+    assert "@media (max-width: 899px), (hover: none), (pointer: coarse)" not in stylesheet
+    assert ".alc-note-button {\n    width: 2rem;" not in stylesheet
     assert "inset: -.375rem;" in stylesheet
     assert ".alc-lanes:not(.has-parallel-translation) > .alc-source-card" in stylesheet
     assert ".alc-book-header > h1.is-speaking" in stylesheet
     assert "width: 44px;\n    min-width: 44px;" in stylesheet
-    assert ".alc-speech-rate-option { min-height: 44px !important; }" in stylesheet
     assert "height: 2.2rem;\n    min-height: 2.2rem;" in stylesheet
     assert "margin-left: auto;" in stylesheet
     assert "> .alc-translated-title.is-inline-editing" in stylesheet
@@ -4330,6 +4473,8 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert ".alc-promoted-title-row > .alc-lanes > .alc-source-card { display: none; }" in stylesheet
     assert "width: min(33.5rem, calc(100% - 2rem));" in stylesheet
     assert "grid-template-columns: minmax(10rem, 1fr) max-content;" in stylesheet
+    assert 'speaker: \'<path d="M11 5 6 9H2v6h4l5 4V5Z"></path>\'' in javascript
+    assert 'M4 10h4l4-3v10l-4-3H4Z' not in javascript
     assert 'd="m18 5-10 7 10 7Z"' in javascript
     assert 'speechRate: "倍速"' in javascript
     assert 'width="12" height="12"' in javascript
@@ -4347,7 +4492,90 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert "width: 1.1rem;\n  height: 1.1rem;" in stylesheet
     assert "stroke-width: 2;" in stylesheet
     assert 'pattern="#[0-9A-Fa-f]{6}"' not in javascript
-    assert ".alc-source-card { padding: .3rem .15rem; background: transparent; }" in stylesheet
+    assert (
+        ".alc-source-card {\n"
+        "  padding: var(--alc-reader-source-block-padding) .15rem;\n"
+        "  background: transparent;\n"
+        "}"
+    ) in stylesheet
+
+
+def test_touch_card_actions_reveal_before_content_activation_under_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcReaderTest = {
+    setupTouchCardActions: setupTouchCardActions
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function fakeCard() {
+  var classes = new Set();
+  var listeners = {};
+  return {
+    dataset: {},
+    listeners: listeners,
+    classList: {
+      add: function (name) { classes.add(name); },
+      remove: function (name) { classes.delete(name); },
+      contains: function (name) { return classes.has(name); }
+    },
+    addEventListener: function (name, handler, capture) {
+      listeners[name] = {handler: handler, capture: Boolean(capture)};
+    }
+  };
+}
+globalThis.document = {querySelectorAll: function () { return []; }};
+var card = fakeCard();
+var content = {closest: function () { return null; }};
+globalThis.__alcReaderTest.setupTouchCardActions(card);
+card.listeners.pointerdown.handler({pointerType: "touch", target: content});
+assert(
+  card.classList.contains("is-touch-actions-revealed"),
+  "first touch did not reveal card actions"
+);
+assert(
+  card.dataset.alcSuppressTouchClick === "true",
+  "first touch did not suppress content activation"
+);
+var prevented = false;
+var stopped = false;
+var immediate = false;
+assert(card.listeners.click.capture, "touch click suppression is not capture-phase");
+card.listeners.click.handler({
+  preventDefault: function () { prevented = true; },
+  stopPropagation: function () { stopped = true; },
+  stopImmediatePropagation: function () { immediate = true; }
+});
+assert(prevented && stopped && immediate, "first touch click was not suppressed");
+assert(
+  card.dataset.alcSuppressTouchClick === undefined,
+  "touch click suppression survived its one intended click"
+);
+card.listeners.pointerdown.handler({pointerType: "touch", target: content});
+assert(
+  card.dataset.alcSuppressTouchClick === undefined,
+  "second touch was incorrectly suppressed after actions became visible"
+);
+'''
+    )
+
+    subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_reader_visibility_is_dynamic_ephemeral_and_book_focused() -> None:
@@ -4389,7 +4617,13 @@ def test_reader_equation_rows_and_css_lanes_are_bounded() -> None:
     assert "white-space: nowrap" in stylesheet
     assert "function setupLaneResponsiveness" not in javascript
     assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in stylesheet
-    assert ".alc-lanes { grid-template-columns: minmax(0, 1fr); gap: .4rem; }" in stylesheet
+    assert (
+        ".alc-lanes {\n"
+        "    grid-template-columns: minmax(0, 1fr);\n"
+        "    row-gap: calc(.4rem + var(--alc-reader-block-gap));\n"
+        "    column-gap: .4rem;\n"
+        "  }"
+    ) in stylesheet
 
 
 def test_matching_overlay_equation_inherits_effective_label_under_node() -> None:
@@ -4514,7 +4748,21 @@ def test_reader_progressively_hydrates_navigation_find_and_print_content() -> No
     assert "armHashCalibration(window.location.hash);" in javascript
     assert "recalibrateHashTarget();" in javascript
     assert 'window.addEventListener("beforeprint", renderAllChunks)' in javascript
+    assert 'runExport({kind: "pdf"})' in javascript
+    assert "renderAllChunks();\n        closeExportPanel(false);\n        window.print();" in javascript
+    assert "min-height: 2.75rem;" in stylesheet
+    assert "width: 8.5rem;" in stylesheet
+    assert "html:lang(zh) .alc-export-panel .alc-export-action { width: 8rem; }" in stylesheet
+    assert ".alc-export-action-primary" not in stylesheet
     assert "activateHashTarget(href, true)" in javascript
+    assert (
+        'if (targetId === "alc-book-header") {'
+        in javascript
+    )
+    title_branch = javascript[javascript.index('if (targetId === "alc-book-header") {'):]
+    title_branch = title_branch[:title_branch.index("return true;")]
+    assert "scrollToHashTarget(targetId);" in title_branch
+    assert "scrollToReaderTop();" not in title_branch
     assert "refreshChangedSelections(previousSelected);" in javascript
     assert "refreshChunkForAnchor(revision.anchor);" in javascript
     assert 'document.body.dataset.alcRenderComplete = String(complete)' in javascript
