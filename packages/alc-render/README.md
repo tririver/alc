@@ -107,24 +107,40 @@ of the viewport. Dragging 2rem past the minimum collapses it; the contents
 button restores its last width for the current page. Dragging right from the
 minimum resizes normally. The width is not persisted.
 
-Clicking a translation, companion, guide, or note body opens its raw Markdown
-inline. The inline controls save or discard the single active draft; Advanced
-opens the complete title, Markdown, preview, metadata, and history editor while
-preserving the same unsaved values. Browser editing saves from the revision
-snapshot already loaded in the reader. Reading mode shows the fragment role and
-shows its revision number only when it is greater than 1; inline editing shows the role,
-priority, and revision. Advanced also offers paired color presets, synchronized
-color pickers and `#RRGGBB` fields, plus a reset to the role default. One color
-applies to every fragment with the same role and priority; changing priority
-creates or joins a separate color group. Notes use black with white text by
-default.
+By default, the reader places source and translation side by side on wide
+screens and stacks them on narrow screens. The settings panel can also use the
+stacked layout on wide screens. Guide and companion fragments span the full
+reading width, while figures and translated captions remain aligned. When a
+translated document title is available, it appears with the source title in the
+page header.
+
+The More settings panel controls translation layout, edit activation, English
+and Chinese font stacks, display scale, line height, and content width.
+Double-click editing is the default. These preferences affect the current
+reader rather than fragment source, and a Single HTML export captures their
+current values.
+
+The edit activation setting opens a translation, companion, guide, or note body
+on a single or double click. The inline controls save or discard the single
+active draft. Clicking elsewhere after making a change asks whether to save or
+discard it; keyboard-activated clicks use the same guard. The browser also
+warns before leaving the page with an unsaved draft. Overlay Markdown follows
+CommonMark and supports pipe tables. Advanced opens the complete title,
+Markdown, preview, metadata, and history editor without discarding the draft.
+Browser editing saves from the revision snapshot already loaded in the reader.
+Reading mode shows the fragment role and shows its revision number only when it
+is greater than 1; inline editing shows the role, priority, and revision.
+Advanced also offers paired color presets, synchronized color pickers and
+`#RRGGBB` fields, plus a reset to the role default. One color applies to every
+fragment with the same role and priority; changing priority creates or joins a
+separate color group. Notes use black with white text by default.
 Version history appears only after a fragment has more than one revision.
-Advanced places Delete immediately left of Save. Delete appends an empty
-tombstone revision, hides the element, and retains every earlier immutable
-revision. Empty notes are treated as deleted; saving a note after clearing both
-title and Markdown writes the same tombstone. The Add control at that source
-anchor reopens the latest hidden fragment and its history, so content can be
-restored or replaced without discarding its lineage.
+Advanced places Delete at the left edge and groups Cancel with Save on the
+right. Delete appends an empty tombstone revision, hides the element, and
+retains every earlier immutable revision. Empty notes are treated as deleted;
+saving a note after clearing both title and Markdown writes the same tombstone.
+The Add control at that source anchor reopens the latest hidden fragment and its
+history, so content can be restored or replaced without discarding its lineage.
 Save remains disabled while normalized content is unchanged, and the defensive
 no-op path chooses no directory and creates no revision. Selecting another
 fragment cancels a clean draft immediately. If the active draft has unsaved
@@ -141,28 +157,36 @@ Reader prose uses the browser's strict East Asian line-breaking mode, which
 keeps common Chinese closing punctuation away from line starts without custom
 text segmentation.
 
-The speaker icon (`Listen` tooltip) uses the browser Web Speech API and never
-bundles a voice model or generated audio. Source is selected by default;
-translation, Companion, guide, note, and dynamically discovered roles can be
-selected independently. Play always starts at the first selected, readable
-source row at the current viewport (below the fixed toolbar), then advances in
-publication order. Each source block or overlay fragment is one speech segment;
-ALC does no sentence tokenization. Headings, prose, lists, and figure or table
-captions are read, while display equations, code, and table bodies are skipped.
-The current segment is outlined and scrolled into view. Voice, rate, previous,
-next, pause/resume, and stop controls are ephemeral browser state. Available voices
-come from the operating system or browser; when Chrome exposes the API but no
-voice, the panel reports that condition without affecting reading or editing.
+The speaker icon (`Listen` tooltip) uses the browser Web Speech API and does not
+bundle a voice model or generated audio. Source is selected by default;
+translation, companion, guide, note, and dynamically discovered roles can be
+selected independently. Source and target content have separate voice choices.
+Each automatic option shows the default voice for its profile language, while
+playback matches the declared language of the current segment. It may therefore
+choose another voice in a mixed-language document.
+
+Playback starts at the first selected, readable segment at the current viewport
+and advances in publication order. Each source block or overlay fragment is one
+speech segment; ALC does no sentence tokenization. Headings, prose, lists, and
+figure or table captions are read, while display equations, code, and table
+bodies are skipped. Both players provide the same transport, playlist, 0.5x to
+3x rate, and repeat controls. Per-fragment speaker buttons start from that exact
+segment. On narrow or touch layouts, speaker and edit actions remain available
+without hover. Voice and playback state remain in the browser. If the browser
+reports no voices, the panel shows that condition without affecting reading or
+editing.
 
 The browser toolbar calls the directory action `New save location` until a
 project directory is available and `Change save location` afterwards. Export
-first refreshes that connected directory. Per-role Markdown can contain either
-all currently selected revisions or only selections changed from the reader's
-embedded baseline. Full-text HTML export always contains the complete latest
-publication and remains a standalone interactive reader, so its action is shown
-only for the all-latest scope. It is available only from a standalone reader
-whose assets are already embedded. Directory changes and exports wait until the
-active draft is saved or cancelled.
+first refreshes that connected directory. A remembered directory handle is
+scoped to the immutable source identity, so opening another publication does
+not scan revisions from the previous document. Per-role Markdown can contain
+either all currently selected revisions or only selections changed from the
+reader's embedded baseline. Full-text HTML export contains the complete latest
+publication, reader UI, and current appearance snapshot. The action appears
+only for the all-latest scope and only in a standalone reader whose assets are
+already embedded. Directory changes and exports wait until the active draft is
+saved or cancelled.
 
 For now, a PDF copy may be made manually with Chrome's Print / Save as PDF
 command. Such a PDF is a user-side derivative, not an ALC release artifact,
