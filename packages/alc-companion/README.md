@@ -145,6 +145,10 @@ Translation fragments use priority 10. Inline Companion fragments use priority
 to immutable rich-source block identity, while the Markdown file contains only
 the human-authored semantic content. The validated JSON front matter owns
 fragment identity; directory names are never semantic identities.
+Model-authored display math is canonicalized before publication: opening and
+closing `$$` delimiters occupy separate lines around the TeX body. Ambiguous or
+unbalanced display-math delimiters are rejected instead of being published as
+literal Reader text.
 
 ## Reader assumptions
 

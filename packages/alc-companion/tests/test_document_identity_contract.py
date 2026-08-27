@@ -67,9 +67,9 @@ def test_current_request_and_recipe_round_trip_only(tmp_path: Path) -> None:
         "model": {"provider": "auto", "model": None, "tier": "medium"},
         "approx_term_count": 50,
         "author_identity_prompt": "alc.companion.author-identity-prompt.v3",
-        "chapter_guide_prompt": "alc.companion.chapter-learning-prompt.v17",
+        "chapter_guide_prompt": "alc.companion.chapter-learning-prompt.v18",
         "chapter_guide_review_prompt": (
-            "alc.companion.chapter-learning-review-prompt.v17"
+            "alc.companion.chapter-learning-review-prompt.v18"
         ),
         "chapter_guide_max_rounds": 3,
         "chapter_guide_review_final_round": False,

@@ -277,6 +277,27 @@ def test_final_closed_audit_applies_only_exact_approved_revise_and_omit() -> Non
     assert report["findings"][1]["approval_status"] == "rejected"
 
 
+def test_editorial_revise_canonicalizes_single_line_display_math() -> None:
+    chapters = _chapters()
+    inventory = freeze_editorial_inventory(chapters)
+    proposal = _proposal(chapters, inventory.inventory_digest)
+    proposal["findings"][0]["edits"][0]["markdown_body"] = "$$x+y$$"
+    review = _review(proposal, inventory.inventory_digest)
+
+    resolved = resolve_editorial_review(
+        chapters,
+        inventory,
+        proposal,
+        review,
+        proposer_artifact_digest="a" * 64,
+        reviewer_artifact_digest="b" * 64,
+    )
+
+    assert _resolved_unit(resolved, "unit-a")["content_markdown"] == (
+        "$$\nx+y\n$$"
+    )
+
+
 def test_invalid_approved_edits_are_preserved_and_reported_rejected() -> None:
     chapters = _chapters()
     inventory = freeze_editorial_inventory(chapters)
