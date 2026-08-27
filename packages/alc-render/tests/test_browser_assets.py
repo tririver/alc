@@ -176,7 +176,7 @@ def test_reader_speech_uses_structured_paragraphs_and_current_viewport() -> None
     startup = javascript.rfind("\n  if (document.readyState")
     assert startup > 0
     queue_source = javascript[
-        javascript.index("function buildSpeechQueue()") :
+        javascript.index("function buildSpeechQueue(selectedRoles)") :
         javascript.index("function speechSegmentText(")
     ]
     assert "loadAllPayload(false);" in queue_source
@@ -190,9 +190,16 @@ def test_reader_speech_uses_structured_paragraphs_and_current_viewport() -> None
     speechInlineText: speechInlineText,
     sourceSpeechText: sourceSpeechText,
     speechLanguage: speechLanguage,
+    speechSegmentNode: speechSegmentNode,
     viewportNodeIndex: viewportNodeIndex,
     speakSpeechIndex: speakSpeechIndex,
+    moveSpeech: moveSpeech,
+    renderSpeechPlaylist: renderSpeechPlaylist,
     toggleSpeechPause: toggleSpeechPause,
+    setSpeechRate: setSpeechRate,
+    setSpeechStatus: setSpeechStatus,
+    positionSpeechRateMenu: positionSpeechRateMenu,
+    speechVoiceDescription: speechVoiceDescription,
     state: state
   };
 }());
@@ -217,12 +224,25 @@ var controls = {
 };
 var toolbarBottom = 0;
 var speechRows = {};
+var statusProgress = {textContent: "", dataset: {}};
+var statusTitle = {textContent: ""};
+var statusPlayer = {
+  querySelector: function (selector) {
+    if (selector === ".alc-speech-player-progress") return statusProgress;
+    if (selector === ".alc-speech-player-title") return statusTitle;
+    return null;
+  },
+  querySelectorAll: function () { return []; }
+};
 globalThis.document = {
-  documentElement: {clientHeight: 600},
+  documentElement: {clientHeight: 600, lang: "zh-CN"},
   getElementById: function (id) { return controls[id] || speechRows[id] || null; },
   querySelector: function (selector) {
     if (selector !== ".alc-fixed-tools") return null;
     return {getBoundingClientRect: function () { return {bottom: toolbarBottom}; }};
+  },
+  querySelectorAll: function (selector) {
+    return selector === ".alc-speech-player" ? [statusPlayer] : [];
   }
 };
 helpers.state.payload = {
@@ -301,10 +321,17 @@ function speakingNode() {
 }
 var firstNode = speakingNode();
 var secondNode = speakingNode();
+var titleSourceNode = speakingNode();
+var titleTargetNode = speakingNode();
 firstNode.classList.owner = firstNode;
 secondNode.classList.owner = secondNode;
 speechRows["block-b1"] = {querySelector: function () { return firstNode; }};
 speechRows["block-b2"] = {querySelector: function () { return secondNode; }};
+controls["alc-book-header"] = {
+  querySelector: function (selector) {
+    return selector.includes("h1") ? titleSourceNode : titleTargetNode;
+  }
+};
 var spoken = [];
 var pauses = 0;
 var resumes = 0;
@@ -322,31 +349,162 @@ helpers.state.speechVoices = [{
   name: "System English", lang: "en-US", voiceURI: "system-en", localService: true
 }];
 helpers.state.speechVoiceIdentity = "";
+helpers.state.speechRate = 1.2;
+assert(
+  helpers.speechVoiceDescription({
+    name: "Samantha", lang: "en-US", localService: true
+  }) === "Samantha · en-US · 本机",
+  "voice description omitted the automatic voice details"
+);
+var dockRateMenu = {
+  dataset: {},
+  style: {},
+  getBoundingClientRect: function () { return {height: 300}; }
+};
+var dockTriggerTop = 400;
+var dockPlayerBottom = 450;
+var dockRateTrigger = {
+  getBoundingClientRect: function () {
+    return {
+      left: 264, right: 320, top: dockTriggerTop,
+      bottom: dockTriggerTop + 32, width: 56
+    };
+  }
+};
+var dockRatePlayer = {
+  dataset: {playerKind: "dock"},
+  getBoundingClientRect: function () {
+    return {
+      left: 0, right: 330,
+      top: dockPlayerBottom - 70, bottom: dockPlayerBottom
+    };
+  },
+  querySelector: function (selector) {
+    return selector === ".alc-speech-rate-menu" ? dockRateMenu : dockRateTrigger;
+  }
+};
+helpers.positionSpeechRateMenu(dockRatePlayer);
+assert(
+  dockRateMenu.style.width === "56px" &&
+    dockRateMenu.style.right === "10px" &&
+    dockRateMenu.style.top === "auto" &&
+    dockRateMenu.style.bottom === "55px" &&
+    dockRateMenu.style.maxHeight === "none" &&
+    dockRateMenu.dataset.layout === "list",
+  "docked rate menu did not stay above and overlap the player without scrolling"
+);
+dockTriggerTop = 250;
+dockPlayerBottom = 300;
+helpers.positionSpeechRateMenu(dockRatePlayer);
+assert(
+  dockRateMenu.dataset.layout === "grid" &&
+    dockRateMenu.style.width === "112px" &&
+    dockRateMenu.style.bottom === "55px" &&
+    dockRateMenu.style.maxHeight === "none",
+  "short dock viewport did not compact the full rate menu into two columns"
+);
+helpers.setSpeechStatus("当前段落无法朗读。", true);
+assert(
+  statusProgress.textContent === "当前段落无法朗读。" &&
+    statusProgress.dataset.kind === "error",
+  "speech error updated only the hidden live region"
+);
+helpers.setSpeechStatus("准备朗读。", false);
+helpers.state.primaryTitleBlockId = "title-block";
+helpers.state.primaryTitleFragmentId = "title-fragment";
+assert(
+  helpers.speechSegmentNode({
+    blockId: "title-block", role: "source", fragmentId: null
+  }) === titleSourceNode &&
+  helpers.speechSegmentNode({
+    blockId: "title-block", role: "translation", fragmentId: "title-fragment"
+  }) === titleTargetNode,
+  "promoted title speech did not target the visible header"
+);
 helpers.state.speechQueue = [
   {text: "First paragraph.", language: "en", role: "source", blockId: "b1"},
+  {text: "", language: "zh-CN", role: "note", blockId: "empty", fragmentId: "empty"},
   {text: "第二段。", language: "zh-CN", role: "translation", blockId: "b2", fragmentId: "f2"}
 ];
 helpers.speakSpeechIndex(0);
 assert(
   spoken.length === 1 && spoken[0].text === "First paragraph." &&
-    spoken[0].lang === "en" && spoken[0].rate === 1.2 &&
-    firstNode.active && firstNode.scrolled,
-  "first speech paragraph was not queued, localized, or highlighted"
+    spoken[0].lang === "en-US" && spoken[0].rate === 1.2 &&
+    firstNode.active && firstNode.scrolled &&
+    controls["alc-speech-status"].textContent === "",
+  "first speech paragraph duplicated progress outside the player"
 );
 helpers.toggleSpeechPause();
 helpers.toggleSpeechPause();
 assert(pauses === 1 && resumes === 1, "pause/resume did not reach browser speech");
-spoken[0].onend();
+helpers.setSpeechRate(1.5);
 assert(
-  spoken.length === 2 && spoken[1].text === "第二段。" &&
-    spoken[1].lang === "zh-CN" && !firstNode.active && secondNode.active,
-  "speech did not advance by structured paragraph"
+  spoken.length === 2 && spoken[1].text === "First paragraph." &&
+    spoken[1].rate === 1.5 && firstNode.active,
+  "rate change did not immediately restart the current paragraph"
 );
 spoken[1].onend();
+assert(
+  spoken.length === 3 && spoken[2].text === "第二段。" &&
+    spoken[2].lang === "zh-CN" && !firstNode.active && secondNode.active,
+  "speech did not advance by structured paragraph"
+);
+helpers.state.speechLoopMode = "one";
+spoken[2].onend();
+assert(
+  spoken.length === 4 && spoken[3].text === "第二段。",
+  "single-paragraph loop did not repeat the current paragraph"
+);
+helpers.state.speechLoopMode = "none";
+helpers.moveSpeech(-1);
+assert(
+  spoken.length === 5 && spoken[4].text === "First paragraph." &&
+    helpers.state.speechIndex === 0,
+  "Previous did not skip an unreadable fragment in the backward direction"
+);
+spoken[4].onend();
+assert(
+  spoken.length === 6 && spoken[5].text === "第二段。" &&
+    helpers.state.speechIndex === 2,
+  "forward playback did not skip an unreadable fragment"
+);
+spoken[5].onend();
 assert(
   !helpers.state.speechPlaying && !secondNode.active &&
     controls["alc-speech-status"].textContent === "朗读完成。",
   "speech completion did not clear active state"
+);
+
+var playlistUpdates = [];
+var playlistRebuilds = 0;
+var playlistHeading = {textContent: ""};
+var playlistList = {replaceChildren: function () { playlistRebuilds += 1; }};
+var playlistRoot = {
+  _alcSpeechQueue: helpers.state.speechQueue,
+  _alcSpeechCurrentIndex: 0,
+  querySelector: function (selector) {
+    if (selector === "h2") return playlistHeading;
+    if (selector === "ol") return playlistList;
+    var match = /data-speech-index="(\\d+)"/.exec(selector);
+    if (match) {
+      return {
+        setAttribute: function (_name, value) {
+          playlistUpdates.push([Number(match[1]), value]);
+        }
+      };
+    }
+    return null;
+  }
+};
+helpers.state.speechPlaying = true;
+helpers.state.speechIndex = 2;
+helpers.renderSpeechPlaylist({
+  querySelector: function () { return playlistRoot; }
+});
+assert(
+  playlistRebuilds === 0 &&
+    JSON.stringify(playlistUpdates) === JSON.stringify([[0, "false"], [2, "true"]]),
+  "an unchanged open playlist rebuilt its complete queue"
 );
 """
     )
@@ -1030,13 +1188,13 @@ for (var chunkIndex = 1; chunkIndex < contentChunks.length; chunkIndex += 1) {
 """
     )
 
-    subprocess.run(
+    completed = subprocess.run(
         [node, "-"],
         input=instrumented,
-        check=True,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_reader_steady_save_uses_constant_filesystem_work_under_node() -> None:
@@ -1060,7 +1218,7 @@ globalThis.window = globalThis;
       renderDiagnostics = function () {};
       rerenderChunk = rerender;
     },
-    installPostCommitFailureSpies: function (failures, recoveredCards) {
+    installPostCommitFailureSpies: function (failures, recoveredCards, titleSyncs) {
       var originalGroupRefresh = refreshFragmentGroup;
       var originalChunkRefresh = refreshChunkForAnchor;
       refreshFragmentGroup = function (fragmentId, anchor) {
@@ -1074,6 +1232,7 @@ globalThis.window = globalThis;
       replaceFragmentCard = function (fragmentId, anchor) {
         recoveredCards.push({fragmentId: fragmentId, anchor: anchor});
       };
+      syncPromotedTitleSurface = function () { titleSyncs.count += 1; };
     }
   };
 }());
@@ -1232,7 +1391,10 @@ var renderedChunks = [];
 helpers.installRenderSpies(function (chunk) { renderedChunks.push(chunk); });
 var postCommitFailures = {group: false, chunk: false};
 var recoveredCards = [];
-helpers.installPostCommitFailureSpies(postCommitFailures, recoveredCards);
+var titleSyncs = {count: 0};
+helpers.installPostCommitFailureSpies(
+  postCommitFailures, recoveredCards, titleSyncs
+);
 
 function prepareDraft(revision) {
   helpers.state.editorBase = revision;
@@ -1298,6 +1460,7 @@ function prepareDraft(revision) {
       helpers.state.fragmentGroups.get(anchor.target_id)[0].revision === 2,
     "saved fragment group was not updated in place"
   );
+  assert(titleSyncs.count === 1, "successful save did not refresh the title surface");
   assert(
     writes[0].includes("Updated") && writes[0].endsWith("updated"),
     "saved bytes do not contain the editor value"
@@ -1865,6 +2028,7 @@ globalThis.window = globalThis;
     installDraftSpies: function (calls, render) {
       renderMarkdown = render;
       renderSourceBlock = function () { return new FakeNode("div"); };
+      renderCardActions = function () { return new FakeNode("div"); };
       decorateGlossary = function () {};
       typeset = function () {};
       refreshChunkForAnchor = function (anchor) { calls.refresh.push(anchor); };
@@ -3315,6 +3479,71 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert '--alc-note-fg: #f9fafb;' in stylesheet
     assert '--alc-note-bg: #111827;' in stylesheet
     assert 'var COLOR_PRESETS = [' in javascript
+    assert "setupReaderSettings();" in javascript
+    assert "readerPreferenceSnapshot" in javascript
+    assert 'body.dataset.alcReaderLayout = next.layout' in javascript
+    assert '"--alc-source-font"' in javascript
+    assert '"--alc-target-font"' in javascript
+    assert '"--alc-font-scale"' in javascript
+    assert '"--alc-reader-line-height"' in javascript
+    assert '"--alc-reader-width"' in javascript
+    assert '".alc-select-listbox, .alc-custom-select"' in javascript
+    assert '".alc-settings-panel, .alc-speech-dock"' in javascript
+    assert "localStorage" not in javascript
+    assert "contain: inline-size;" in stylesheet
+    assert ".alc-speech-player-title {\n  display: block;" in stylesheet
+    assert ".alc-speech-player-progress {\n  min-height: 1.3em;" in stylesheet
+    assert ".alc-speech-status {\n  position: absolute;" in stylesheet
+    assert "#alc-speech-panel-player { margin-top: .7rem; }" in stylesheet
+    assert 'automaticVoiceSelection: "Automatic (default: {voice})"' in javascript
+    assert "function speechVoiceDescription(voice)" in javascript
+    assert "function positionSpeechRateMenu(player)" in javascript
+    assert 'menu.style.width = triggerRect.width + "px";' in javascript
+    assert "spaceAbove >= menuRect.height + spacing" in javascript
+    assert 'player.dataset.playerKind === "dock"' in javascript
+    assert 'menu.style.maxHeight = docked ? "none"' in javascript
+    assert 'menu.style.bottom = "auto";' in javascript
+    assert ".alc-speech-dock .alc-speech-rate-menu" in stylesheet
+    assert 'rate-menu[data-layout="grid"]' in stylesheet
+    assert ".alc-speech-dock .alc-speech-player-transport { gap: .25rem; }" in stylesheet
+    assert "min-height: 2.25rem !important;" in stylesheet
+    assert 'button[data-speech-action="close"]::before' in stylesheet
+    assert "right: .85rem;" in stylesheet
+    assert "text-overflow: ellipsis;" in stylesheet
+    assert "border-left: 2px solid #d0a747;" in stylesheet
+    assert ".alc-card-actions {" in stylesheet
+    assert "opacity: 0;\n  pointer-events: none;" in stylesheet
+    assert "opacity: .85;\n  pointer-events: auto;" in stylesheet
+    assert "@media (max-width: 899px), (hover: none), (pointer: coarse)" in stylesheet
+    assert "inset: -.375rem;" in stylesheet
+    assert ".alc-lanes:not(.has-parallel-translation) > .alc-source-card" in stylesheet
+    assert ".alc-book-header > h1.is-speaking" in stylesheet
+    assert "width: 44px;\n    min-width: 44px;" in stylesheet
+    assert ".alc-speech-rate-option { min-height: 44px !important; }" in stylesheet
+    assert "height: 2.2rem;\n    min-height: 2.2rem;" in stylesheet
+    assert "margin-left: auto;" in stylesheet
+    assert "> .alc-translated-title.is-inline-editing" in stylesheet
+    assert "padding: 3.2rem 0 .65rem;" in stylesheet
+    assert ".alc-promoted-title-row > .alc-lanes {\n  padding-top: 1.5rem;" in stylesheet
+    assert ".alc-promoted-title-row > .alc-lanes > .alc-source-card { display: none; }" in stylesheet
+    assert "width: min(33.5rem, calc(100% - 2rem));" in stylesheet
+    assert "grid-template-columns: minmax(10rem, 1fr) max-content;" in stylesheet
+    assert 'd="m18 5-10 7 10 7Z"' in javascript
+    assert 'speechRate: "倍速"' in javascript
+    assert 'width="12" height="12"' in javascript
+    assert 'd="M3 11V9a3 3 0 0 1 3-3h14"' in javascript
+    assert 'd="M21 13v2a3 3 0 0 1-3 3H4"' in javascript
+    assert 'd="M11 10.5 13 9v6"' in javascript
+    assert 'select.tabIndex = -1;' in javascript
+    assert 'select.setAttribute("aria-hidden", "true")' in javascript
+    assert 'document.addEventListener("click", attemptInlineDraftExit, true)' in javascript
+    assert 'window.addEventListener("beforeunload", guardUnsavedDraftBeforeUnload)' in javascript
+    assert "min-height: 2.25rem;\n  padding: .35rem .7rem;" in stylesheet
+    assert ".alc-unsaved-dialog button[data-initial-focus]:focus-visible" in stylesheet
+    assert "root._alcSpeechQueue === queue" in javascript
+    assert "var items = document.createDocumentFragment();" in javascript
+    assert "width: 1.1rem;\n  height: 1.1rem;" in stylesheet
+    assert "stroke-width: 2;" in stylesheet
     assert 'pattern="#[0-9A-Fa-f]{6}"' not in javascript
     assert ".alc-source-card { padding: .3rem .15rem; background: transparent; }" in stylesheet
 
@@ -3358,6 +3587,7 @@ def test_reader_equation_rows_and_css_lanes_are_bounded() -> None:
     assert "white-space: nowrap" in stylesheet
     assert "function setupLaneResponsiveness" not in javascript
     assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in stylesheet
+    assert ".alc-lanes { grid-template-columns: minmax(0, 1fr); gap: .4rem; }" in stylesheet
 
 
 def test_matching_overlay_equation_inherits_effective_label_under_node() -> None:

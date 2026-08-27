@@ -126,6 +126,9 @@
     speechReady: false,
     speechVoices: [],
     speechVoiceIdentity: "",
+    speechVoiceIdentities: {source: "", target: ""},
+    speechRate: 1,
+    speechLoopMode: "none",
     speechRoles: new Set(["source"]),
     speechQueue: [],
     speechIndex: -1,
@@ -133,7 +136,9 @@
     speechPlaying: false,
     speechPaused: false,
     speechGeneration: 0,
-    speechActiveNode: null
+    speechActiveNode: null,
+    speechStatus: "",
+    speechStatusError: false
   };
 
   function element(tag, className, text) {
@@ -450,16 +455,25 @@
       listen: traditional ? "朗讀" : "朗读",
       readContent: traditional ? "朗讀內容" : "朗读内容",
       voice: "声音",
-      automaticVoice: traditional ? "自動（按內容語言）" : "自动（按内容语言）",
+      sourceVoice: "英文声音",
+      targetVoice: "中文声音",
+      automaticVoice: traditional ? "自動" : "自动",
+      automaticVoiceSelection: traditional ?
+        "自動（預設：{voice}）" : "自动（默认：{voice}）",
       localVoice: traditional ? "本機" : "本机",
       networkVoice: "联网",
-      speechRate: "语速",
+      speechRate: "倍速",
       speechPlay: "播放",
       speechPause: "暂停",
       speechResume: "继续",
       speechStop: "停止",
       speechPrevious: "上一段",
       speechNext: "下一段",
+      speechFromBeginning: "从头播放",
+      speechPlaylist: "播放列表",
+      speechLoopNone: "不循环",
+      speechLoopAll: "全部循环",
+      speechLoopOne: "单段循环",
       speechUnavailable: traditional ?
         "此瀏覽器不支援語音朗讀。" : "此浏览器不支持语音朗读。",
       speechNoVoices: traditional ?
@@ -572,7 +586,10 @@
       listen: "Listen",
       readContent: "Read content",
       voice: "Voice",
-      automaticVoice: "Automatic (content language)",
+      sourceVoice: "English voice",
+      targetVoice: "Chinese voice",
+      automaticVoice: "Automatic",
+      automaticVoiceSelection: "Automatic (default: {voice})",
       localVoice: "local",
       networkVoice: "network",
       speechRate: "Rate",
@@ -582,6 +599,11 @@
       speechStop: "Stop",
       speechPrevious: "Previous paragraph",
       speechNext: "Next paragraph",
+      speechFromBeginning: "Play from beginning",
+      speechPlaylist: "Playlist",
+      speechLoopNone: "No repeat",
+      speechLoopAll: "Repeat all",
+      speechLoopOne: "Repeat paragraph",
       speechUnavailable: "Speech is unavailable in this browser.",
       speechNoVoices: "No system voices were found. Install a voice in the operating system first.",
       speechChooseContent: "Select at least one content type to read.",
@@ -2013,6 +2035,7 @@
     source.lang = (state.payload.publication.reader_profile || {}).source_language ||
       document.documentElement.lang;
     source.appendChild(renderSourceBlock(block));
+    source.appendChild(renderCardActions("source", block.block_id, null));
     lanes.appendChild(source);
 
     fragments.filter(function (item) {
@@ -2469,8 +2492,43 @@
     if (editing) {
       card.classList.add("is-inline-editing");
       card.appendChild(renderInlineEditor());
+    } else {
+      card.appendChild(renderCardActions(
+        visual.role, fragmentTargetId(fragment), fragment
+      ));
     }
     return card;
+  }
+
+  function renderCardActions(role, blockId, fragment) {
+    var root = element("div", "alc-card-actions");
+    root.setAttribute("aria-label", roleLabel(role) + " actions");
+    var speech = element("button", "alc-card-action");
+    speech.type = "button";
+    var speechLabel = labels().listen + " · " + roleLabel(role);
+    speech.setAttribute("aria-label", speechLabel);
+    speech.title = speechLabel;
+    speech.innerHTML = speechIcon("speaker");
+    speech.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      playSpeechFromCard(role, blockId, fragment && fragment.fragment_id);
+    });
+    root.appendChild(speech);
+    if (fragment) {
+      var edit = element("button", "alc-card-action");
+      edit.type = "button";
+      edit.setAttribute("aria-label", labels().editContent);
+      edit.title = labels().editContent;
+      edit.innerHTML = speechIcon("edit");
+      edit.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        beginInlineEdit(fragment);
+      });
+      root.appendChild(edit);
+    }
+    return root;
   }
 
   function decorateOverlayEquation(rendered, fragment) {
@@ -2793,6 +2851,399 @@
     state.visibilityStyle.textContent = rules.join("\n");
   }
 
+  function speechIcon(name) {
+    var paths = {
+      playlist: '<path d="M9 6h11M9 12h11M9 18h11"></path>' +
+        '<circle cx="4" cy="6" r="1"></circle><circle cx="4" cy="12" r="1"></circle>' +
+        '<circle cx="4" cy="18" r="1"></circle>',
+      previous: '<path d="M18 5 8 12l10 7Z"></path><path d="M6 5v14"></path>',
+      play: '<path class="is-solid" d="m8 5 11 7-11 7Z"></path>',
+      pause: '<path class="is-solid" d="M7 5h4v14H7zM13 5h4v14h-4z"></path>',
+      next: '<path d="m6 5 10 7-10 7Z"></path><path d="M18 5v14"></path>',
+      beginning: '<path d="M6 5v14"></path><path class="is-solid" d="m18 5-10 7 10 7Z"></path>',
+      stop: '<rect class="is-solid" x="6" y="6" width="12" height="12" rx="1"></rect>',
+      loopNone: '<path d="m17 2 4 4-4 4"></path><path d="M3 11V9a3 3 0 0 1 3-3h14"></path>' +
+        '<path d="m7 22-4-4 4-4"></path><path d="M21 13v2a3 3 0 0 1-3 3H4"></path>' +
+        '<path d="m4 4 16 16"></path>',
+      loopAll: '<path d="m17 2 4 4-4 4"></path><path d="M3 11V9a3 3 0 0 1 3-3h14"></path>' +
+        '<path d="m7 22-4-4 4-4"></path><path d="M21 13v2a3 3 0 0 1-3 3H4"></path>',
+      loopOne: '<path d="m17 2 4 4-4 4"></path><path d="M3 11V9a3 3 0 0 1 3-3h14"></path>' +
+        '<path d="m7 22-4-4 4-4"></path><path d="M21 13v2a3 3 0 0 1-3 3H4"></path>' +
+        '<path d="M11 10.5 13 9v6"></path>',
+      speaker: '<path d="M4 10h4l4-3v10l-4-3H4Z"></path>' +
+        '<path d="M15 9a4 4 0 0 1 0 6M17.5 6.5a7.5 7.5 0 0 1 0 11"></path>',
+      edit: '<path d="m4 20 4.2-1 10.6-10.6-3.2-3.2L5 15.8 4 20Z"></path>' +
+        '<path d="m13.8 7 3.2 3.2"></path>',
+      close: '<path d="M6 6l12 12M18 6 6 18"></path>'
+    };
+    return '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+      (paths[name] || "") + "</svg>";
+  }
+
+  function speechPlayerButton(action, icon, label, className) {
+    var button = element("button", "alc-speech-player-button " + (className || ""));
+    button.type = "button";
+    button.dataset.speechAction = action;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.innerHTML = speechIcon(icon);
+    return button;
+  }
+
+  function renderSpeechPlayer(root) {
+    var strings = labels();
+    var copy = element("div", "alc-speech-player-copy");
+    copy.appendChild(element("span", "alc-speech-player-progress", ""));
+    copy.appendChild(element("strong", "alc-speech-player-title", ""));
+    var transport = element("div", "alc-speech-player-transport");
+    transport.appendChild(speechPlayerButton(
+      "playlist", "playlist", strings.speechPlaylist
+    ));
+    transport.appendChild(speechPlayerButton(
+      "previous", "previous", strings.speechPrevious
+    ));
+    transport.appendChild(speechPlayerButton(
+      "play", "play", strings.speechPlay, "is-primary"
+    ));
+    transport.appendChild(speechPlayerButton(
+      "next", "next", strings.speechNext
+    ));
+    transport.appendChild(speechPlayerButton(
+      "beginning", "beginning", strings.speechFromBeginning
+    ));
+    transport.appendChild(speechPlayerButton(
+      "stop", "stop", strings.speechStop
+    ));
+    transport.appendChild(speechPlayerButton(
+      "loop", "loopNone", strings.speechLoopNone
+    ));
+    var rate = element("button", "alc-speech-rate-trigger", "");
+    rate.type = "button";
+    rate.dataset.speechAction = "rate";
+    rate.setAttribute("aria-haspopup", "listbox");
+    rate.setAttribute("aria-expanded", "false");
+    transport.appendChild(rate);
+    if (root.dataset.playerKind === "dock") {
+      transport.appendChild(speechPlayerButton(
+        "close", "close", strings.close
+      ));
+    }
+    var rateMenu = element("div", "alc-speech-rate-menu");
+    rateMenu.hidden = true;
+    rateMenu.setAttribute("role", "listbox");
+    [0.5, 0.8, 1, 1.2, 1.5, 2, 2.5, 3].forEach(function (value) {
+      var option = element("button", "alc-speech-rate-option", value + "×");
+      option.type = "button";
+      option.dataset.speechRate = String(value);
+      option.setAttribute("role", "option");
+      option.addEventListener("click", function (event) {
+        event.stopPropagation();
+        setSpeechRate(value);
+        closeSpeechRateMenus();
+      });
+      rateMenu.appendChild(option);
+    });
+    var playlist = element("section", "alc-speech-playlist");
+    playlist.hidden = true;
+    playlist.innerHTML =
+      '<header><h2></h2><button type="button" data-speech-action="playlist-close" ' +
+        'aria-label="' + strings.close + '">' + speechIcon("close") + '</button></header>' +
+      '<ol></ol>';
+    root.replaceChildren(copy, transport, rateMenu, playlist);
+    root.addEventListener("click", handleSpeechPlayerAction);
+    syncSpeechPlayers();
+  }
+
+  function speechPlayers() {
+    if (!document.querySelectorAll) return [];
+    return Array.prototype.slice.call(
+      document.querySelectorAll(".alc-speech-player")
+    );
+  }
+
+  function speechCurrentSegment() {
+    return state.speechIndex >= 0 ? state.speechQueue[state.speechIndex] : null;
+  }
+
+  function speechSegmentLabel(segment) {
+    if (!segment) return labels().speechChooseContent;
+    return normalizeSpeechText(speechSegmentText(segment)).slice(0, 120);
+  }
+
+  function loopLabel() {
+    if (state.speechLoopMode === "one") return labels().speechLoopOne;
+    if (state.speechLoopMode === "all") return labels().speechLoopAll;
+    return labels().speechLoopNone;
+  }
+
+  function loopIconName() {
+    if (state.speechLoopMode === "one") return "loopOne";
+    if (state.speechLoopMode === "all") return "loopAll";
+    return "loopNone";
+  }
+
+  function syncSpeechPlayers() {
+    if (typeof document === "undefined") return;
+    var playable = state.speechSupported && state.speechVoices.length > 0 &&
+      state.speechRoles.size > 0;
+    var segment = speechCurrentSegment();
+    speechPlayers().forEach(function (player) {
+      var progress = player.querySelector(".alc-speech-player-progress");
+      var title = player.querySelector(".alc-speech-player-title");
+      if (progress) {
+        var showProgress = state.speechPlaying && state.speechQueue.length &&
+          state.speechIndex >= 0;
+        progress.textContent = showProgress ?
+          speechProgressText(state.speechIndex, state.speechQueue.length) :
+          state.speechStatus;
+        progress.dataset.kind = !showProgress && state.speechStatusError ?
+          "error" : "info";
+      }
+      if (title) title.textContent = speechSegmentLabel(segment);
+      var play = player.querySelector('[data-speech-action="play"]');
+      if (play) {
+        var pausing = state.speechPlaying && !state.speechPaused;
+        play.innerHTML = speechIcon(pausing ? "pause" : "play");
+        play.setAttribute(
+          "aria-label", pausing ? labels().speechPause :
+            state.speechPaused ? labels().speechResume : labels().speechPlay
+        );
+        play.title = play.getAttribute("aria-label");
+        play.disabled = !playable;
+      }
+      var previous = player.querySelector('[data-speech-action="previous"]');
+      var next = player.querySelector('[data-speech-action="next"]');
+      var beginning = player.querySelector('[data-speech-action="beginning"]');
+      var stop = player.querySelector('[data-speech-action="stop"]');
+      var playlist = player.querySelector('[data-speech-action="playlist"]');
+      if (previous) previous.disabled = !state.speechPlaying || state.speechIndex <= 0;
+      if (next) next.disabled = !state.speechPlaying ||
+        state.speechIndex >= state.speechQueue.length - 1;
+      if (beginning) beginning.disabled = !playable;
+      if (stop) stop.disabled = !state.speechPlaying;
+      if (playlist) playlist.disabled = !state.speechRoles.size;
+      var loop = player.querySelector('[data-speech-action="loop"]');
+      if (loop) {
+        loop.innerHTML = speechIcon(loopIconName());
+        loop.setAttribute("aria-label", loopLabel());
+        loop.title = loopLabel();
+        loop.setAttribute(
+          "aria-pressed", String(state.speechLoopMode !== "none")
+        );
+        loop.disabled = !playable;
+      }
+      var rate = player.querySelector('[data-speech-action="rate"]');
+      if (rate) {
+        rate.textContent = labels().speechRate + " " + state.speechRate + "×";
+        rate.setAttribute(
+          "aria-label", labels().speechRate + " " + state.speechRate + "×"
+        );
+      }
+      var rateMenu = player.querySelector(".alc-speech-rate-menu");
+      if (rateMenu && !rateMenu.hidden) positionSpeechRateMenu(player);
+      player.querySelectorAll(".alc-speech-rate-option").forEach(function (option) {
+        option.setAttribute(
+          "aria-selected", String(Number(option.dataset.speechRate) === state.speechRate)
+        );
+      });
+      var list = player.querySelector(".alc-speech-playlist");
+      if (list && !list.hidden) renderSpeechPlaylist(player);
+    });
+  }
+
+  function closeSpeechRateMenus() {
+    speechPlayers().forEach(function (player) {
+      var menu = player.querySelector(".alc-speech-rate-menu");
+      var trigger = player.querySelector('[data-speech-action="rate"]');
+      if (menu) menu.hidden = true;
+      if (trigger) trigger.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function positionSpeechRateMenu(player) {
+    var menu = player.querySelector(".alc-speech-rate-menu");
+    var trigger = player.querySelector('[data-speech-action="rate"]');
+    if (!menu || !trigger) return;
+    var playerRect = player.getBoundingClientRect();
+    var triggerRect = trigger.getBoundingClientRect();
+    var gutter = 8;
+    var spacing = 5;
+    var viewportHeight = document.documentElement.clientHeight;
+    var spaceAbove = triggerRect.top - gutter;
+    var spaceBelow = viewportHeight - triggerRect.bottom - gutter;
+    var docked = player.dataset.playerKind === "dock";
+    menu.dataset.layout = "list";
+    menu.style.width = triggerRect.width + "px";
+    var menuRect = menu.getBoundingClientRect();
+    var grid = docked && spaceAbove < menuRect.height + spacing;
+    if (grid) {
+      menu.dataset.layout = "grid";
+      menu.style.width = Math.max(112, triggerRect.width * 2) + "px";
+    }
+    var opensAbove = docked || spaceAbove >= menuRect.height + spacing ||
+      spaceAbove >= spaceBelow;
+    var available = opensAbove ? spaceAbove : spaceBelow;
+    menu.style.right = Math.max(0, playerRect.right - triggerRect.right) + "px";
+    menu.style.maxHeight = docked ? "none" : Math.max(
+      112, Math.min(240, available - spacing)
+    ) + "px";
+    if (opensAbove) {
+      menu.style.top = "auto";
+      menu.style.bottom = playerRect.bottom - triggerRect.top + spacing + "px";
+    } else {
+      menu.style.top = triggerRect.bottom - playerRect.top + spacing + "px";
+      menu.style.bottom = "auto";
+    }
+  }
+
+  function toggleSpeechRateMenu(player) {
+    var menu = player.querySelector(".alc-speech-rate-menu");
+    var trigger = player.querySelector('[data-speech-action="rate"]');
+    var opening = menu.hidden;
+    closeSpeechRateMenus();
+    menu.hidden = !opening;
+    trigger.setAttribute("aria-expanded", String(opening));
+    if (opening) positionSpeechRateMenu(player);
+  }
+
+  function setSpeechRate(value) {
+    var next = Number(value);
+    if (!Number.isFinite(next) || next < 0.5 || next > 3) return;
+    state.speechRate = next;
+    if (state.speechPlaying && state.speechIndex >= 0) {
+      var paused = state.speechPaused;
+      speakSpeechIndex(state.speechIndex);
+      if (paused) {
+        window.speechSynthesis.pause();
+        state.speechPaused = true;
+      }
+    }
+    syncSpeechPlayers();
+  }
+
+  function cycleSpeechLoop() {
+    state.speechLoopMode = state.speechLoopMode === "none" ? "all" :
+      state.speechLoopMode === "all" ? "one" : "none";
+    syncSpeechPlayers();
+  }
+
+  function rolePlaylistLabel(role) {
+    return role === "source" ? labels().original : roleLabel(role);
+  }
+
+  function updateSpeechPlaylistSelection(root) {
+    var previous = Number.isInteger(root._alcSpeechCurrentIndex) ?
+      root._alcSpeechCurrentIndex : -1;
+    var current = state.speechPlaying ? state.speechIndex : -1;
+    if (previous === current) return;
+    [previous, current].forEach(function (index) {
+      if (index < 0) return;
+      var button = root.querySelector(
+        '.alc-speech-playlist-item[data-speech-index="' + index + '"]'
+      );
+      if (button) button.setAttribute(
+        "aria-current", String(index === current)
+      );
+    });
+    root._alcSpeechCurrentIndex = current;
+  }
+
+  function renderSpeechPlaylist(player) {
+    var root = player.querySelector(".alc-speech-playlist");
+    if (!root) return;
+    var queue = state.speechPlaying && state.speechQueue.length ?
+      state.speechQueue : buildSpeechQueue();
+    var heading = root.querySelector("h2");
+    var list = root.querySelector("ol");
+    heading.textContent = labels().speechPlaylist + " · " + queue.length + " " +
+      (document.documentElement.lang.toLowerCase().indexOf("zh") === 0 ? "个段落" : "paragraphs");
+    if (root._alcSpeechQueue === queue) {
+      updateSpeechPlaylistSelection(root);
+      return;
+    }
+    root._alcSpeechQueue = queue;
+    root._alcSpeechCurrentIndex = state.speechPlaying ? state.speechIndex : -1;
+    list.replaceChildren();
+    var items = document.createDocumentFragment();
+    queue.forEach(function (segment, index) {
+      var item = element("li");
+      var button = element("button", "alc-speech-playlist-item");
+      button.type = "button";
+      button.dataset.speechIndex = String(index);
+      button.setAttribute(
+        "aria-current", String(state.speechPlaying && index === state.speechIndex)
+      );
+      button.innerHTML =
+        '<span class="alc-speech-playlist-number">' + (index + 1) + '</span>' +
+        '<span class="alc-speech-playlist-role"></span>' +
+        '<span class="alc-speech-playlist-text"></span>';
+      button.querySelector(".alc-speech-playlist-role").textContent =
+        rolePlaylistLabel(segment.role);
+      button.querySelector(".alc-speech-playlist-text").textContent =
+        speechSegmentLabel(segment);
+      button.addEventListener("click", function () {
+        if (!speechSegmentText(queue[index])) {
+          setSpeechStatus(labels().speechNoReadableContent, true);
+          return;
+        }
+        state.speechQueue = queue;
+        speakSpeechIndex(index);
+        root.hidden = true;
+        syncSpeechPlayers();
+      });
+      item.appendChild(button);
+      items.appendChild(item);
+    });
+    list.appendChild(items);
+  }
+
+  function toggleSpeechPlaylist(player) {
+    var root = player.querySelector(".alc-speech-playlist");
+    var opening = root.hidden;
+    speechPlayers().forEach(function (candidate) {
+      var playlist = candidate.querySelector(".alc-speech-playlist");
+      if (playlist) playlist.hidden = true;
+    });
+    root.hidden = !opening;
+    if (opening) renderSpeechPlaylist(player);
+  }
+
+  function playSpeechFromBeginning() {
+    if (!state.speechQueue.length) state.speechQueue = buildSpeechQueue();
+    if (!state.speechQueue.length) {
+      setSpeechStatus(labels().speechNoReadableContent, true);
+      return;
+    }
+    speakSpeechIndex(0);
+  }
+
+  function handleSpeechPlayerAction(event) {
+    var button = event.target.closest && event.target.closest("[data-speech-action]");
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    var player = button.closest(".alc-speech-player");
+    var action = button.dataset.speechAction;
+    if (action === "playlist") toggleSpeechPlaylist(player);
+    else if (action === "playlist-close") {
+      player.querySelector(".alc-speech-playlist").hidden = true;
+    } else if (action === "previous") moveSpeech(-1);
+    else if (action === "play") {
+      if (state.speechPlaying) toggleSpeechPause();
+      else playSpeech();
+    } else if (action === "next") moveSpeech(1);
+    else if (action === "beginning") playSpeechFromBeginning();
+    else if (action === "stop") stopSpeech(true);
+    else if (action === "loop") cycleSpeechLoop();
+    else if (action === "rate") toggleSpeechRateMenu(player);
+    else if (action === "close") {
+      stopSpeech(false);
+      document.getElementById("alc-speech-dock").hidden = true;
+      document.body.classList.remove("alc-speech-dock-open");
+    }
+    syncSpeechPlayers();
+  }
+
   function setupSpeech() {
     var strings = labels();
     var control = document.querySelector(".alc-speech-control");
@@ -2801,15 +3252,12 @@
     labelToolButton(trigger, strings.listen);
     document.getElementById("alc-speech-content-label").textContent =
       strings.readContent;
-    document.getElementById("alc-speech-voice-label").textContent = strings.voice;
-    document.getElementById("alc-speech-rate-label").textContent =
-      strings.speechRate;
-    document.getElementById("alc-speech-play").textContent = strings.speechPlay;
-    document.getElementById("alc-speech-pause").textContent = strings.speechPause;
-    document.getElementById("alc-speech-stop").textContent = strings.speechStop;
-    document.getElementById("alc-speech-previous").textContent =
-      strings.speechPrevious;
-    document.getElementById("alc-speech-next").textContent = strings.speechNext;
+    document.getElementById("alc-speech-source-voice-label").textContent =
+      strings.sourceVoice;
+    document.getElementById("alc-speech-target-voice-label").textContent =
+      strings.targetVoice;
+    renderSpeechPlayer(document.getElementById("alc-speech-panel-player"));
+    renderSpeechPlayer(document.getElementById("alc-speech-dock"));
     state.speechSupported = Boolean(
       window.speechSynthesis &&
       typeof window.SpeechSynthesisUtterance === "function"
@@ -2822,36 +3270,23 @@
       trigger.setAttribute("aria-expanded", String(!panel.hidden));
       if (!panel.hidden) refreshSpeechVoices();
     });
-    document.getElementById("alc-speech-play").addEventListener(
-      "click", playSpeech
-    );
-    document.getElementById("alc-speech-pause").addEventListener(
-      "click", toggleSpeechPause
-    );
-    document.getElementById("alc-speech-stop").addEventListener(
-      "click", function () { stopSpeech(true); }
-    );
-    document.getElementById("alc-speech-previous").addEventListener(
-      "click", function () { moveSpeech(-1); }
-    );
-    document.getElementById("alc-speech-next").addEventListener(
-      "click", function () { moveSpeech(1); }
-    );
-    document.getElementById("alc-speech-voice").addEventListener(
-      "change", function (event) {
-        state.speechVoiceIdentity = event.target.value;
-      }
-    );
-    document.getElementById("alc-speech-rate").addEventListener(
-      "input", function (event) {
-        document.getElementById("alc-speech-rate-value").textContent =
-          Number(event.target.value).toFixed(1) + "×";
-      }
-    );
+    ["source", "target"].forEach(function (kind) {
+      var select = document.getElementById("alc-speech-" + kind + "-voice");
+      select.addEventListener("change", function () {
+        state.speechVoiceIdentities[kind] = select.value;
+      });
+      installCustomSelect(select);
+    });
     document.addEventListener("click", function (event) {
-      if (!panel.hidden && !control.contains(event.target)) {
+      var inListbox = event.target.closest && event.target.closest(
+        ".alc-select-listbox, .alc-speech-rate-menu"
+      );
+      if (!panel.hidden && !control.contains(event.target) && !inListbox) {
         closeSpeechPanel(false);
       }
+      if (!event.target.closest || !event.target.closest(
+        ".alc-speech-rate-trigger, .alc-speech-rate-menu"
+      )) closeSpeechRateMenus();
     });
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && !panel.hidden) {
@@ -2930,14 +3365,12 @@
         String(left.name || "").localeCompare(String(right.name || ""));
     });
     state.speechVoices = voices;
-    if (
-      state.speechVoiceIdentity &&
-      !voices.some(function (voice) {
-        return speechVoiceIdentity(voice) === state.speechVoiceIdentity;
-      })
-    ) {
-      state.speechVoiceIdentity = "";
-    }
+    ["source", "target"].forEach(function (kind) {
+      var identity = state.speechVoiceIdentities[kind];
+      if (identity && !voices.some(function (voice) {
+        return speechVoiceIdentity(voice) === identity;
+      })) state.speechVoiceIdentities[kind] = "";
+    });
     renderSpeechVoiceOptions();
     if (!voices.length) {
       setSpeechStatus(labels().speechNoVoices, true);
@@ -2958,27 +3391,60 @@
     ]);
   }
 
+  function speechVoiceDescription(voice) {
+    if (!voice) return "";
+    var service = voice.localService === true ? labels().localVoice :
+      voice.localService === false ? labels().networkVoice : "";
+    return [
+      voice.name || voice.voiceURI || labels().voice,
+      voice.lang || "",
+      service
+    ].filter(Boolean).join(" · ");
+  }
+
+  function primaryLanguageTag(value) {
+    return String(value || "").toLowerCase().split("-")[0];
+  }
+
+  function speechProfileLanguage(kind) {
+    var profile = state.payload.publication.reader_profile || {};
+    return kind === "source" ? profile.source_language || "" :
+      profile.target_language || profile.source_language || "";
+  }
+
+  function voiceMatchesLanguage(voice, language) {
+    var expected = primaryLanguageTag(language);
+    if (!expected) return true;
+    return primaryLanguageTag(voice && voice.lang) === expected;
+  }
+
   function renderSpeechVoiceOptions() {
-    var select = document.getElementById("alc-speech-voice");
-    if (!select) return;
-    select.replaceChildren();
-    var automatic = element("option", "", labels().automaticVoice);
-    automatic.value = "";
-    select.appendChild(automatic);
-    state.speechVoices.forEach(function (voice) {
-      var service = voice.localService === true ? labels().localVoice :
-        voice.localService === false ? labels().networkVoice : "";
-      var description = [
-        voice.name || voice.voiceURI || labels().voice,
-        voice.lang || "",
-        service
-      ].filter(Boolean).join(" · ");
-      var option = element("option", "", description);
-      option.value = speechVoiceIdentity(voice);
-      select.appendChild(option);
+    ["source", "target"].forEach(function (kind) {
+      var select = document.getElementById("alc-speech-" + kind + "-voice");
+      if (!select) return;
+      select.replaceChildren();
+      var automaticDescription = speechVoiceDescription(
+        automaticSpeechVoice(speechProfileLanguage(kind))
+      );
+      var automaticLabel = automaticDescription ?
+        labels().automaticVoiceSelection.replace(
+          "{voice}", automaticDescription
+        ) : labels().automaticVoice;
+      var automatic = element("option", "", automaticLabel);
+      automatic.value = "";
+      select.appendChild(automatic);
+      var matching = state.speechVoices.filter(function (voice) {
+        return voiceMatchesLanguage(voice, speechProfileLanguage(kind));
+      });
+      matching.forEach(function (voice) {
+        var option = element("option", "", speechVoiceDescription(voice));
+        option.value = speechVoiceIdentity(voice);
+        select.appendChild(option);
+      });
+      select.value = state.speechVoiceIdentities[kind] || "";
+      select.disabled = !state.speechSupported || !matching.length;
+      syncCustomSelect(select);
     });
-    select.value = state.speechVoiceIdentity;
-    select.disabled = !state.speechSupported || !state.speechVoices.length;
   }
 
   function normalizeSpeechText(value) {
@@ -3072,15 +3538,16 @@
       profile.target_language || profile.source_language || "";
   }
 
-  function buildSpeechQueue() {
+  function buildSpeechQueue(selectedRoles) {
     loadAllPayload(false);
+    var roles = selectedRoles || state.speechRoles;
     var queue = [];
     var blocks = state.payload.publication.source_document.blocks || [];
     blocks.forEach(function (block, blockIndex) {
       if (isPdfPageMarkerBlock(block) || isStandaloneHtmlCommentBlock(block)) {
         return;
       }
-      if (state.speechRoles.has("source")) {
+      if (roles.has("source")) {
         var sourceText = sourceSpeechText(block, null);
         if (sourceText) queue.push({
           text: sourceText,
@@ -3092,7 +3559,7 @@
         });
       }
       (state.fragmentGroups.get(block.block_id) || []).forEach(function (fragment) {
-        if (!state.speechRoles.has(fragment.role)) return;
+        if (!fragmentIsVisible(fragment) || !roles.has(fragment.role)) return;
         queue.push({
           text: null,
           fragment: fragment,
@@ -3107,6 +3574,30 @@
     return queue;
   }
 
+  function playSpeechFromCard(role, blockId, fragmentId) {
+    if (!state.speechSupported) {
+      setSpeechStatus(labels().speechUnavailable, true);
+      return;
+    }
+    refreshSpeechVoices();
+    if (!state.speechVoices.length) return;
+    var queue = buildSpeechQueue(new Set([role]));
+    var index = queue.findIndex(function (segment) {
+      return segment.blockId === blockId &&
+        (!fragmentId || segment.fragmentId === fragmentId);
+    });
+    if (index < 0) {
+      setSpeechStatus(labels().speechNoReadableContent, true);
+      return;
+    }
+    if (!speechSegmentText(queue[index])) {
+      setSpeechStatus(labels().speechNoReadableContent, true);
+      return;
+    }
+    state.speechQueue = queue;
+    speakSpeechIndex(index);
+  }
+
   function speechSegmentText(segment) {
     if (segment.text !== null && segment.text !== undefined) return segment.text;
     segment.text = fragmentSpeechText(segment.fragment);
@@ -3114,6 +3605,17 @@
   }
 
   function speechSegmentNode(segment) {
+    if (segment.blockId === state.primaryTitleBlockId) {
+      var header = document.getElementById("alc-book-header");
+      if (header && segment.role === "source") {
+        return header.querySelector(":scope > h1");
+      }
+      if (
+        header && segment.fragmentId === state.primaryTitleFragmentId
+      ) {
+        return header.querySelector(":scope > .alc-translated-title");
+      }
+    }
     var chunk = state.chunkByTargetId.get(
       "block-" + safeToken(segment.blockId)
     );
@@ -3126,11 +3628,37 @@
     );
   }
 
-  function selectedSpeechVoice() {
-    if (!state.speechVoiceIdentity) return null;
-    return state.speechVoices.find(function (voice) {
-      return speechVoiceIdentity(voice) === state.speechVoiceIdentity;
-    }) || null;
+  function automaticSpeechVoice(language) {
+    var normalized = String(language || "").toLowerCase();
+    var primary = primaryLanguageTag(normalized);
+    var scored = state.speechVoices.map(function (voice, index) {
+      var tag = String(voice.lang || "").toLowerCase();
+      var score = 0;
+      if (tag === normalized && normalized) score += 100;
+      else if (primary && primaryLanguageTag(tag) === primary) score += 60;
+      else if (primary) return {voice: voice, score: 0, index: index};
+      else score += 1;
+      if (voice.localService === true) score += 8;
+      if (voice.default === true) score += 4;
+      return {voice: voice, score: score, index: index};
+    }).filter(function (item) { return item.score > 0; });
+    scored.sort(function (left, right) {
+      return right.score - left.score || left.index - right.index;
+    });
+    return scored.length ? scored[0].voice : null;
+  }
+
+  function selectedSpeechVoice(segment) {
+    var kind = segment && segment.role === "source" ? "source" : "target";
+    var identity = state.speechVoiceIdentities[kind] ||
+      (kind === "source" ? state.speechVoiceIdentity : "");
+    if (identity) {
+      var selected = state.speechVoices.find(function (voice) {
+        return speechVoiceIdentity(voice) === identity;
+      });
+      if (selected) return selected;
+    }
+    return automaticSpeechVoice(segment && segment.language);
   }
 
   function playSpeech() {
@@ -3211,13 +3739,19 @@
     return last;
   }
 
-  function speakSpeechIndex(index) {
+  function readableSpeechIndex(index, direction) {
+    var step = direction < 0 ? -1 : 1;
     while (
       index >= 0 && index < state.speechQueue.length &&
       !speechSegmentText(state.speechQueue[index])
     ) {
-      index += 1;
+      index += step;
     }
+    return index >= 0 && index < state.speechQueue.length ? index : -1;
+  }
+
+  function speakSpeechIndex(index, direction) {
+    index = readableSpeechIndex(index, direction);
     if (index < 0 || index >= state.speechQueue.length) {
       finishSpeech(true, "");
       return;
@@ -3228,20 +3762,22 @@
     var segment = state.speechQueue[index];
     var text = speechSegmentText(segment);
     var utterance = new window.SpeechSynthesisUtterance(text);
-    var voice = selectedSpeechVoice();
+    var voice = selectedSpeechVoice(segment);
     if (voice) {
       utterance.voice = voice;
       utterance.lang = voice.lang || segment.language;
     } else if (segment.language) {
       utterance.lang = segment.language;
     }
-    utterance.rate = Number(document.getElementById("alc-speech-rate").value);
+    utterance.rate = state.speechRate;
     utterance.onend = function () {
       if (
         generation !== state.speechGeneration ||
         state.speechUtterance !== utterance
       ) return;
-      if (index + 1 < state.speechQueue.length) speakSpeechIndex(index + 1);
+      if (state.speechLoopMode === "one") speakSpeechIndex(index);
+      else if (index + 1 < state.speechQueue.length) speakSpeechIndex(index + 1);
+      else if (state.speechLoopMode === "all") speakSpeechIndex(0);
       else finishSpeech(true, "");
     };
     utterance.onerror = function (event) {
@@ -3255,8 +3791,13 @@
     state.speechUtterance = utterance;
     state.speechPlaying = true;
     state.speechPaused = false;
+    var dock = document.getElementById("alc-speech-dock");
+    if (dock) {
+      dock.hidden = false;
+      document.body.classList.add("alc-speech-dock-open");
+    }
     setSpeechActiveNode(speechSegmentNode(segment));
-    setSpeechStatus(speechProgressText(index, state.speechQueue.length), false);
+    setSpeechStatus("", false);
     updateSpeechControls();
     try {
       window.speechSynthesis.speak(utterance);
@@ -3285,9 +3826,9 @@
 
   function moveSpeech(offset) {
     if (!state.speechPlaying || !state.speechQueue.length) return;
-    var target = state.speechIndex + offset;
-    if (target < 0 || target >= state.speechQueue.length) return;
-    speakSpeechIndex(target);
+    var target = readableSpeechIndex(state.speechIndex + offset, offset);
+    if (target < 0) return;
+    speakSpeechIndex(target, offset);
   }
 
   function stopSpeech(showReady) {
@@ -3333,26 +3874,16 @@
   function setSpeechStatus(value, error) {
     var root = document.getElementById("alc-speech-status");
     if (!root) return;
-    root.textContent = value || "";
-    root.dataset.kind = error ? "error" : "info";
+    state.speechStatus = value || "";
+    state.speechStatusError = Boolean(error);
+    root.textContent = state.speechStatus;
+    root.dataset.kind = state.speechStatusError ? "error" : "info";
+    if (state.speechReady) syncSpeechPlayers();
   }
 
   function updateSpeechControls() {
     if (!state.speechReady) return;
-    var playable = state.speechSupported && state.speechVoices.length > 0 &&
-      state.speechRoles.size > 0;
-    document.getElementById("alc-speech-play").disabled =
-      !playable || state.speechPlaying;
-    var pause = document.getElementById("alc-speech-pause");
-    pause.disabled = !state.speechPlaying;
-    pause.textContent = state.speechPaused ?
-      labels().speechResume : labels().speechPause;
-    document.getElementById("alc-speech-stop").disabled = !state.speechPlaying;
-    document.getElementById("alc-speech-previous").disabled =
-      !state.speechPlaying || state.speechIndex <= 0;
-    document.getElementById("alc-speech-next").disabled =
-      !state.speechPlaying ||
-      state.speechIndex >= state.speechQueue.length - 1;
+    syncSpeechPlayers();
   }
 
   function renderContents(list, sections, strings) {

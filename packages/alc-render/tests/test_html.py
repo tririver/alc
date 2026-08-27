@@ -296,11 +296,10 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-speech"' in text
     assert 'id="alc-speech-panel"' in text
     assert 'id="alc-speech-role-options"' in text
-    assert 'id="alc-speech-voice"' in text
-    assert 'id="alc-speech-rate"' in text
-    assert 'id="alc-speech-play"' in text
-    assert 'id="alc-speech-pause"' in text
-    assert 'id="alc-speech-stop"' in text
+    assert 'id="alc-speech-source-voice"' in text
+    assert 'id="alc-speech-target-voice"' in text
+    assert 'id="alc-speech-panel-player"' in text
+    assert 'id="alc-speech-dock"' in text
     assert 'id="alc-settings"' in text
     assert 'id="alc-settings-panel"' in text
     assert 'id="alc-settings-layout"' in text

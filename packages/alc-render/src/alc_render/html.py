@@ -765,24 +765,17 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
           <div id="alc-speech-role-options" class="alc-speech-role-options"></div>
         </fieldset>
         <label class="alc-speech-field">
-          <span id="alc-speech-voice-label">Voice</span>
-          <select id="alc-speech-voice"></select>
+          <span id="alc-speech-source-voice-label">English voice</span>
+          <select id="alc-speech-source-voice"></select>
         </label>
-        <label class="alc-speech-field alc-speech-rate-field">
-          <span id="alc-speech-rate-label">Rate</span>
-          <input id="alc-speech-rate" type="range" min="0.6" max="1.6"
-            step="0.1" value="1">
-          <output id="alc-speech-rate-value" for="alc-speech-rate">1.0×</output>
+        <label class="alc-speech-field">
+          <span id="alc-speech-target-voice-label">Chinese voice</span>
+          <select id="alc-speech-target-voice"></select>
         </label>
         <p id="alc-speech-status" class="alc-speech-status"
           aria-live="polite"></p>
-        <div class="alc-speech-actions">
-          <button id="alc-speech-previous" type="button">Previous</button>
-          <button id="alc-speech-play" type="button">Play</button>
-          <button id="alc-speech-pause" type="button">Pause</button>
-          <button id="alc-speech-next" type="button">Next</button>
-          <button id="alc-speech-stop" type="button">Stop</button>
-        </div>
+        <div id="alc-speech-panel-player" class="alc-speech-player"
+          data-player-kind="panel"></div>
       </div>
     </div>
     <div class="alc-export-control">
@@ -918,6 +911,8 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
     </div>
   </div>
   <p id="alc-storage-status" class="alc-storage-status" hidden></p>
+  <div id="alc-speech-dock" class="alc-speech-player alc-speech-dock"
+    data-player-kind="dock" hidden></div>
   <div id="alc-shell" class="alc-shell">
     <aside id="alc-contents" class="alc-contents">
       <nav aria-labelledby="alc-contents-heading">
