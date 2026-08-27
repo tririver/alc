@@ -7122,6 +7122,9 @@
     var outcomes = await loadDirectoryRevisionFiles(
       files, embeddedRevisionFilenames(), previousCache, nextCache
     );
+    state.embeddedRevisions.forEach(function (revision) {
+      addRevisionTo(revision, revisions, fileDiagnostics, revisionDigests);
+    });
     outcomes.forEach(function (outcome) {
       if (!outcome) return;
       if (outcome.revision) {
@@ -8005,6 +8008,7 @@
     if (stableStringify(metadata) !== value.slice(prefix.length, split)) {
       throw new Error("JSON front matter is not canonical or has duplicate keys");
     }
+    loadPayloadForRevisionMetadata(metadata);
     validateRevisionMetadata(metadata);
     var markdown = normalizeMarkdown(value.slice(split + separator.length));
     var digest = await semanticDigest(metadata, markdown);
@@ -8016,6 +8020,33 @@
       markdown_body: markdown,
       semantic_digest: digest
     });
+  }
+
+  function loadPayloadForRevisionMetadata(metadata) {
+    if (state.payloadVersion !== "v2" || !plainObject(metadata)) return;
+    ensureSourceIndexes();
+    if (
+      metadata.schema_version !== FRAGMENT_SCHEMA ||
+      !plainObject(metadata.source) ||
+      stableStringify(metadata.source) !== state.sourceIdentityJson
+    ) {
+      return;
+    }
+    var anchor = metadata.anchor;
+    if (!plainObject(anchor) || !Array.isArray(anchor.related_blocks)) return;
+    if (!anchor.related_blocks.every(function (frozen) {
+      return plainObject(frozen) && normalizedNonblank(frozen.block_id);
+    })) return;
+    var descriptors = new Map();
+    anchor.related_blocks.forEach(function (frozen) {
+      var blockId = frozen && frozen.block_id;
+      if (!normalizedNonblank(blockId)) return;
+      var descriptor = state.payloadChunkByBlockId.get(blockId);
+      if (descriptor && normalizedNonblank(descriptor.chunk_id)) {
+        descriptors.set(descriptor.chunk_id, descriptor);
+      }
+    });
+    descriptors.forEach(loadPayloadChunk);
   }
 
   async function semanticDigest(metadata, markdown) {
