@@ -742,11 +742,16 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
           <circle cx="12" cy="12" r="2.75"></circle>
         </svg>
       </button>
-      <div id="alc-view-panel" class="alc-view-panel" hidden>
-        <fieldset>
-          <legend id="alc-view-heading">Show</legend>
-          <div id="alc-view-options" class="alc-view-options"></div>
-        </fieldset>
+      <div id="alc-view-panel" class="alc-view-panel" hidden
+        role="dialog" aria-modal="false" aria-labelledby="alc-view-heading">
+        <header class="alc-tool-panel-header">
+          <h2 id="alc-view-heading">Show content</h2>
+        </header>
+        <div class="alc-tool-panel-body alc-view-body">
+          <fieldset aria-labelledby="alc-view-heading">
+            <div id="alc-view-options" class="alc-view-options"></div>
+          </fieldset>
+        </div>
       </div>
     </div>
     <div class="alc-speech-control">
@@ -755,27 +760,36 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
         aria-controls="alc-speech-panel" aria-expanded="false">
         <svg class="alc-tool-icon" viewBox="0 0 24 24" aria-hidden="true"
           focusable="false">
-          <path d="M4 10h4l4-3v10l-4-3H4Z"></path>
-          <path d="M15 9a4 4 0 0 1 0 6M17.5 6.5a7.5 7.5 0 0 1 0 11"></path>
+          <path d="M11 5 6 9H2v6h4l5 4V5Z"></path>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"></path>
         </svg>
       </button>
-      <div id="alc-speech-panel" class="alc-speech-panel" hidden>
-        <fieldset>
-          <legend id="alc-speech-content-label">Read content</legend>
-          <div id="alc-speech-role-options" class="alc-speech-role-options"></div>
-        </fieldset>
-        <label class="alc-speech-field">
-          <span id="alc-speech-source-voice-label">English voice</span>
-          <select id="alc-speech-source-voice"></select>
-        </label>
-        <label class="alc-speech-field">
-          <span id="alc-speech-target-voice-label">Chinese voice</span>
-          <select id="alc-speech-target-voice"></select>
-        </label>
-        <p id="alc-speech-status" class="alc-speech-status"
-          aria-live="polite"></p>
-        <div id="alc-speech-panel-player" class="alc-speech-player"
-          data-player-kind="panel"></div>
+      <div id="alc-speech-panel" class="alc-speech-panel" hidden
+        role="dialog" aria-modal="false" aria-labelledby="alc-speech-heading">
+        <header class="alc-tool-panel-header">
+          <h2 id="alc-speech-heading">Read content</h2>
+        </header>
+        <div class="alc-tool-panel-body alc-speech-body">
+          <fieldset>
+            <legend id="alc-speech-content-label">Include</legend>
+            <div id="alc-speech-role-options"
+              class="alc-speech-role-options"></div>
+          </fieldset>
+          <div class="alc-speech-voice-grid">
+            <label class="alc-speech-field">
+              <span id="alc-speech-source-voice-label">English voice</span>
+              <select id="alc-speech-source-voice"></select>
+            </label>
+            <label class="alc-speech-field">
+              <span id="alc-speech-target-voice-label">Chinese voice</span>
+              <select id="alc-speech-target-voice"></select>
+            </label>
+          </div>
+          <p id="alc-speech-status" class="alc-speech-status"
+            aria-live="polite"></p>
+          <div id="alc-speech-panel-player" class="alc-speech-player"
+            data-player-kind="panel"></div>
+        </div>
       </div>
     </div>
     <div class="alc-export-control">
@@ -949,13 +963,25 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
           </label>
           <label class="alc-settings-field alc-settings-range-field">
             <span class="alc-settings-range-header">
-              <span id="alc-settings-line-label">Line height</span>
+              <span id="alc-settings-line-label">Line spacing</span>
               <output id="alc-settings-line-value" for="alc-settings-line">1.65</output>
             </span>
             <input id="alc-settings-line" type="range" min="1.3" max="2"
               step="0.05" value="1.65">
             <span class="alc-settings-range-scale" aria-hidden="true">
               <span>1.30</span><span>2.00</span>
+            </span>
+          </label>
+          <label class="alc-settings-field alc-settings-range-field">
+            <span class="alc-settings-range-header">
+              <span id="alc-settings-block-spacing-label">Block spacing</span>
+              <output id="alc-settings-block-spacing-value"
+                for="alc-settings-block-spacing">100%</output>
+            </span>
+            <input id="alc-settings-block-spacing" type="range"
+              min="50" max="150" step="5" value="100">
+            <span class="alc-settings-range-scale" aria-hidden="true">
+              <span>50%</span><span>150%</span>
             </span>
           </label>
           <label class="alc-settings-field alc-settings-range-field">
@@ -999,7 +1025,12 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
     <div class="alc-dialog-form">
       <header class="alc-dialog-header">
         <h2 id="alc-editor-heading">Edit</h2>
-        <button id="alc-editor-close" type="button" aria-label="Close">×</button>
+        <button id="alc-editor-close" class="alc-settings-close"
+          type="button" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6 6l12 12M18 6L6 18"></path>
+          </svg>
+        </button>
       </header>
       <div class="alc-dialog-fields alc-dialog-primary-fields">
         <label><span id="alc-editor-title-label">Title</span>
@@ -1036,19 +1067,19 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
           </div>
           <section class="alc-appearance-editor" aria-labelledby="alc-editor-colors-label">
             <div class="alc-appearance-heading">
-              <span id="alc-editor-colors-label">Colors</span>
+              <span id="alc-editor-colors-label">Style for this role and priority</span>
               <button id="alc-editor-colors-reset" type="button">Use role default</button>
             </div>
             <div id="alc-editor-color-presets" class="alc-color-presets"></div>
             <div class="alc-color-fields">
-              <label><span id="alc-editor-foreground-label">Foreground</span>
+              <label><span id="alc-editor-foreground-label">Text color</span>
                 <span class="alc-color-control">
                   <input id="alc-editor-foreground-picker" type="color">
                   <input id="alc-editor-foreground" type="text" inputmode="text"
                     maxlength="7" pattern="#[0-9A-Fa-f]{{6}}" placeholder="#20262e">
                 </span>
               </label>
-              <label><span id="alc-editor-background-label">Background</span>
+              <label><span id="alc-editor-background-label">Background color</span>
                 <span class="alc-color-control">
                   <input id="alc-editor-background-picker" type="color">
                   <input id="alc-editor-background" type="text" inputmode="text"

@@ -292,14 +292,18 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-export"' in text
     assert 'id="alc-view"' in text
     assert 'id="alc-view-panel"' in text
+    assert 'aria-labelledby="alc-view-heading"' in text
     assert 'id="alc-view-options"' in text
     assert 'id="alc-speech"' in text
     assert 'id="alc-speech-panel"' in text
+    assert 'aria-labelledby="alc-speech-heading"' in text
+    assert 'id="alc-speech-heading"' in text
     assert 'id="alc-speech-role-options"' in text
     assert 'id="alc-speech-source-voice"' in text
     assert 'id="alc-speech-target-voice"' in text
     assert 'id="alc-speech-panel-player"' in text
     assert 'id="alc-speech-dock"' in text
+    assert text.count('class="alc-tool-panel-header') == 3
     assert 'id="alc-settings"' in text
     assert 'id="alc-settings-panel"' in text
     assert 'id="alc-settings-layout"' in text
@@ -307,6 +311,8 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-settings-chinese-font"' in text
     assert 'id="alc-settings-scale"' in text
     assert 'id="alc-settings-line"' in text
+    assert 'id="alc-settings-block-spacing"' in text
+    assert 'id="alc-settings-block-spacing-value"' in text
     assert 'id="alc-settings-width"' in text
     assert 'id="alc-unsaved-dialog"' in text
     assert 'id="alc-unsaved-discard"' in text
@@ -314,12 +320,30 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert text.count('class="alc-tool-icon"') == 6
     assert text.count('class="alc-tool-button alc-tool-icon-button"') == 6
     assert 'id="alc-connect" class="alc-tool-button alc-tool-icon-button"' in text
+    assert 'd="M11 5 6 9H2v6h4l5 4V5Z"' in text
+    assert 'd="M4 10h4l4-3v10l-4-3H4Z"' not in text
     assert 'aria-label="New save location" title="New save location"' in text
     assert 'id="alc-contents-resizer"' in text
     assert 'role="separator" aria-orientation="vertical"' in text
     assert 'id="alc-export-panel"' in text
+    assert 'aria-labelledby="alc-export-heading"' in text
+    assert 'id="alc-export-heading"' in text
+    assert 'id="alc-export-markdown-section"' in text
     assert 'id="alc-export-scope"' in text
+    assert 'id="alc-export-content"' in text
+    assert 'id="alc-export-markdown-mode"' in text
+    assert 'id="alc-export-markdown-file-label"' in text
+    assert 'id="alc-export-markdown-package-label"' in text
+    assert 'id="alc-export-markdown-package"' in text
+    assert 'id="alc-export-empty"' not in text
+    assert 'alc-export-action-primary' not in text
+    assert 'id="alc-export-markdown-label"' in text
+    assert 'id="alc-export-html-section"' in text
     assert 'id="alc-export-html"' in text
+    assert 'id="alc-export-html-label"' in text
+    assert 'id="alc-export-pdf-section"' in text
+    assert 'id="alc-export-pdf"' in text
+    assert 'id="alc-export-pdf-label"' in text
     assert '<section id="alc-editor-advanced"' in text
     assert (
         '<h3 id="alc-editor-advanced-label" class="alc-editor-advanced-heading">'
@@ -332,6 +356,10 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'pattern="#[0-9A-Fa-f]{6}"' in text
     assert 'id="alc-editor-background-picker"' in text
     assert 'id="alc-editor-colors-reset"' in text
+    assert 'id="alc-editor-close" class="alc-settings-close"' in text
+    assert 'id="alc-editor-colors-label">Style for this role and priority' in text
+    assert 'id="alc-editor-foreground-label">Text color' in text
+    assert 'id="alc-editor-background-label">Background color' in text
     assert 'id="alc-editor-delete"' in text
     assert 'class="alc-dialog-commit-actions"' in text
     assert 'class="alc-editor-delete"' in text

@@ -119,7 +119,8 @@ translated document title is available, it appears with the source title in the
 page header.
 
 The More settings panel controls translation layout, edit activation, English
-and Chinese font stacks, display scale, line height, and content width.
+and Chinese font stacks, display scale, line spacing, block spacing, and content
+width.
 Double-click editing is the default. These preferences affect the current
 reader rather than fragment source, and a Single HTML export captures their
 current values.

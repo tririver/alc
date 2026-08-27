@@ -38,6 +38,7 @@
     chineseFont: "system",
     scale: 100,
     lineHeight: 1.65,
+    blockSpacing: 100,
     width: 100
   };
   var customSelectRegistry = new WeakMap();
@@ -421,9 +422,9 @@
       title: "标题",
       role: "类型",
       priority: "优先级",
-      colors: traditional ? "同類型與優先級的顏色" : "同类型与优先级的颜色",
-      foreground: traditional ? "前景色" : "前景色",
-      background: traditional ? "背景色" : "背景色",
+      colors: traditional ? "同類型與優先級的樣式" : "同类型与优先级的样式",
+      foreground: traditional ? "字體顏色" : "字体颜色",
+      background: traditional ? "背景顏色" : "背景颜色",
       roleDefaultColors: traditional ? "恢復類型預設" : "恢复类型默认",
       resizeContents: traditional ? "調整目錄寬度" : "调整目录宽度",
       advanced: "预览与更多设置",
@@ -550,7 +551,8 @@
       chineseFont: "中文字体",
       systemDefault: "系统默认",
       displayScale: "显示比例",
-      readerLineHeight: "行距",
+      readerLineHeight: traditional ? "行間距" : "行间距",
+      readerBlockSpacing: traditional ? "段間距" : "段间距",
       contentWidth: "正文宽度",
       settingsNote: "设置仅影响当前预览，不修改源码。",
       restoreRecommended: "恢复推荐值"
@@ -568,9 +570,9 @@
       title: "Title",
       role: "Role",
       priority: "Priority",
-      colors: "Color for this role and priority",
-      foreground: "Foreground",
-      background: "Background",
+      colors: "Style for this role and priority",
+      foreground: "Text color",
+      background: "Background color",
       roleDefaultColors: "Use role default",
       resizeContents: "Resize contents",
       advanced: "Preview and more settings",
@@ -687,7 +689,8 @@
       chineseFont: "Chinese font",
       systemDefault: "System default",
       displayScale: "Display scale",
-      readerLineHeight: "Line height",
+      readerLineHeight: "Line spacing",
+      readerBlockSpacing: "Block spacing",
       contentWidth: "Content width",
       settingsNote: "Settings affect this preview only and do not modify source.",
       restoreRecommended: "Restore recommended values"
@@ -750,6 +753,12 @@
         1.3,
         2
       ),
+      blockSpacing: boundedReaderNumber(
+        data.alcReaderBlockSpacing,
+        READER_PREFERENCE_DEFAULTS.blockSpacing,
+        50,
+        150
+      ),
       width: boundedReaderNumber(
         data.alcReaderWidth, READER_PREFERENCE_DEFAULTS.width, 50, 150
       )
@@ -772,6 +781,26 @@
       "--alc-reader-line-height", String(next.lineHeight)
     );
     root.style.setProperty(
+      "--alc-reader-supplement-line-height",
+      (1.55 * next.lineHeight / 1.65).toFixed(3)
+    );
+    root.style.setProperty(
+      "--alc-reader-block-padding",
+      (0.4 * next.blockSpacing / 100).toFixed(3) + "rem"
+    );
+    root.style.setProperty(
+      "--alc-reader-source-block-padding",
+      (0.3 * next.blockSpacing / 100).toFixed(3) + "rem"
+    );
+    root.style.setProperty(
+      "--alc-reader-supplement-block-padding",
+      (0.45 * next.blockSpacing / 100).toFixed(3) + "rem"
+    );
+    root.style.setProperty(
+      "--alc-reader-block-gap",
+      Math.max(0, 0.8 * (next.blockSpacing - 100) / 100).toFixed(3) + "rem"
+    );
+    root.style.setProperty(
       "--alc-reader-width", String(96 * next.width / 100) + "rem"
     );
     body.classList.toggle("alc-stacked-layout", next.layout === "stacked");
@@ -781,6 +810,7 @@
     body.dataset.alcReaderChineseFont = next.chineseFont;
     body.dataset.alcReaderScale = String(next.scale);
     body.dataset.alcReaderLineHeight = String(next.lineHeight);
+    body.dataset.alcReaderBlockSpacing = String(next.blockSpacing);
     body.dataset.alcReaderWidth = String(next.width);
     syncReaderPreferenceControls();
   }
@@ -794,6 +824,7 @@
       "alc-settings-chinese-font": preferences.chineseFont,
       "alc-settings-scale": String(preferences.scale),
       "alc-settings-line": String(preferences.lineHeight),
+      "alc-settings-block-spacing": String(preferences.blockSpacing),
       "alc-settings-width": String(preferences.width)
     };
     Object.keys(values).forEach(function (identifier) {
@@ -805,9 +836,15 @@
     });
     var scale = document.getElementById("alc-settings-scale-value");
     var line = document.getElementById("alc-settings-line-value");
+    var blockSpacing = document.getElementById(
+      "alc-settings-block-spacing-value"
+    );
     var width = document.getElementById("alc-settings-width-value");
     if (scale) scale.textContent = Math.round(preferences.scale) + "%";
     if (line) line.textContent = Number(preferences.lineHeight).toFixed(2);
+    if (blockSpacing) {
+      blockSpacing.textContent = Math.round(preferences.blockSpacing) + "%";
+    }
     if (width) width.textContent = Math.round(preferences.width) + "%";
   }
 
@@ -833,6 +870,8 @@
       strings.displayScale;
     document.getElementById("alc-settings-line-label").textContent =
       strings.readerLineHeight;
+    document.getElementById("alc-settings-block-spacing-label").textContent =
+      strings.readerBlockSpacing;
     document.getElementById("alc-settings-width-label").textContent =
       strings.contentWidth;
     document.getElementById("alc-settings-note").textContent = strings.settingsNote;
@@ -855,7 +894,11 @@
     [layout, activation,
       document.getElementById("alc-settings-english-font"),
       document.getElementById("alc-settings-chinese-font")
-    ].forEach(installCustomSelect);
+    ].forEach(function (select) {
+      installCustomSelect(select);
+      var wrapper = customSelectRegistry.get(select);
+      if (wrapper) wrapper.dataset.compact = "true";
+    });
 
     state.readerPreferences = readerPreferenceSnapshot();
     applyReaderPreferences(state.readerPreferences);
@@ -864,8 +907,12 @@
     trigger.addEventListener("click", function () {
       panel.hidden = !panel.hidden;
       trigger.setAttribute("aria-expanded", String(!panel.hidden));
-      if (!panel.hidden) close.focus();
+      if (!panel.hidden) {
+        positionToolPanel(panel);
+        close.focus();
+      }
     });
+    window.addEventListener("resize", function () { positionToolPanel(panel); });
     close.addEventListener("click", function () {
       panel.hidden = true;
       trigger.setAttribute("aria-expanded", "false");
@@ -883,16 +930,20 @@
           chineseFont: document.getElementById("alc-settings-chinese-font").value,
           scale: state.readerPreferences.scale,
           lineHeight: state.readerPreferences.lineHeight,
+          blockSpacing: state.readerPreferences.blockSpacing,
           width: state.readerPreferences.width
         });
       });
     });
-    ["scale", "line", "width"].forEach(function (name) {
+    ["scale", "line", "block-spacing", "width"].forEach(function (name) {
       document.getElementById("alc-settings-" + name).addEventListener(
         "input", function (event) {
           var changes = {};
           if (name === "scale") changes.scale = Number(event.target.value);
           if (name === "line") changes.lineHeight = Number(event.target.value);
+          if (name === "block-spacing") {
+            changes.blockSpacing = Number(event.target.value);
+          }
           if (name === "width") changes.width = Number(event.target.value);
           applyReaderPreferences(Object.assign({}, state.readerPreferences, changes));
         }
@@ -983,7 +1034,8 @@
     var listbox = selectListbox(wrapper);
     if (!trigger || !listbox || trigger.disabled) return;
     closeOtherCustomSelects(wrapper);
-    if (listbox.parentElement !== document.body) document.body.appendChild(listbox);
+    var host = wrapper.closest("dialog[open]") || document.body;
+    if (listbox.parentElement !== host) host.appendChild(listbox);
     listbox.hidden = false;
     positionCustomSelect(wrapper);
     trigger.setAttribute("aria-expanded", "true");
@@ -1078,7 +1130,9 @@
     var trigger = wrapper.querySelector(".alc-select-trigger");
     var value = wrapper.querySelector(".alc-select-value");
     value.id = select.id + "-value";
-    var field = select.closest(".alc-settings-field, .alc-speech-field");
+    var field = select.closest(
+      ".alc-settings-field, .alc-speech-field, .alc-dialog-fields label"
+    );
     var label = field && field.querySelector(":scope > span");
     if (label) {
       if (!label.id) label.id = select.id + "-label";
@@ -2119,6 +2173,7 @@
       document.documentElement.lang;
     source.appendChild(renderSourceBlock(block));
     source.appendChild(renderCardActions("source", block.block_id, null));
+    setupTouchCardActions(source);
     lanes.appendChild(source);
 
     fragments.filter(function (item) {
@@ -2579,8 +2634,40 @@
       card.appendChild(renderCardActions(
         visual.role, fragmentTargetId(fragment), fragment
       ));
+      setupTouchCardActions(card);
     }
     return card;
+  }
+
+  function setupTouchCardActions(card) {
+    card.addEventListener("pointerdown", function (event) {
+      if (!event || event.pointerType === "mouse") return;
+      if (interactiveFragmentTarget(event.target)) return;
+      if (card.classList.contains("is-touch-actions-revealed")) {
+        delete card.dataset.alcSuppressTouchClick;
+        return;
+      }
+      Array.prototype.forEach.call(
+        document.querySelectorAll(".is-touch-actions-revealed"),
+        function (other) {
+          if (other !== card) {
+            other.classList.remove("is-touch-actions-revealed");
+            delete other.dataset.alcSuppressTouchClick;
+          }
+        }
+      );
+      card.classList.add("is-touch-actions-revealed");
+      card.dataset.alcSuppressTouchClick = "true";
+    });
+    card.addEventListener("click", function (event) {
+      if (card.dataset.alcSuppressTouchClick !== "true") return;
+      delete card.dataset.alcSuppressTouchClick;
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+    }, true);
   }
 
   function renderCardActions(role, blockId, fragment) {
@@ -2794,7 +2881,9 @@
     trigger.addEventListener("click", function () {
       panel.hidden = !panel.hidden;
       trigger.setAttribute("aria-expanded", String(!panel.hidden));
+      if (!panel.hidden) positionToolPanel(panel);
     });
+    window.addEventListener("resize", function () { positionToolPanel(panel); });
     document.addEventListener("click", function (event) {
       if (!panel.hidden && !control.contains(event.target)) {
         closeVisibilityPanel(false);
@@ -2945,16 +3034,15 @@
       next: '<path d="m6 5 10 7-10 7Z"></path><path d="M18 5v14"></path>',
       beginning: '<path d="M6 5v14"></path><path class="is-solid" d="m18 5-10 7 10 7Z"></path>',
       stop: '<rect class="is-solid" x="6" y="6" width="12" height="12" rx="1"></rect>',
-      loopNone: '<path d="m17 2 4 4-4 4"></path><path d="M3 11V9a3 3 0 0 1 3-3h14"></path>' +
-        '<path d="m7 22-4-4 4-4"></path><path d="M21 13v2a3 3 0 0 1-3 3H4"></path>' +
-        '<path d="m4 4 16 16"></path>',
+      loopNone: '<path d="M3 7h15"></path><path d="m14 3 4 4-4 4"></path>' +
+        '<path d="M3 17h15"></path><path d="m14 13 4 4-4 4"></path>',
       loopAll: '<path d="m17 2 4 4-4 4"></path><path d="M3 11V9a3 3 0 0 1 3-3h14"></path>' +
         '<path d="m7 22-4-4 4-4"></path><path d="M21 13v2a3 3 0 0 1-3 3H4"></path>',
       loopOne: '<path d="m17 2 4 4-4 4"></path><path d="M3 11V9a3 3 0 0 1 3-3h14"></path>' +
         '<path d="m7 22-4-4 4-4"></path><path d="M21 13v2a3 3 0 0 1-3 3H4"></path>' +
         '<path d="M11 10.5 13 9v6"></path>',
-      speaker: '<path d="M4 10h4l4-3v10l-4-3H4Z"></path>' +
-        '<path d="M15 9a4 4 0 0 1 0 6M17.5 6.5a7.5 7.5 0 0 1 0 11"></path>',
+      speaker: '<path d="M11 5 6 9H2v6h4l5 4V5Z"></path>' +
+        '<path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"></path>',
       edit: '<path d="m4 20 4.2-1 10.6-10.6-3.2-3.2L5 15.8 4 20Z"></path>' +
         '<path d="m13.8 7 3.2 3.2"></path>',
       close: '<path d="M6 6l12 12M18 6 6 18"></path>'
@@ -3333,8 +3421,10 @@
     var trigger = document.getElementById("alc-speech");
     var panel = document.getElementById("alc-speech-panel");
     labelToolButton(trigger, strings.listen);
-    document.getElementById("alc-speech-content-label").textContent =
+    document.getElementById("alc-speech-heading").textContent =
       strings.readContent;
+    document.getElementById("alc-speech-content-label").textContent =
+      strings.markdownContent;
     document.getElementById("alc-speech-source-voice-label").textContent =
       strings.sourceVoice;
     document.getElementById("alc-speech-target-voice-label").textContent =
@@ -3351,8 +3441,12 @@
     trigger.addEventListener("click", function () {
       panel.hidden = !panel.hidden;
       trigger.setAttribute("aria-expanded", String(!panel.hidden));
-      if (!panel.hidden) refreshSpeechVoices();
+      if (!panel.hidden) {
+        positionToolPanel(panel);
+        refreshSpeechVoices();
+      }
     });
+    window.addEventListener("resize", function () { positionToolPanel(panel); });
     ["source", "target"].forEach(function (kind) {
       var select = document.getElementById("alc-speech-" + kind + "-voice");
       select.addEventListener("change", function () {
@@ -4640,7 +4734,7 @@
         }
       }
       state.hashCalibration = null;
-      scrollToReaderTop();
+      scrollToHashTarget(targetId);
       return true;
     }
     var chunk = chunkForTargetId(targetId);
@@ -6886,10 +6980,12 @@
     var close = document.getElementById("alc-editor-close");
     close.setAttribute("aria-label", strings.close);
     close.title = strings.close;
+    var role = document.getElementById("alc-editor-role");
     Array.prototype.forEach.call(
-      document.getElementById("alc-editor-role").options,
+      role.options,
       function (option) { option.textContent = strings[option.value] || option.value; }
     );
+    installCustomSelect(role);
     close.onclick = closeEditorDialog;
     document.getElementById("alc-editor-cancel").onclick = closeEditorDialog;
     dialog.addEventListener("cancel", function (event) {
@@ -6899,7 +6995,7 @@
     document.getElementById("alc-editor-title").addEventListener(
       "input", syncDraftAndSaveState
     );
-    document.getElementById("alc-editor-role").addEventListener("change", function () {
+    role.addEventListener("change", function () {
       syncDraftAndSaveState();
       rebindDraftAppearanceToGroup();
       markEditorPreviewDirty();
@@ -7431,7 +7527,9 @@
     document.getElementById("alc-editor-heading").textContent =
       heading || labels().editor;
     document.getElementById("alc-editor-title").value = draft.title || "";
-    document.getElementById("alc-editor-role").value = draft.role || "note";
+    var role = document.getElementById("alc-editor-role");
+    role.value = draft.role || "note";
+    syncCustomSelect(role);
     document.getElementById("alc-editor-priority").value = String(draft.priority || 110);
     document.getElementById("alc-editor-markdown").value = draft.markdown_body || "";
     syncAppearanceControlsFromDraft();
@@ -7557,7 +7655,9 @@
       revision.role, revision.priority
     );
     document.getElementById("alc-editor-title").value = revision.title || "";
-    document.getElementById("alc-editor-role").value = revision.role;
+    var role = document.getElementById("alc-editor-role");
+    role.value = revision.role;
+    syncCustomSelect(role);
     document.getElementById("alc-editor-priority").value = String(revision.priority);
     document.getElementById("alc-editor-markdown").value = revision.markdown_body;
     syncAppearanceControlsFromDraft();
