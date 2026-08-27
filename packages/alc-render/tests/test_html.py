@@ -309,6 +309,9 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-settings-scale"' in text
     assert 'id="alc-settings-line"' in text
     assert 'id="alc-settings-width"' in text
+    assert 'id="alc-unsaved-dialog"' in text
+    assert 'id="alc-unsaved-discard"' in text
+    assert 'id="alc-unsaved-save"' in text
     assert text.count('class="alc-tool-icon"') == 6
     assert text.count('class="alc-tool-button alc-tool-icon-button"') == 6
     assert 'id="alc-connect" class="alc-tool-button alc-tool-icon-button"' in text
@@ -668,6 +671,23 @@ def test_browser_exported_html_remains_a_valid_latest_reader(
     render_publication_html(publication_path, initial_path)
     initial_html = initial_path.read_text(encoding="utf-8")
     payload = _payload(initial_html)
+    export_template = initial_html.replace(
+        '<html lang="zh-CN">',
+        '<html lang="zh-CN" style="--alc-font-scale:1.15;'
+        '--alc-reader-line-height:1.8;--alc-reader-width:81.6rem">',
+        1,
+    ).replace(
+        '<body data-publication-digest=',
+        '<body class="alc-stacked-layout" data-alc-reader-layout="stacked" '
+        'data-alc-reader-edit-activation="double" '
+        'data-alc-reader-english-font="georgia" '
+        'data-alc-reader-chinese-font="song" '
+        'data-alc-reader-scale="115" data-alc-reader-line-height="1.8" '
+        'data-alc-reader-width="85" data-publication-digest=',
+        1,
+    )
+    export_template_path = tmp_path / "export-template.html"
+    export_template_path.write_text(export_template, encoding="utf-8")
     javascript = (
         Path(__file__).parents[1]
         / "src"
@@ -722,7 +742,7 @@ var body = "浏览器中的最新版 [@ref-1]。";
     payload_path = tmp_path / "payload.json"
     payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     completed = subprocess.run(
-        [node, "-", str(payload_path), str(initial_path)],
+        [node, "-", str(payload_path), str(export_template_path)],
         input=instrumented,
         check=True,
         capture_output=True,
@@ -742,7 +762,100 @@ var body = "浏览器中的最新版 [@ref-1]。";
     )
     assert 'id="alc-export"' in completed.stdout
     assert "showDirectoryPicker" in completed.stdout
+    assert 'class="alc-stacked-layout"' in completed.stdout
+    assert 'data-alc-reader-layout="stacked"' in completed.stdout
+    assert 'data-alc-reader-english-font="georgia"' in completed.stdout
+    assert 'data-alc-reader-chinese-font="song"' in completed.stdout
+    assert 'data-alc-reader-scale="115"' in completed.stdout
+    assert 'data-alc-reader-line-height="1.8"' in completed.stdout
+    assert 'data-alc-reader-width="85"' in completed.stdout
+    assert "--alc-font-scale:1.15" in completed.stdout
+    assert "--alc-reader-line-height:1.8" in completed.stdout
+    assert "--alc-reader-width:81.6rem" in completed.stdout
     validate_standalone_html(publication, exported_path)
+
+
+def test_repeated_browser_export_recaptures_current_reader_snapshot() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = (
+        Path(__file__).parents[1]
+        / "src"
+        / "alc_render"
+        / "web_assets"
+        / "reader.js"
+    ).read_text(encoding="utf-8")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcReaderTest = {
+    state: state,
+    buildStandaloneExportHtml: buildStandaloneExportHtml
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var snapshot = "first";
+function emptySurface() {
+  return {replaceChildren: function () {}};
+}
+function clonedRoot() {
+  var body = {
+    dataset: {},
+    classList: {remove: function () {}}
+  };
+  var surfaces = {
+    body: body,
+    "#ac-document": emptySurface(),
+    "#alc-book-header": emptySurface(),
+    "#alc-contents-list": emptySurface()
+  };
+  return {
+    querySelector: function (selector) { return surfaces[selector] || null; },
+    querySelectorAll: function () { return []; },
+    get outerHTML() {
+      return '<html data-reader-snapshot="' + snapshot + '"><body>' +
+        '<script id="alc-render-payload" type="application/json">{}</script>' +
+        '</body></html>';
+    }
+  };
+}
+globalThis.document = {
+  querySelector: function () { return null; },
+  documentElement: {cloneNode: function () { return clonedRoot(); }}
+};
+var helpers = globalThis.__alcReaderTest;
+helpers.state.payload = {
+  resources: [],
+  publication: {
+    source_document: {blocks: []},
+    labels: {},
+    reader_profile: {}
+  }
+};
+helpers.state.revisions = new Map();
+helpers.state.selected = new Map();
+helpers.state.activeFragmentIds = new Set();
+var first = helpers.buildStandaloneExportHtml();
+snapshot = "second";
+var second = helpers.buildStandaloneExportHtml();
+assert(first.includes('data-reader-snapshot="first"'), "first snapshot was not captured");
+assert(second.includes('data-reader-snapshot="second"'), "second export reused the first snapshot");
+assert(!second.includes('data-reader-snapshot="first"'), "stale snapshot survived the second export");
+'''
+    )
+    completed = subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_renderer_groups_revision_by_front_matter_not_parent_directory(

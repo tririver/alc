@@ -999,12 +999,29 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
         </div>
       </section>
       <footer class="alc-dialog-footer">
-        <button id="alc-editor-cancel" type="button">Cancel</button>
+        <button id="alc-editor-delete" class="alc-editor-delete" type="button"
+          aria-label="Delete this element" hidden>Delete</button>
         <span class="alc-dialog-commit-actions">
-          <button id="alc-editor-delete" class="alc-editor-delete" type="button"
-            aria-label="Delete this element" hidden>Delete</button>
+          <button id="alc-editor-cancel" type="button">Cancel</button>
           <button id="alc-editor-save" type="button">Save</button>
         </span>
+      </footer>
+    </div>
+  </dialog>
+  <dialog id="alc-unsaved-dialog" class="alc-unsaved-dialog"
+    aria-labelledby="alc-unsaved-heading">
+    <div class="alc-unsaved-surface">
+      <header>
+        <h2 id="alc-unsaved-heading">Save current changes?</h2>
+        <button id="alc-unsaved-close" type="button" aria-label="Continue editing">×</button>
+      </header>
+      <p id="alc-unsaved-description">
+        Save the changes before leaving this editor, or leave without saving.
+      </p>
+      <p id="alc-unsaved-error" class="alc-unsaved-error" role="alert" hidden></p>
+      <footer>
+        <button id="alc-unsaved-discard" type="button">Don't save</button>
+        <button id="alc-unsaved-save" type="button">Save changes</button>
       </footer>
     </div>
   </dialog>
