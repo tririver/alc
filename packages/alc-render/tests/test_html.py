@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 import re
 import shutil
@@ -22,14 +23,21 @@ from ac_document import (
 )
 
 from alc_render import (
+    encode_glossary_revision,
     encode_fragment_revision,
     FragmentAnchor,
     FragmentRevision,
+    GlossaryRevision,
     Layer,
     Publication,
     anchor_block_from_rich_block,
     fragment_revision_filename,
     fragment_revision_ref,
+    glossary_base_semantic_digest,
+    glossary_revision_filename,
+    glossary_revision_storage_path,
+    glossary_revision_to_document,
+    write_glossary_revision,
     publication_edition_digest,
     read_publication_workspace_state,
     source_identity_from_rich_document,
@@ -39,6 +47,7 @@ from alc_render.html import (
     _extract_json_script,
     _extract_reader_payload,
     _reader_icon_link,
+    _validate_fragment_glossary_mentions,
     render_publication_html,
     validate_standalone_html,
 )
@@ -198,6 +207,7 @@ def _workspace(
                 "term": "Reader",
                 "translated_term": "读者",
                 "definition": "阅读文本的人。",
+                "anchor_ids": ["block-paragraph"],
             },
         ),
         bibliography=(
@@ -244,6 +254,694 @@ def _boot_payload(html: str) -> dict[str, object]:
     )
     assert match is not None
     return json.loads(match.group(1).replace(r"<\/script", "</script"))
+
+
+def test_glossary_history_is_loaded_without_changing_publication_identity(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, _selected = _workspace(tmp_path)
+    base = dict(publication.glossary[0])
+    revision = GlossaryRevision(
+        entry_id="term-reader",
+        revision=2,
+        parent_semantic_digest=glossary_base_semantic_digest(base),
+        entry={**base, "translated_term": "阅读器", "definition": "修订解释。"},
+        provenance={"producer": "alc-render-browser", "edited_at": "2026-08-28T00:00:00Z"},
+    )
+    revision_path = write_glossary_revision(tmp_path, revision)
+    assert revision_path.relative_to(tmp_path).as_posix() == (
+        glossary_revision_storage_path(revision)
+    )
+
+    state = read_publication_workspace_state(publication_path)
+    assert state.publication_digest == publication.publication_digest
+    assert state.selected_glossary_revision_digests == (revision.semantic_digest,)
+    assert state.edition_digest == publication_edition_digest(
+        publication.publication_digest,
+        state.selected_revision_digests,
+    )
+
+    output = tmp_path / "reader.html"
+    result = render_publication_html(publication_path, output)
+    payload = _payload(output.read_text(encoding="utf-8"))
+    assert result.selected_glossary_revision_digests == (revision.semantic_digest,)
+    assert payload["selected_glossary_revision_digests"] == [revision.semantic_digest]
+    assert payload["glossary_base_digests"] == {
+        "term-reader": glossary_base_semantic_digest(base)
+    }
+    assert payload["glossary_revisions"][0]["entry"]["translated_term"] == "阅读器"
+    assert payload["publication"]["publication_digest"] == publication.publication_digest
+
+
+def _glossary_propagation_revision(
+    tmp_path: Path,
+    publication: Publication,
+    first: FragmentRevision,
+    *,
+    parent: str | None = None,
+    batch_id: str = "glossary-test-batch",
+) -> tuple[GlossaryRevision, FragmentRevision, Path]:
+    body = "阅读器使用修订后的术语 [@ref-1]。"
+    fragment = FragmentRevision(
+        source=first.source,
+        fragment_id=first.fragment_id,
+        revision=2,
+        parent_semantic_digest=parent or first.semantic_digest,
+        anchor=first.anchor,
+        priority=first.priority,
+        role=first.role,
+        language=first.language,
+        title=first.title,
+        citation_ids=first.citation_ids,
+        appearance=first.appearance,
+        deleted=first.deleted,
+        provenance={
+            **dict(first.provenance),
+            "last_editor": "alc-render-browser",
+            "reason": "glossary-propagation",
+            "propagation_batch_id": batch_id,
+            "glossary_entry_id": "term-reader",
+            "glossary_mentions_schema": "alc.render.glossary_mentions.v1",
+            "glossary_mentions": [
+                {
+                    "entry_id": "term-reader",
+                    "markdown_start": 0,
+                    "markdown_end": 3,
+                    "surface": "阅读器",
+                }
+            ],
+        },
+        markdown_body=body,
+    )
+    relative = (
+        f"glossary-batches/{batch_id}/fragments/"
+        f"{fragment_revision_filename(fragment)}"
+    )
+    path = tmp_path.joinpath(*relative.split("/"))
+    path.parent.mkdir(parents=True)
+    path.write_text(encode_fragment_revision(fragment), encoding="utf-8")
+    base = dict(publication.glossary[0])
+    glossary = GlossaryRevision(
+        entry_id="term-reader",
+        revision=2,
+        parent_semantic_digest=glossary_base_semantic_digest(base),
+        entry={**base, "translated_term": "阅读器"},
+        provenance={
+            "producer": "alc-render-browser",
+            "propagation": {
+                "schema_version": "alc.render.glossary_propagation.v1",
+                "batch_id": batch_id,
+                "fragments": [
+                    {
+                        "path": relative,
+                        "fragment_id": fragment.fragment_id,
+                        "revision": fragment.revision,
+                        "parent_semantic_digest": fragment.parent_semantic_digest,
+                        "semantic_digest": fragment.semantic_digest,
+                    }
+                ],
+            },
+        },
+    )
+    write_glossary_revision(tmp_path, glossary)
+    return glossary, fragment, path
+
+
+def _peer_glossary_definition_batch(
+    tmp_path: Path,
+    publication: Publication,
+    *,
+    batch_id: str = "glossary-peer-definition",
+) -> tuple[Publication, GlossaryRevision, GlossaryRevision, Path]:
+    source_entry = dict(publication.glossary[0])
+    peer_entry = {
+        "entry_id": "term-peer",
+        "term": "Peer",
+        "translated_term": "相关术语",
+        "definition": "读者用于解释；`读者`；$读者$。",
+        "anchor_ids": ["block-paragraph"],
+    }
+    publication = replace(
+        publication,
+        glossary=(source_entry, peer_entry),
+    )
+    write_publication(tmp_path / "publication.json", publication)
+    dependent = GlossaryRevision(
+        entry_id="term-peer",
+        revision=2,
+        parent_semantic_digest=glossary_base_semantic_digest(peer_entry),
+        entry={
+            **peer_entry,
+            "definition": "阅读器用于解释；`读者`；$读者$。",
+        },
+        provenance={
+            "producer": "alc-render-browser",
+            "reason": "glossary-propagation",
+            "propagation_batch_id": batch_id,
+            "glossary_entry_id": "term-reader",
+        },
+    )
+    relative = (
+        f"glossary-batches/{batch_id}/glossary/"
+        f"{glossary_revision_filename(dependent)}"
+    )
+    dependent_path = tmp_path.joinpath(*relative.split("/"))
+    dependent_path.parent.mkdir(parents=True)
+    dependent_path.write_bytes(encode_glossary_revision(dependent))
+    commit = GlossaryRevision(
+        entry_id="term-reader",
+        revision=2,
+        parent_semantic_digest=glossary_base_semantic_digest(source_entry),
+        entry={**source_entry, "translated_term": "阅读器"},
+        provenance={
+            "producer": "alc-render-browser",
+            "propagation": {
+                "schema_version": "alc.render.glossary_propagation.v1",
+                "batch_id": batch_id,
+                "fragments": [],
+                "glossary_revisions": [
+                    {
+                        "path": relative,
+                        "entry_id": dependent.entry_id,
+                        "revision": dependent.revision,
+                        "parent_semantic_digest": (
+                            dependent.parent_semantic_digest
+                        ),
+                        "semantic_digest": dependent.semantic_digest,
+                    }
+                ],
+            },
+        },
+    )
+    write_glossary_revision(tmp_path, commit)
+    return publication, commit, dependent, dependent_path
+
+
+def test_glossary_propagation_batch_selects_glossary_and_fragment_together(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, first = _workspace(tmp_path)
+    glossary, fragment, _path = _glossary_propagation_revision(
+        tmp_path, publication, first
+    )
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == (glossary.semantic_digest,)
+    assert state.selected_revision_digests == (fragment.semantic_digest,)
+    assert state.selected_revisions[0].markdown_body.startswith("阅读器")
+    assert not state.diagnostics
+
+    output = tmp_path / "reader-propagated.html"
+    result = render_publication_html(publication_path, output)
+    payload = _payload(output.read_text(encoding="utf-8"))
+    assert result.selected_revision_digests == (fragment.semantic_digest,)
+    assert result.selected_glossary_revision_digests == (glossary.semantic_digest,)
+    assert payload["selected_revision_digests"] == [fragment.semantic_digest]
+    assert payload["selected_glossary_revision_digests"] == [
+        glossary.semantic_digest
+    ]
+    validate_standalone_html(publication, output)
+
+
+def test_glossary_propagation_versions_peer_definitions_atomically(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, _first = _workspace(tmp_path)
+    publication, commit, dependent, _path = _peer_glossary_definition_batch(
+        tmp_path, publication
+    )
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == (
+        commit.semantic_digest,
+        dependent.semantic_digest,
+    )
+    selected_entries = {
+        item.entry_id: item.entry for item in state.glossary_revisions
+    }
+    assert selected_entries["term-peer"]["definition"].startswith("阅读器")
+
+    output = tmp_path / "reader-peer-definition.html"
+    result = render_publication_html(publication_path, output)
+    payload = _payload(output.read_text(encoding="utf-8"))
+    assert result.selected_glossary_revision_digests == (
+        commit.semantic_digest,
+        dependent.semantic_digest,
+    )
+    revisions = {
+        item["entry_id"]: item for item in payload["glossary_revisions"]
+    }
+    assert revisions["term-peer"]["entry"]["definition"].startswith(
+        "阅读器"
+    )
+    validate_standalone_html(publication, output)
+
+
+def test_glossary_propagation_rejects_a_missing_peer_definition_member(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, _first = _workspace(tmp_path)
+    _publication, _commit, _dependent, path = _peer_glossary_definition_batch(
+        tmp_path, publication
+    )
+    path.unlink()
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == ()
+    assert any(
+        item.code == "incomplete_glossary_propagation"
+        for item in state.diagnostics
+    )
+
+
+def test_glossary_propagation_rejects_a_peer_definition_fork(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, _first = _workspace(tmp_path)
+    publication, _commit, dependent, _path = _peer_glossary_definition_batch(
+        tmp_path, publication
+    )
+    peer_entry = dict(publication.glossary[1])
+    manual = GlossaryRevision(
+        entry_id="term-peer",
+        revision=2,
+        parent_semantic_digest=dependent.parent_semantic_digest,
+        entry={**peer_entry, "definition": "人工修订解释。"},
+        provenance={"producer": "alc-render-browser"},
+    )
+    write_glossary_revision(tmp_path, manual)
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == (
+        manual.semantic_digest,
+    )
+    assert any(
+        item.code == "stale_glossary_propagation_parent"
+        for item in state.diagnostics
+    )
+
+
+def test_manual_peer_edit_can_descend_from_propagated_definition(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, _first = _workspace(tmp_path)
+    _publication, commit, dependent, _path = _peer_glossary_definition_batch(
+        tmp_path, publication
+    )
+    manual = GlossaryRevision(
+        entry_id=dependent.entry_id,
+        revision=3,
+        parent_semantic_digest=dependent.semantic_digest,
+        entry={**dict(dependent.entry), "definition": "后续人工解释。"},
+        provenance={"producer": "alc-render-browser"},
+    )
+    write_glossary_revision(tmp_path, manual)
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == (
+        commit.semantic_digest,
+        manual.semantic_digest,
+    )
+    assert dependent.semantic_digest in {
+        item.semantic_digest for item in state.glossary_revisions
+    }
+
+
+@pytest.mark.parametrize("role", ["translation", "companion", "guide"])
+def test_glossary_propagation_accepts_authored_reading_aid_roles(
+    tmp_path: Path,
+    role: str,
+) -> None:
+    _publication_path, publication, first = _workspace(tmp_path)
+    fragment = FragmentRevision(
+        source=first.source,
+        fragment_id=f"{role}-term-reader",
+        revision=2,
+        parent_semantic_digest=first.semantic_digest,
+        anchor=first.anchor,
+        priority={"translation": 10, "companion": 20, "guide": 101}[role],
+        role=role,
+        language=first.language,
+        title=None,
+        citation_ids=(),
+        appearance=None,
+        deleted=False,
+        provenance={
+            "producer": "alc-render-browser",
+            "glossary_mentions_schema": "alc.render.glossary_mentions.v1",
+            "glossary_mentions": [
+                {
+                    "entry_id": "term-reader",
+                    "markdown_start": 0,
+                    "markdown_end": 2,
+                    "surface": "读者",
+                }
+            ],
+        },
+        markdown_body="读者辅助说明。",
+    )
+
+    _validate_fragment_glossary_mentions(publication, fragment)
+
+    if role == "translation":
+        entry = dict(publication.glossary[0])
+        unanchored = replace(
+            publication,
+            glossary=({**entry, "anchor_ids": ["another-block"]},),
+        )
+        _validate_fragment_glossary_mentions(unanchored, fragment)
+
+
+def test_glossary_propagation_rejects_note_role(tmp_path: Path) -> None:
+    _publication_path, publication, first = _workspace(tmp_path)
+    note = FragmentRevision(
+        source=first.source,
+        fragment_id="note-term-reader",
+        revision=2,
+        parent_semantic_digest=first.semantic_digest,
+        anchor=first.anchor,
+        priority=110,
+        role="note",
+        language=first.language,
+        title=None,
+        citation_ids=(),
+        appearance=None,
+        deleted=False,
+        provenance={
+            "producer": "alc-render-browser",
+            "glossary_mentions_schema": "alc.render.glossary_mentions.v1",
+            "glossary_mentions": [],
+        },
+        markdown_body="用户笔记。",
+    )
+
+    with pytest.raises(HTMLRenderError, match="role is not editable"):
+        _validate_fragment_glossary_mentions(publication, note)
+
+
+def test_glossary_propagation_batch_is_ignored_when_a_member_is_missing(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, first = _workspace(tmp_path)
+    _glossary, _fragment, path = _glossary_propagation_revision(
+        tmp_path, publication, first
+    )
+    path.unlink()
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == ()
+    assert state.selected_revision_digests == (first.semantic_digest,)
+    assert any(
+        item.code == "incomplete_glossary_propagation"
+        for item in state.diagnostics
+    )
+
+
+def test_uncommitted_staged_glossary_fragments_are_invisible(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, first = _workspace(tmp_path)
+    glossary, _fragment, staged_path = _glossary_propagation_revision(
+        tmp_path, publication, first
+    )
+    (tmp_path / "glossary" / glossary_revision_filename(glossary)).unlink()
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert staged_path.exists()
+    assert state.selected_glossary_revision_digests == ()
+    assert state.selected_revision_digests == (first.semantic_digest,)
+    assert not state.diagnostics
+
+
+def test_glossary_propagation_follows_a_manually_edited_fragment_successor(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, first = _workspace(tmp_path)
+    glossary_v2, fragment_v2, _path = _glossary_propagation_revision(
+        tmp_path, publication, first
+    )
+    manual_body = "补充：阅读器仍在使用 [@ref-1]。"
+    manual_v3 = FragmentRevision(
+        source=first.source,
+        fragment_id=first.fragment_id,
+        revision=3,
+        parent_semantic_digest=fragment_v2.semantic_digest,
+        anchor=first.anchor,
+        priority=first.priority,
+        role=first.role,
+        language=first.language,
+        title=first.title,
+        citation_ids=first.citation_ids,
+        appearance=first.appearance,
+        deleted=first.deleted,
+        provenance={
+            **dict(first.provenance),
+            "last_editor": "alc-render-browser",
+            "glossary_mentions_schema": "alc.render.glossary_mentions.v1",
+            "glossary_mentions": [
+                {
+                    "entry_id": "term-reader",
+                    "markdown_start": 3,
+                    "markdown_end": 6,
+                    "surface": "阅读器",
+                }
+            ],
+        },
+        markdown_body=manual_body,
+    )
+    write_fragment_revision(tmp_path, manual_v3)
+
+    batch_id = "glossary-test-batch-2"
+    final_body = "补充：阅读界面仍在使用 [@ref-1]。"
+    fragment_v4 = FragmentRevision(
+        source=first.source,
+        fragment_id=first.fragment_id,
+        revision=4,
+        parent_semantic_digest=manual_v3.semantic_digest,
+        anchor=first.anchor,
+        priority=first.priority,
+        role=first.role,
+        language=first.language,
+        title=first.title,
+        citation_ids=first.citation_ids,
+        appearance=first.appearance,
+        deleted=first.deleted,
+        provenance={
+            **dict(manual_v3.provenance),
+            "reason": "glossary-propagation",
+            "propagation_batch_id": batch_id,
+            "glossary_entry_id": "term-reader",
+            "glossary_mentions": [
+                {
+                    "entry_id": "term-reader",
+                    "markdown_start": 3,
+                    "markdown_end": 7,
+                    "surface": "阅读界面",
+                }
+            ],
+        },
+        markdown_body=final_body,
+    )
+    relative = (
+        f"glossary-batches/{batch_id}/fragments/"
+        f"{fragment_revision_filename(fragment_v4)}"
+    )
+    path = tmp_path.joinpath(*relative.split("/"))
+    path.parent.mkdir(parents=True)
+    path.write_text(encode_fragment_revision(fragment_v4), encoding="utf-8")
+    entry_v2 = dict(glossary_v2.entry)
+    glossary_v3 = GlossaryRevision(
+        entry_id="term-reader",
+        revision=3,
+        parent_semantic_digest=glossary_v2.semantic_digest,
+        entry={**entry_v2, "translated_term": "阅读界面"},
+        provenance={
+            "producer": "alc-render-browser",
+            "propagation": {
+                "schema_version": "alc.render.glossary_propagation.v1",
+                "batch_id": batch_id,
+                "fragments": [
+                    {
+                        "path": relative,
+                        "fragment_id": fragment_v4.fragment_id,
+                        "revision": fragment_v4.revision,
+                        "parent_semantic_digest": fragment_v4.parent_semantic_digest,
+                        "semantic_digest": fragment_v4.semantic_digest,
+                    }
+                ],
+            },
+        },
+    )
+    write_glossary_revision(tmp_path, glossary_v3)
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == (glossary_v3.semantic_digest,)
+    assert state.selected_revision_digests == (fragment_v4.semantic_digest,)
+    assert state.selected_revisions[0].markdown_body == final_body
+    assert not state.diagnostics
+
+
+def test_glossary_propagation_batch_is_ignored_on_a_stale_fragment_parent(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, first = _workspace(tmp_path)
+    _glossary_propagation_revision(
+        tmp_path, publication, first, parent="f" * 64
+    )
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == ()
+    assert state.selected_revision_digests == (first.semantic_digest,)
+    assert any(
+        item.code == "stale_glossary_propagation_parent"
+        for item in state.diagnostics
+    )
+
+
+def test_glossary_propagation_readmits_an_equivalent_retry_after_rejection(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, first = _workspace(tmp_path)
+    valid, valid_fragment, _path = _glossary_propagation_revision(
+        tmp_path,
+        publication,
+        first,
+        batch_id="glossary-valid-retry",
+    )
+    stale, _stale_fragment, _stale_path = _glossary_propagation_revision(
+        tmp_path,
+        publication,
+        first,
+        parent="f" * 64,
+        batch_id="glossary-stale-retry",
+    )
+    successor = GlossaryRevision(
+        entry_id=stale.entry_id,
+        revision=3,
+        parent_semantic_digest=stale.semantic_digest,
+        entry={**dict(stale.entry), "definition": "后续解释。"},
+        provenance={"producer": "alc-render-browser"},
+    )
+    write_glossary_revision(tmp_path, successor)
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == (valid.semantic_digest,)
+    assert state.selected_revision_digests == (valid_fragment.semantic_digest,)
+    assert any(
+        item.code == "stale_glossary_propagation_parent"
+        for item in state.diagnostics
+    )
+
+
+def test_glossary_propagation_rejects_an_existing_fragment_fork(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, first = _workspace(tmp_path)
+    for body in ("人工分支甲 [@ref-1]。", "人工分支乙 [@ref-1]。"):
+        write_fragment_revision(
+            tmp_path,
+            _revision(
+                publication.source_document,
+                body=body,
+                revision=2,
+                parent=first.semantic_digest,
+            ),
+        )
+    _glossary_propagation_revision(
+        tmp_path,
+        publication,
+        first,
+        batch_id="glossary-forked-fragment",
+    )
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == ()
+    assert state.selected_revision_digests == (first.semantic_digest,)
+    assert any(
+        item.code == "stale_glossary_propagation_parent"
+        for item in state.diagnostics
+    )
+
+
+def test_glossary_history_symlink_outside_project_is_ignored(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, _first = _workspace(tmp_path)
+    entry = dict(publication.glossary[0])
+    revision = GlossaryRevision(
+        entry_id="term-reader",
+        revision=2,
+        parent_semantic_digest=glossary_base_semantic_digest(entry),
+        entry={**entry, "translated_term": "外部术语"},
+        provenance={"producer": "alc-render-browser"},
+    )
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-glossary"
+    outside.mkdir()
+    outside_revision = write_glossary_revision(outside, revision)
+    glossary_root = tmp_path / "glossary"
+    glossary_root.mkdir()
+    (glossary_root / outside_revision.name).symlink_to(outside_revision)
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == ()
+    assert any(
+        item.code == "glossary_path_escapes_project"
+        for item in state.diagnostics
+    )
+
+
+def test_rendered_html_warnings_include_glossary_diagnostics(
+    tmp_path: Path,
+) -> None:
+    publication_path, _publication, _first = _workspace(tmp_path)
+    glossary_root = tmp_path / "glossary"
+    glossary_root.mkdir()
+    malformed = glossary_root / f"revision-000002-{'0' * 64}.md"
+    malformed.write_text("not a glossary revision", encoding="utf-8")
+    result = render_publication_html(publication_path, tmp_path / "reader.html")
+
+    assert any("malformed_glossary_revision" in item for item in result.warnings)
+
+
+def test_legacy_glossary_json_history_remains_loadable(tmp_path: Path) -> None:
+    publication_path, publication, _selected = _workspace(tmp_path)
+    base = dict(publication.glossary[0])
+    revision = GlossaryRevision(
+        entry_id="term-reader",
+        revision=2,
+        parent_semantic_digest=glossary_base_semantic_digest(base),
+        entry={**base, "translated_term": "阅读器"},
+        provenance={"producer": "alc-render-browser"},
+    )
+    filename = glossary_revision_filename(revision).removesuffix(".md") + ".json"
+    target = tmp_path / "glossary" / filename
+    target.parent.mkdir()
+    target.write_text(
+        json.dumps(
+            glossary_revision_to_document(revision),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    state = read_publication_workspace_state(publication_path)
+
+    assert state.selected_glossary_revision_digests == (revision.semantic_digest,)
 
 
 def test_reader_icon_link_uses_embedded_resource() -> None:
@@ -317,6 +1015,10 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-unsaved-dialog"' in text
     assert 'id="alc-unsaved-discard"' in text
     assert 'id="alc-unsaved-save"' in text
+    assert 'id="alc-storage-status" class="alc-storage-status" role="status"' in text
+    assert 'id="alc-editor-error" class="alc-editor-error" role="alert"' in text
+    assert "You changed the current content. Save it?" in text
+    assert "Save the changes before leaving this editor" not in text
     assert text.count('class="alc-tool-icon"') == 6
     assert text.count('class="alc-tool-button alc-tool-icon-button"') == 6
     assert 'id="alc-connect" class="alc-tool-button alc-tool-icon-button"' in text
@@ -345,11 +1047,11 @@ def test_rendered_html_is_standalone_and_embeds_atomic_markdown(
     assert 'id="alc-export-pdf"' in text
     assert 'id="alc-export-pdf-label"' in text
     assert '<section id="alc-editor-advanced"' in text
-    assert (
-        '<h3 id="alc-editor-advanced-label" class="alc-editor-advanced-heading">'
-        "Preview and more settings</h3>"
-        in text
-    )
+    assert 'id="alc-editor-advanced-label"' not in text
+    assert "Preview and more settings" not in text
+    assert 'id="alc-editor-glossary-source-label">Source (read-only)</span>' in text
+    assert '<textarea id="alc-editor-glossary-source" readonly' in text
+    assert 'aria-readonly="true"></textarea>' in text
     assert 'id="alc-editor-priority"' in text
     assert 'id="alc-editor-color-presets"' in text
     assert 'id="alc-editor-foreground-picker"' in text
@@ -731,10 +1433,16 @@ def test_browser_exported_html_remains_a_valid_latest_reader(
   globalThis.__alcReaderTest = {
     state: state,
     addRevision: addRevision,
+    addGlossaryRevision: addGlossaryRevision,
     buildStandaloneExportHtml: buildStandaloneExportHtml,
+    canonicalDigest: canonicalDigest,
+    glossaryBaseMaterial: glossaryBaseMaterial,
+    glossaryRevisionMaterial: glossaryRevisionMaterial,
     initialRevisions: initialRevisions,
     metadataOnly: metadataOnly,
+    prepareGlossary: prepareGlossary,
     resolveOne: resolveOne,
+    resolveGlossaryAll: resolveGlossaryAll,
     semanticDigest: semanticDigest
   };
 }());
@@ -752,6 +1460,29 @@ metadata.title = "Browser export";
 metadata.provenance = {producer: "alc-render-browser"};
 var body = "浏览器中的最新版 [@ref-1]。";
 (async function () {
+  await helpers.prepareGlossary();
+  var glossaryBase = helpers.state.glossaryBase[0];
+  var glossaryBaseDigest = await helpers.canonicalDigest(
+    helpers.glossaryBaseMaterial(glossaryBase)
+  );
+  var glossaryMetadata = {
+    schema_version: "alc.render.glossary_revision.v1",
+    entry_id: "term-reader",
+    revision: 2,
+    parent_semantic_digest: glossaryBaseDigest,
+    entry: Object.assign({}, glossaryBase, {
+      translated_term: "阅读器",
+      definition: "浏览器导出的最新版。"
+    }),
+    provenance: {producer: "alc-render-browser"}
+  };
+  var glossaryDigest = await helpers.canonicalDigest(
+    helpers.glossaryRevisionMaterial(glossaryMetadata)
+  );
+  helpers.addGlossaryRevision(Object.assign({}, glossaryMetadata, {
+    semantic_digest: glossaryDigest
+  }));
+  helpers.resolveGlossaryAll();
   var digest = await helpers.semanticDigest(metadata, body);
   helpers.addRevision({
     metadata: metadata,
@@ -787,6 +1518,9 @@ var body = "浏览器中的最新版 [@ref-1]。";
     assert exported["revisions"][-1]["markdown_body"] == (
         "浏览器中的最新版 [@ref-1]。"
     )
+    assert exported["publication"]["glossary"][0]["translated_term"] == "读者"
+    assert exported["glossary_revisions"][0]["entry"]["translated_term"] == "阅读器"
+    assert exported["selected_glossary_revision_digests"]
     assert 'id="alc-export"' in completed.stdout
     assert "showDirectoryPicker" in completed.stdout
     assert 'class="alc-stacked-layout"' in completed.stdout

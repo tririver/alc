@@ -173,6 +173,9 @@ def _render(args: argparse.Namespace) -> dict[str, Any]:
         "html": str(result.html_path),
         "publication_digest": result.publication_digest,
         "selected_revision_digests": list(result.selected_revision_digests),
+        "selected_glossary_revision_digests": list(
+            result.selected_glossary_revision_digests
+        ),
         "warnings": list(result.warnings),
     }
 
