@@ -43,6 +43,7 @@ from alc_translate.prompts import (
     REVIEW_PROMPT_VERSION,
     TRANSLATION_SCHEMA,
     TRANSLATION_PROMPT_VERSION,
+    glossary_prompt,
     review_prompt,
     translation_prompt,
 )
@@ -475,6 +476,20 @@ def test_glossary_schema_only_requests_reasoned_content_and_join_id():
         "target_definition",
     ]
     assert set(entry["properties"]) == set(entry["required"])
+
+
+def test_glossary_prompt_contracts_markdown_definitions_and_plain_terms() -> None:
+    prompt = glossary_prompt(
+        terms=[{"term_id": "term-1", "term": "Hubble parameter"}],
+        target_language="zh-CN",
+        window_ordinal=0,
+    )
+
+    assert GLOSSARY_PROMPT_VERSION == "alc.translate.glossary_prompt.v4"
+    assert "preferred_translation as plain text" in prompt
+    assert "target_definition as concise CommonMark-compatible Markdown" in prompt
+    assert "$...$ for inline formulas" in prompt
+    assert "Do not use raw HTML, headings, tables, images" in prompt
 
 
 def test_translation_schema_only_requests_block_id_and_text():
