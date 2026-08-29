@@ -8,7 +8,7 @@ from typing import Any
 
 
 LANGUAGE_PROMPT_VERSION = "alc.translate.language_prompt.v1"
-GLOSSARY_PROMPT_VERSION = "alc.translate.glossary_prompt.v3"
+GLOSSARY_PROMPT_VERSION = "alc.translate.glossary_prompt.v4"
 TRANSLATION_PROMPT_VERSION = "alc.translate.blocks_prompt.v8"
 REVIEW_PROMPT_VERSION = "alc.translate.review_prompt.v7"
 
@@ -119,6 +119,11 @@ grounding, never definitions; do not label, quote, or treat them as a source
 definition. Preserve distinctions between nearby terms and do not merge,
 deduplicate, select, drop, pad, or reorder terms. This is one byte-bounded
 window; a local caller concatenates windows without a reducer.
+Keep preferred_translation as plain text. Write target_definition as concise
+CommonMark-compatible Markdown in the target language. Use $...$ for inline
+formulas and a pair of $$ lines around display formulas. Paragraphs, emphasis,
+inline code, and ordinary links are allowed. Do not use raw HTML, headings,
+tables, images, or fenced code blocks in a glossary definition.
 Interpret each term only in its supplied matched sentences and source evidence.
 When it belongs to a title or proper name, explain that source usage rather
 than a modern namesake. Use established target-language scientific and

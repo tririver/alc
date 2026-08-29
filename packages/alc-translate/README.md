@@ -58,6 +58,12 @@ The three commands are separately durable stages and verify their selected
 prerequisites. The final command returns the canonical result at `data.result`
 and the Layer handoff at `data.delivery.layer`.
 
+Glossary `preferred_translation` values are plain text. Glossary
+`target_definition` values use the Reader's CommonMark-compatible Markdown
+dialect: `$...$` is inline math and `$$` delimiter lines wrap display math.
+Definitions should stay compact and omit raw HTML, headings, tables, images,
+and fenced code blocks.
+
 `--document-cache-root` is optional. Without it, source access uses
 `AC_DOCUMENT_CACHE` when set, otherwise
 `<launch-directory>/.ac/cache/ac-document`. Durable state is project-local under
