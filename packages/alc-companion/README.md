@@ -110,7 +110,8 @@ inherited. Committed reviews live below
 `.alc/companion/operator-revisions/<run-id>/` and are replayed by status,
 render, revise, and validate. The immutable `publication_digest` identifies
 the base publication; `edition_digest` identifies that publication plus its
-ordered current fragment heads.
+ordered current fragment heads. Glossary revision heads are carried separately
+by the Reader/export contract and do not change this existing digest.
 
 Use `alc-companion --help` and each subcommand's `--help` for the complete
 durable-control and publication options. `--document-cache-root` overrides document
@@ -137,6 +138,8 @@ publication.json
 layers/translation.json
 layers/companion.json
 fragments/revision-....md
+glossary/revision-....md
+glossary-batches/<batch-id>/fragments/revision-....md
 resources/<sha256>
 ```
 

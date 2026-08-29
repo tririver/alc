@@ -36,7 +36,1234 @@ def test_reader_javascript_passes_node_syntax_check() -> None:
     )
 
 
-def test_reader_overlay_markdown_supports_tables_under_node() -> None:
+def test_reader_glossary_uses_latest_entry_and_only_exact_target_ranges() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    instrumented = (
+        _text("markdown-it/markdown-it.min.js")
+        + "\nglobalThis.window = globalThis;\n"
+        + "globalThis.markdownit = module.exports;\n"
+        "globalThis.crypto = require('node:crypto').webcrypto;\n"
+        + javascript[:startup]
+        + """
+  globalThis.__alcGlossaryTest = {
+      state: state,
+      setupMarkdown: setupMarkdown,
+    canonicalDigest: canonicalDigest,
+    stableStringify: stableStringify,
+    glossaryBaseMaterial: glossaryBaseMaterial,
+    glossaryRevisionMaterial: glossaryRevisionMaterial,
+    encodeGlossaryRevision: encodeGlossaryRevision,
+    glossaryRevisionFileName: glossaryRevisionFileName,
+    parseGlossaryRevisionFile: parseGlossaryRevisionFile,
+    prepareGlossary: prepareGlossary,
+    resolveGlossaryAll: resolveGlossaryAll,
+    projectGlossaryMarkdown: projectGlossaryMarkdown,
+    buildMarkdownPackage: buildMarkdownPackage,
+    validGlossarySurfaceAnchors: validGlossarySurfaceAnchors,
+    glossaryEntryEditableInState: glossaryEntryEditableInState,
+    assertGlossaryBaseCurrent: assertGlossaryBaseCurrent,
+    beginGlossaryEdit: beginGlossaryEdit,
+    renderGlossaryRow: renderGlossaryRow,
+    handleGlossaryEntryClick: handleGlossaryEntryClick,
+    handleGlossaryEntryDoubleClick: handleGlossaryEntryDoubleClick,
+    activeGlossaryDraftValid: activeGlossaryDraftValid,
+    showGlossaryValidationError: showGlossaryValidationError,
+    clearGlossaryValidationError: clearGlossaryValidationError,
+    installGlossaryInlineSpies: function (calls) {
+      replaceGlossaryRow = function (entryId) { calls.replaced.push(entryId); };
+      focusGlossaryInlineEditor = function (entryId) { calls.focused.push(entryId); };
+      openAdvancedEditor = function () { calls.dialogs += 1; };
+    },
+    installGlossaryRowSpies: function (calls) {
+      element = function (tag, className, text) {
+        return new FakeNode(tag, className, text);
+      };
+      decorateGlossary = function () {};
+      renderGlossaryDefinition = function (markdown) {
+        return new FakeNode("div", "alc-markdown", markdown);
+      };
+      labels = function () {
+        return {
+          glossary: "Glossary",
+          listen: "Listen",
+          editGlossary: "Edit glossary term"
+        };
+      };
+      appendInlineActions = function (actions) {
+        calls.actions += 1;
+        actions.appendChild(new FakeNode("button", "alc-inline-save", "Save"));
+      };
+      updateDraftSaveButtons = function (scope) {
+        calls.saveScopes.push(scope);
+      };
+    },
+    installGlossaryActivationSpy: function (calls) {
+      beginGlossaryEdit = function (entry, focusField) {
+        calls.push(entry.entry_id + ":" + (focusField || "definition"));
+      };
+    }
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+function FakeNode(tag, className, text) {
+  this.tagName = String(tag || "div").toUpperCase();
+  this.className = className || "";
+  this.textContent = text || "";
+  this.children = [];
+  this.dataset = {};
+  this.listeners = {};
+  this.attrs = {};
+  this.classList = {
+    add: (...names) => {
+      var values = new Set(this.className.split(/\\s+/).filter(Boolean));
+      names.forEach(function (name) { values.add(name); });
+      this.className = Array.from(values).join(" ");
+    }
+  };
+}
+FakeNode.prototype.appendChild = function (child) {
+  this.children.push(child);
+  return child;
+};
+FakeNode.prototype.addEventListener = function (name, listener) {
+  this.listeners[name] = this.listeners[name] || [];
+  this.listeners[name].push(listener);
+};
+FakeNode.prototype.setAttribute = function (name, value) {
+  this.attrs[name] = String(value);
+};
+FakeNode.prototype.removeAttribute = function (name) {
+  delete this.attrs[name];
+};
+FakeNode.prototype.focus = function () { this.focused = true; };
+var validationNodes = {
+  "alc-editor-dialog": new FakeNode("dialog"),
+  "alc-editor-error": new FakeNode("p"),
+  "alc-editor-title": new FakeNode("input"),
+  "alc-storage-status": new FakeNode("p")
+};
+validationNodes["alc-editor-dialog"].open = false;
+validationNodes["alc-editor-error"].hidden = true;
+validationNodes["alc-storage-status"].hidden = true;
+var inlineValidationControl = new FakeNode("textarea");
+globalThis.document = {
+  getElementById: function (id) { return validationNodes[id] || null; },
+  querySelector: function () { return inlineValidationControl; },
+  querySelectorAll: function (selector) {
+    return selector === ".alc-glossary-inline-input" ?
+      [inlineValidationControl] : [];
+  }
+};
+var helpers = globalThis.__alcGlossaryTest;
+var base = {
+  entry_id: "term-reader", term: "Reader", translated_term: "读者",
+  definition: "旧解释", anchor_ids: ["block-1"], citations: [],
+  surface_anchors: [{
+    block_id: "block-1", fragment_id: "translation-1",
+    fragment_semantic_digest: "d".repeat(64), markdown_start: 0,
+    markdown_end: 2, surface: "读者"
+  }]
+};
+(async function () {
+  helpers.state.payload = {
+    publication: {
+      glossary: [base],
+      source_document: {blocks: [], metadata: {}},
+      labels: {},
+      reader_profile: {title: "Glossary QA"},
+      bibliography: []
+    },
+    resources: []
+  };
+  helpers.state.selectedGlossaryRevisions = new Map([["term-reader", null]]);
+  helpers.state.glossaryBaseDigests = new Map([
+    ["term-reader", "a".repeat(64)]
+  ]);
+  var inlineCalls = {replaced: [], focused: [], dialogs: 0};
+  helpers.installGlossaryInlineSpies(inlineCalls);
+  helpers.beginGlossaryEdit(base);
+  assert(
+    helpers.state.activeGlossaryDraft &&
+      helpers.state.activeGlossaryDraft.entryId === "term-reader" &&
+      inlineCalls.replaced.join(",") === "term-reader" &&
+      inlineCalls.focused.join(",") === "term-reader" &&
+      inlineCalls.dialogs === 0,
+    "glossary edit did not start as an in-row draft"
+  );
+  helpers.state.activeGlossaryDraft.translated_term = "";
+  helpers.showGlossaryValidationError("Translated term required");
+  assert(
+    validationNodes["alc-storage-status"].textContent ===
+      "Translated term required" &&
+      validationNodes["alc-storage-status"].dataset.kind === "error" &&
+      validationNodes["alc-storage-status"].attrs.role === "alert" &&
+      inlineValidationControl.attrs["aria-invalid"] === "true" &&
+      inlineValidationControl.focused,
+    "inline glossary validation did not use an accessible centered status"
+  );
+  helpers.clearGlossaryValidationError();
+  assert(
+    validationNodes["alc-storage-status"].hidden &&
+      inlineValidationControl.attrs["aria-invalid"] === undefined,
+    "editing the inline translated term did not clear its validation state"
+  );
+  validationNodes["alc-editor-dialog"].open = true;
+  helpers.showGlossaryValidationError("Translated term required");
+  assert(
+    !validationNodes["alc-editor-error"].hidden &&
+      validationNodes["alc-editor-error"].textContent ===
+        "Translated term required" &&
+      validationNodes["alc-editor-title"].attrs["aria-invalid"] === "true" &&
+      validationNodes["alc-editor-title"].focused,
+    "advanced glossary validation did not stay inside the editor panel"
+  );
+  helpers.clearGlossaryValidationError();
+  validationNodes["alc-editor-dialog"].open = false;
+  helpers.state.activeGlossaryDraft.translated_term = "读者";
+  var rowCalls = {actions: 0, saveScopes: []};
+  helpers.installGlossaryRowSpies(rowCalls);
+  var inlineRow = helpers.renderGlossaryRow(base, {
+    source: "Source",
+    translatedTerm: "Translated term",
+    definition: "Definition",
+    glossaryTerm: "Glossary"
+  });
+  var sourceColumn = inlineRow.children[0];
+  var translatedColumn = inlineRow.children[1];
+  var definitionColumn = inlineRow.children[2];
+  var translatedInput = translatedColumn.children[2];
+  var definitionInput = definitionColumn.children[2];
+  var mobileActions = sourceColumn.children[0].children[1];
+  var definitionActions = definitionColumn.children[0].children[1];
+  assert(
+    inlineRow.className.includes("is-inline-editing") &&
+      inlineRow.children.length === 3 &&
+      sourceColumn.tagName === "DT" &&
+      sourceColumn.className.includes("alc-glossary-inline-source") &&
+      mobileActions.className.includes("alc-glossary-inline-mobile-actions") &&
+      mobileActions.children[0].textContent === "Glossary · v1" &&
+      sourceColumn.children[0].children[0].textContent === "Source" &&
+      sourceColumn.children[1].textContent === "Reader" &&
+      translatedColumn.tagName === "DD" &&
+      translatedColumn.children[0].children[0].textContent === "Translated term" &&
+      definitionColumn.children[0].children[0].textContent === "Definition" &&
+      definitionActions.className.includes(
+        "alc-glossary-inline-desktop-actions"
+      ) &&
+      definitionActions.children[0].textContent === "Glossary · v1" &&
+      translatedInput.tagName === "TEXTAREA" && translatedInput.value === "读者" &&
+      translatedInput.attrs["aria-label"] === "Translated term" &&
+      definitionInput.tagName === "TEXTAREA" &&
+      definitionInput.value === "旧解释" &&
+      definitionInput.attrs["aria-label"] === "Definition" &&
+      rowCalls.actions === 2,
+    "active glossary draft did not render in-row fields and actions"
+  );
+  translatedInput.value = "阅读器";
+  translatedInput.listeners.input[0]();
+  assert(
+    helpers.state.activeGlossaryDraft.translated_term === "阅读器" &&
+      rowCalls.saveScopes[0] === inlineRow,
+    "in-row glossary input did not update the active draft"
+  );
+  helpers.state.activeGlossaryDraft.translated_term = " \\n ";
+  assert(
+    helpers.activeGlossaryDraftValid() === false,
+    "an empty translated glossary term remained saveable"
+  );
+  helpers.state.activeGlossaryDraft.translated_term = "阅读器";
+  assert(
+    helpers.activeGlossaryDraftValid() === true,
+    "a non-empty translated glossary term was rejected"
+  );
+  helpers.state.activeGlossaryDraft = null;
+  helpers.state.editorBase = null;
+  helpers.state.editorKind = "fragment";
+  var savedRow = helpers.renderGlossaryRow(base, {
+    translatedTerm: "Translated term",
+    definition: "Definition"
+  });
+  var cardActions = savedRow.children[savedRow.children.length - 1];
+  assert(
+    savedRow.children.length === 4 &&
+      savedRow.children[1].className === "alc-glossary-translation" &&
+      cardActions.className.includes("alc-glossary-card-actions") &&
+      cardActions.children.length === 2 &&
+      cardActions.children.every(function (button) {
+        return button.className === "alc-card-action";
+      }),
+    "saved glossary row did not use speaker/edit hover actions"
+  );
+  var activationCalls = [];
+  helpers.installGlossaryActivationSpy(activationCalls);
+  function activationEvent(control, translation) {
+    return {
+      target: {
+        closest: function (selector) {
+          if (control && selector.includes("button")) return {};
+          return translation && selector === ".alc-glossary-translation" ?
+            {} : null;
+        }
+      },
+      prevented: false,
+      stopped: false,
+      preventDefault: function () { this.prevented = true; },
+      stopPropagation: function () { this.stopped = true; }
+    };
+  }
+  helpers.state.readerPreferences.editActivation = "double";
+  helpers.handleGlossaryEntryClick(activationEvent(false), base);
+  assert(activationCalls.length === 0, "double-click mode accepted a row click");
+  var doubleEvent = activationEvent(false, true);
+  helpers.handleGlossaryEntryDoubleClick(doubleEvent, base);
+  assert(
+    activationCalls.join(",") === "term-reader:translation" &&
+      doubleEvent.prevented && doubleEvent.stopped,
+    "double-clicking the translated term did not route translated focus"
+  );
+  helpers.handleGlossaryEntryDoubleClick(activationEvent(false, false), base);
+  assert(
+    activationCalls.join(",") ===
+      "term-reader:translation,term-reader:definition",
+    "double-clicking outside the translated term did not route definition focus"
+  );
+  helpers.handleGlossaryEntryDoubleClick(activationEvent(true), base);
+  assert(
+    activationCalls.length === 2,
+    "nested glossary control triggered row double-click editing"
+  );
+  helpers.state.readerPreferences.editActivation = "single";
+  helpers.handleGlossaryEntryDoubleClick(activationEvent(false), base);
+  assert(activationCalls.length === 2, "single-click mode accepted a double click");
+  helpers.handleGlossaryEntryClick(activationEvent(false), base);
+  assert(
+    activationCalls.join(",") ===
+      "term-reader:translation,term-reader:definition,term-reader:definition",
+    "single-click mode did not keep definition focus"
+  );
+  helpers.handleGlossaryEntryClick(activationEvent(true), base);
+  assert(
+    activationCalls.length === 3,
+    "nested glossary control triggered row single-click editing"
+  );
+  helpers.state.glossaryBase = [JSON.parse(JSON.stringify(base))];
+  var baseDigest = await helpers.canonicalDigest(helpers.glossaryBaseMaterial(base));
+  helpers.state.glossaryBaseDigests = new Map([["term-reader", baseDigest]]);
+  var revision = {
+    schema_version: "alc.render.glossary_revision.v1",
+    entry_id: "term-reader", revision: 2,
+    parent_semantic_digest: baseDigest,
+    entry: Object.assign({}, base, {
+      translated_term: "阅读器",
+      definition: "新解释：$H_0$ 与 **宇宙学**。"
+    }),
+    provenance: {producer: "alc-render-browser"}, semantic_digest: ""
+  };
+  revision.semantic_digest = await helpers.canonicalDigest(
+    helpers.glossaryRevisionMaterial(revision)
+  );
+  var encodedRevision = helpers.encodeGlossaryRevision(revision);
+  var revisionFilename = helpers.glossaryRevisionFileName(
+    revision.revision, revision.semantic_digest
+  );
+  var revisionFrontMatter = encodedRevision.split(
+    "\\n<!-- ALC:GLOSSARY-JSON:END -->\\n", 1
+  )[0];
+  var decodedRevision = await helpers.parseGlossaryRevisionFile(
+    encodedRevision, revisionFilename
+  );
+  var legacyRevision = await helpers.parseGlossaryRevisionFile(
+    helpers.stableStringify(helpers.glossaryRevisionMaterial(revision)) + "\\n",
+    revisionFilename.replace(/[.]md$/, ".json")
+  );
+  assert(
+    revisionFilename.endsWith(".md") &&
+      encodedRevision.startsWith("<!-- ALC:GLOSSARY-JSON:BEGIN -->\\n") &&
+      !revisionFrontMatter.includes('"definition"') &&
+      encodedRevision.endsWith(revision.entry.definition) &&
+      decodedRevision.semantic_digest === revision.semantic_digest &&
+      decodedRevision.entry.definition === revision.entry.definition &&
+      legacyRevision.semantic_digest === revision.semantic_digest,
+    "glossary Markdown revision envelope did not round-trip compatibly"
+  );
+  helpers.state.glossaryRevisions = new Map([["term-reader", [revision]]]);
+  helpers.state.glossaryRevisionDigests = new Map([
+    ["term-reader", new Set([revision.semantic_digest])]
+  ]);
+  helpers.state.glossaryFileDiagnostics = [];
+  helpers.resolveGlossaryAll();
+  assert(
+    helpers.state.payload.publication.glossary[0].translated_term === "阅读器" &&
+      helpers.state.payload.publication.glossary[0].definition ===
+        "新解释：$H_0$ 与 **宇宙学**。",
+    "latest glossary revision was not projected into the effective entry"
+  );
+  var numericBase = Object.assign({}, base, {
+    entry_id: "term-numeric", term: "Numeric", translated_term: "数值",
+    confidence: 0.9
+  });
+  var numericDigest = "b".repeat(64);
+  var numericRevision = {
+    schema_version: "alc.render.glossary_revision.v1",
+    entry_id: numericBase.entry_id,
+    revision: 2,
+    parent_semantic_digest: "c".repeat(64),
+    entry: Object.assign({}, numericBase, {translated_term: "数值术语"}),
+    provenance: {producer: "alc-render-browser"},
+    semantic_digest: numericDigest
+  };
+  helpers.state.payload.publication.glossary = [numericBase];
+  helpers.state.payload.glossary_base_digests = {
+    "term-numeric": numericRevision.parent_semantic_digest
+  };
+  helpers.state.payload.glossary_revisions = [numericRevision];
+  await helpers.prepareGlossary();
+  assert(
+    helpers.state.payload.publication.glossary[0].translated_term ===
+      "数值术语" &&
+      !helpers.glossaryEntryEditableInState(
+        helpers.state.payload.publication.glossary[0]
+      ),
+    "a legal unknown numeric field crashed Reader state or remained editable"
+  );
+  var duplicateA = Object.assign({}, base, {
+    entry_id: "term-duplicate", translated_term: "第一项"
+  });
+  var duplicateB = Object.assign({}, base, {
+    entry_id: "term-duplicate", translated_term: "第二项"
+  });
+  helpers.state.payload.publication.glossary = [duplicateA, duplicateB];
+  helpers.state.payload.glossary_base_digests = {};
+  helpers.state.payload.glossary_revisions = [];
+  await helpers.prepareGlossary();
+  assert(
+    helpers.state.payload.publication.glossary.map(function (entry) {
+      return entry.translated_term;
+    }).join(",") === "第一项,第二项" &&
+      helpers.state.glossaryDuplicateIds.has("term-duplicate") &&
+      !helpers.glossaryEntryEditableInState(duplicateA),
+    "duplicate glossary IDs were projected through one shared Map entry"
+  );
+  helpers.state.payload.publication.glossary = [base];
+  helpers.state.payload.glossary_base_digests = {"term-reader": baseDigest};
+  helpers.state.payload.glossary_revisions = [];
+  await helpers.prepareGlossary();
+  helpers.state.glossaryRevisions = new Map([["term-reader", [
+    Object.assign({}, revision, {semantic_digest: "c".repeat(64)}),
+    Object.assign({}, revision, {
+      entry: Object.assign({}, revision.entry, {translated_term: "阅读界面"}),
+      semantic_digest: "d".repeat(64)
+    })
+  ]]]);
+  var forkRejected = false;
+  try {
+    helpers.assertGlossaryBaseCurrent({
+      entryId: "term-reader", baseDigest: baseDigest, baseRevision: 1
+    });
+  } catch (_error) {
+    forkRejected = true;
+  }
+  assert(forkRejected, "a known glossary fork remained writable");
+  helpers.state.glossaryBase = [JSON.parse(JSON.stringify(base))];
+  helpers.state.glossaryDuplicateIds = new Set();
+  helpers.state.glossaryBaseDigests = new Map([["term-reader", baseDigest]]);
+  helpers.state.glossaryRevisions = new Map([["term-reader", [revision]]]);
+  helpers.state.glossaryFileDiagnostics = [];
+  helpers.state.payload.publication.glossary = [base];
+  helpers.resolveGlossaryAll();
+  assert(
+    helpers.projectGlossaryMarkdown(
+      "读者在此", {
+        fragment_id: "translation-1", semantic_digest: "d".repeat(64),
+        anchor: {kind: "block", target_id: "block-1"}
+      }
+    ) === "阅读器在此",
+    "exact structured target range was not projected"
+  );
+  assert(
+    helpers.projectGlossaryMarkdown(
+      "读者在此", {
+        fragment_id: "translation-1", semantic_digest: "e".repeat(64),
+        anchor: {kind: "block", target_id: "block-1"}
+      }
+    ) === "读者在此",
+    "stale target range caused an unsafe replacement"
+  );
+  assert(
+    !helpers.validGlossarySurfaceAnchors({surface_anchors: [{surface: "读者"}]}),
+    "incomplete surface anchor was accepted"
+  );
+      helpers.state.initialGlossaryDigests = new Map([["term-reader", baseDigest]]);
+      helpers.setupMarkdown();
+      var changed = helpers.buildMarkdownPackage("changed", new Set(["glossary"]));
+  var changedHtml = changed && helpers.state.md.render(changed.markdown);
+  assert(
+    changed && changed.markdown.includes("Reader / 阅读器") &&
+      changed.markdown.includes("新解释：$H_0$ 与 **宇宙学**。") &&
+      !changed.markdown.includes("\\\\$H\\\\_0\\\\$") &&
+      changedHtml.includes('class="math math-inline"') &&
+      changedHtml.includes("<strong>宇宙学</strong>") &&
+      !changedHtml.includes("<pre><code>") &&
+      changed.manifest.selected_glossary_revision_digests.join(",") ===
+        revision.semantic_digest,
+    "changed-only Markdown did not include the latest glossary revision"
+  );
+})().catch(function (error) {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    )
+    completed = subprocess.run(
+        [node, "-"], input=instrumented, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_reader_glossary_propagation_indexes_safe_mentions_and_rejects_stale_batches() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        _text("markdown-it/markdown-it.min.js")
+        + "\nglobalThis.window = globalThis;\n"
+        + "globalThis.markdownit = module.exports;\n"
+        + "globalThis.crypto = require('node:crypto').webcrypto;\n"
+        + javascript[:startup]
+        + """
+  globalThis.__alcPropagationTest = {
+    state: state,
+    setupMarkdown: setupMarkdown,
+    canonicalDigest: canonicalDigest,
+    glossaryBaseMaterial: glossaryBaseMaterial,
+    buildGlossaryMentionIndex: buildGlossaryMentionIndex,
+    fragmentGlossaryMentions: fragmentGlossaryMentions,
+    applyGlossaryMentionReplacement: applyGlossaryMentionReplacement,
+    validateStoredGlossaryMentions: validateStoredGlossaryMentions,
+    updateGlossaryMentionProvenance: updateGlossaryMentionProvenance,
+    prepareGlossaryPropagation: prepareGlossaryPropagation,
+    loadGlossaryPropagationBatch: loadGlossaryPropagationBatch,
+    buildMarkdownPackage: buildMarkdownPackage,
+    resolveGlossaryAll: resolveGlossaryAll,
+    projectedRevisionMarkdown: projectedRevisionMarkdown,
+    buildCommittedGlossarySnapshot: buildCommittedGlossarySnapshot,
+    structurallySelectedGlossaryChains: structurallySelectedGlossaryChains
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcPropagationTest;
+var source = {
+  source_format: "markdown",
+  media_type: "text/markdown",
+  artifact_digest: "a".repeat(64),
+  size: 4,
+  rich_document_digest: "b".repeat(64)
+};
+var anchor = {
+  kind: "block",
+  target_id: "block-1",
+  related_blocks: [{
+    block_id: "block-1",
+    kind: "paragraph",
+    ordinal: 0,
+    locator: {line_start: 1},
+    content_fingerprint: "c".repeat(64)
+  }]
+};
+var entry = {
+  entry_id: "term-reader",
+  term: "Reader",
+  translated_term: "读者",
+  definition: "阅读文本的人。",
+  anchor_ids: ["block-1"]
+};
+var peerEntry = {
+  entry_id: "term-peer",
+  term: "Peer",
+  translated_term: "相关术语",
+  definition: "读者用于解释；`读者`；[链接](https://读者.example)；$读者$。",
+  anchor_ids: ["block-1"]
+};
+var markdown = "读者与 **读者**；`读者`；[链接](https://读者.example)；$读者$。";
+var fragment = {
+  schema_version: "alc.render.fragment_revision.v3",
+  source: source,
+  fragment_id: "translation-1",
+  revision: 1,
+  parent_semantic_digest: null,
+  anchor: anchor,
+  priority: 10,
+  role: "translation",
+  language: "zh-CN",
+  title: null,
+  citation_ids: [],
+  appearance: null,
+  deleted: false,
+  provenance: {producer: "alc-translate"},
+  markdown_body: markdown,
+  semantic_digest: "d".repeat(64)
+};
+helpers.state.payload = {
+  source_identity: source,
+  block_fingerprints: {"block-1": "c".repeat(64)},
+  diagnostics: [],
+  publication: {
+    source_document: {blocks: [{
+      block_id: "block-1", kind: "paragraph", ordinal: 0,
+      locator: {line_start: 1}, payload: {text: "Reader"}
+    }]},
+    outline: [], bibliography: [], labels: {},
+    reader_profile: {source_language: "en", target_language: "zh-CN"},
+    glossary: [entry]
+  }
+};
+helpers.setupMarkdown();
+helpers.state.glossaryBase = [entry];
+helpers.state.glossaryRevisions = new Map();
+helpers.state.selected = new Map([[fragment.fragment_id, fragment]]);
+helpers.state.revisions = new Map([[fragment.fragment_id, [fragment]]]);
+
+(async function () {
+  var indexed = helpers.buildGlossaryMentionIndex(
+    fragment, markdown, [entry], false
+  );
+  assert(
+    indexed.mentions.length === 2 && indexed.skipped === 3,
+    "bounded mention indexing included protected Markdown"
+  );
+  var nestedLong = {
+    entry_id: "term-pede", term: "PEDE",
+    translated_term: "现象学涌现暗能量（PEDE）模型",
+    definition: "specific", anchor_ids: ["block-1"]
+  };
+  var nestedShort = {
+    entry_id: "term-emergent", term: "emergent dark energy",
+    translated_term: "涌现暗能量",
+    definition: "generic", anchor_ids: ["block-1"]
+  };
+  var nestedMarkdown = "现象学涌现暗能量（PEDE）模型与涌现暗能量";
+  var nested = helpers.buildGlossaryMentionIndex(
+    fragment, nestedMarkdown, [nestedLong, nestedShort], false
+  );
+  assert(
+    nested.ambiguous === 0 && nested.mentions.length === 2 &&
+      nested.mentions[0].entry_id === "term-pede" &&
+      nested.mentions[1].entry_id === "term-emergent",
+    "contained generic term did not defer to the longer glossary surface"
+  );
+  var duplicateShort = Object.assign({}, nestedShort, {
+    entry_id: "term-bic", term: "BIC", translated_term: "贝叶斯信息准则（BIC）"
+  });
+  var duplicateLong = Object.assign({}, nestedShort, {
+    entry_id: "term-bayesian-information-criterion",
+    term: "Bayesian Information Criterion",
+    translated_term: "贝叶斯信息准则（BIC）"
+  });
+  var duplicate = helpers.buildGlossaryMentionIndex(
+    fragment, "贝叶斯信息准则（BIC）", [duplicateShort, duplicateLong], false
+  );
+  assert(
+    duplicate.ambiguous === 0 && duplicate.mentions.length === 1 &&
+      duplicate.mentions[0].entry_id === duplicateLong.entry_id &&
+      Object.keys(duplicate.mentions[0]).sort().join(",") ===
+        "entry_id,markdown_end,markdown_start,surface",
+    "identical translated aliases did not choose the more complete source term"
+  );
+  var preferredDuplicate = helpers.buildGlossaryMentionIndex(
+    fragment, "贝叶斯信息准则（BIC）", [duplicateShort, duplicateLong], false,
+    duplicateShort.entry_id
+  );
+  assert(
+    preferredDuplicate.ambiguous === 0 &&
+      preferredDuplicate.mentions.length === 1 &&
+      preferredDuplicate.mentions[0].entry_id === duplicateShort.entry_id,
+    "the glossary entry being edited did not own its shared translated surface"
+  );
+  var crossingLeft = Object.assign({}, nestedShort, {
+    entry_id: "term-crossing-left", term: "crossing left",
+    translated_term: "甲乙丙"
+  });
+  var crossingRight = Object.assign({}, nestedShort, {
+    entry_id: "term-crossing-right", term: "crossing right",
+    translated_term: "乙丙丁"
+  });
+  var crossing = helpers.buildGlossaryMentionIndex(
+    fragment, "甲乙丙丁", [crossingLeft, crossingRight], false
+  );
+  assert(
+    crossing.ambiguous === 2 && crossing.mentions.length === 0 &&
+      crossing.ambiguous_entry_ids.join(",") ===
+        "term-crossing-left,term-crossing-right",
+    "true crossing glossary ranges stopped failing closed"
+  );
+  function aidFragment(role, fragmentId, digest, priority) {
+    return Object.assign({}, fragment, {
+      fragment_id: fragmentId,
+      role: role,
+      priority: priority,
+      markdown_body: "辅助说明：读者。",
+      semantic_digest: digest.repeat(64)
+    });
+  }
+  var companion = aidFragment("companion", "companion-1", "e", 20);
+  var guide = aidFragment("guide", "guide-1", "f", 101);
+  var note = aidFragment("note", "note-1", "9", 110);
+  assert(
+    helpers.buildGlossaryMentionIndex(
+      companion, companion.markdown_body, [entry], false
+    ).mentions.length === 1 &&
+      helpers.buildGlossaryMentionIndex(
+        guide, guide.markdown_body, [entry], false
+      ).mentions.length === 1 &&
+      helpers.buildGlossaryMentionIndex(
+        note, note.markdown_body, [entry], false
+      ).mentions.length === 0,
+    "glossary mention role boundary did not include companion and guide only"
+  );
+  var unanchoredEntry = Object.assign({}, entry, {anchor_ids: ["another-block"]});
+  assert(
+    helpers.buildGlossaryMentionIndex(
+      fragment, "读者。", [unanchoredEntry], false
+    ).mentions.length === 1,
+    "eligible translated prose remained incorrectly gated by source anchor_ids"
+  );
+  var oldIndexed = JSON.parse(JSON.stringify(fragment));
+  oldIndexed.markdown_body = "旧索引遗漏了读者。";
+  oldIndexed.provenance = {
+    producer: "alc-translate",
+    glossary_mentions_schema: "alc.render.glossary_mentions.v1",
+    glossary_mentions: []
+  };
+  assert(
+    helpers.fragmentGlossaryMentions(oldIndexed, [entry]).mentions.length === 1,
+    "propagation trusted an older incomplete mention index"
+  );
+  var persistedAlias = JSON.parse(JSON.stringify(fragment));
+  persistedAlias.markdown_body = "贝叶斯信息准则（BIC）";
+  persistedAlias.provenance = {
+    producer: "alc-translate",
+    glossary_mentions_schema: "alc.render.glossary_mentions.v1",
+    glossary_mentions: [{
+      entry_id: duplicateLong.entry_id,
+      markdown_start: 0,
+      markdown_end: persistedAlias.markdown_body.length,
+      surface: persistedAlias.markdown_body
+    }]
+  };
+  assert(
+    helpers.fragmentGlossaryMentions(
+      persistedAlias, [duplicateShort, duplicateLong], duplicateShort.entry_id
+    ).mentions[0].entry_id === duplicateLong.entry_id,
+    "the actively edited alias stole a persisted mention owner"
+  );
+  var citationEntry = Object.assign({}, entry, {
+    entry_id: "term-citation-key",
+    translated_term: "ref-1"
+  });
+  var citationIndex = helpers.buildGlossaryMentionIndex(
+    fragment, "引用 [@ref-1]，正文 ref-1。", [citationEntry], false
+  );
+  assert(
+    citationIndex.mentions.length === 1 &&
+      citationIndex.mentions[0].markdown_start > 10,
+    "citation-key text was indexed as replaceable glossary prose"
+  );
+  var explicitEntry = Object.assign({}, entry, {surface_anchors: [{
+    block_id: "block-1",
+    fragment_id: fragment.fragment_id,
+    fragment_semantic_digest: fragment.semantic_digest,
+    markdown_start: 0,
+    markdown_end: 2,
+    surface: "读者"
+  }]});
+  assert(
+    helpers.fragmentGlossaryMentions(fragment, [explicitEntry]).mentions.length === 1,
+    "structured surface anchor did not take priority over legacy matching"
+  );
+  var replaced = helpers.applyGlossaryMentionReplacement(
+    markdown, indexed.mentions, "阅读器"
+  );
+  assert(
+    replaced === "阅读器与 **阅读器**；`读者`；[链接](https://读者.example)；$读者$。",
+    "mention replacement escaped its validated prose ranges"
+  );
+
+  var nextEntry = Object.assign({}, entry, {translated_term: "阅读器"});
+  var entryBaseDigest = await helpers.canonicalDigest(
+    helpers.glossaryBaseMaterial(entry)
+  );
+  var peerBaseDigest = await helpers.canonicalDigest(
+    helpers.glossaryBaseMaterial(peerEntry)
+  );
+  helpers.state.payload.publication.glossary = [entry, peerEntry];
+  helpers.state.glossaryBase = [entry, peerEntry];
+  helpers.state.glossaryBaseDigests = new Map([
+    [entry.entry_id, entryBaseDigest],
+    [peerEntry.entry_id, peerBaseDigest]
+  ]);
+  helpers.state.selectedGlossary = new Map([
+    [entry.entry_id, entry], [peerEntry.entry_id, peerEntry]
+  ]);
+  helpers.state.selectedGlossaryRevisions = new Map([
+    [entry.entry_id, null], [peerEntry.entry_id, null]
+  ]);
+  helpers.state.glossaryRevisions = new Map();
+  var prepared = await helpers.prepareGlossaryPropagation(
+    {base: entry, entryId: entry.entry_id}, nextEntry,
+    "2026-08-28T00:00:00.000Z"
+  );
+  assert(
+    prepared.revisions.length === 1 &&
+      prepared.revisions[0].markdown === replaced &&
+      prepared.manifest.fragments.length === 1 &&
+      prepared.glossaryRevisions.length === 1 &&
+      prepared.manifest.glossary_revisions.length === 1 &&
+      prepared.glossaryRevisions[0].metadata.entry_id === peerEntry.entry_id &&
+      prepared.glossaryRevisions[0].metadata.entry.translated_term ===
+        peerEntry.translated_term &&
+      prepared.glossaryRevisions[0].metadata.entry.definition ===
+        "阅读器用于解释；`读者`；[链接](https://读者.example)；$读者$。" &&
+      prepared.glossaryRevisions[0].path.startsWith(
+        "glossary-batches/" + prepared.manifest.batch_id + "/glossary/"
+      ) &&
+      prepared.revisions[0].metadata.provenance.glossary_mentions.length === 2 &&
+      prepared.revisions[0].metadata.provenance.glossary_mentions.every(
+        function (mention) { return mention.surface === "阅读器"; }
+      ),
+    "glossary save did not prepare Fragment and peer-definition successors"
+  );
+  function batchDirectory(files, prefix) {
+    prefix = prefix || [];
+    return {
+      getDirectoryHandle: async function (name) {
+        return batchDirectory(files, prefix.concat([name]));
+      },
+      getFileHandle: async function (name) {
+        var path = prefix.concat([name]).join("/");
+        if (!files.has(path)) throw new Error("missing batch file: " + path);
+        return {
+          getFile: async function () {
+            return {text: async function () { return files.get(path); }};
+          }
+        };
+      }
+    };
+  }
+  var batchFiles = new Map([
+    [prepared.revisions[0].path, prepared.revisions[0].encoded],
+    [prepared.glossaryRevisions[0].path,
+      prepared.glossaryRevisions[0].encoded]
+  ]);
+  var loadedBatch = await helpers.loadGlossaryPropagationBatch(
+    batchDirectory(batchFiles), {
+      entry_id: entry.entry_id,
+      provenance: {propagation: prepared.manifest}
+    }
+  );
+  assert(
+    loadedBatch.fragments.length === 1 &&
+      loadedBatch.glossaryRevisions.length === 1 &&
+      loadedBatch.glossaryRevisions[0].entry_id === peerEntry.entry_id,
+    "browser directory reload did not validate both propagation member types"
+  );
+  var rootMetadata = {
+    schema_version: "alc.render.glossary_revision.v1",
+    entry_id: entry.entry_id,
+    revision: 2,
+    parent_semantic_digest: entryBaseDigest,
+    entry: nextEntry,
+    provenance: {
+      producer: "alc-render-browser", propagation: prepared.manifest
+    }
+  };
+  var rootDigest = await helpers.canonicalDigest({
+    schema_version: rootMetadata.schema_version,
+    entry_id: rootMetadata.entry_id,
+    revision: rootMetadata.revision,
+    parent_semantic_digest: rootMetadata.parent_semantic_digest,
+    entry: rootMetadata.entry,
+    provenance: rootMetadata.provenance
+  });
+  var peerMetadata = prepared.glossaryRevisions[0].metadata;
+  helpers.state.glossaryRevisions = new Map([
+    [entry.entry_id, [Object.assign({}, rootMetadata, {
+      semantic_digest: rootDigest
+    })]],
+    [peerEntry.entry_id, [Object.assign({}, peerMetadata, {
+      semantic_digest: prepared.glossaryRevisions[0].digest
+    })]]
+  ]);
+  helpers.state.glossaryFileDiagnostics = [];
+  helpers.state.initialGlossaryDigests = new Map([
+    [entry.entry_id, entryBaseDigest],
+    [peerEntry.entry_id, peerBaseDigest]
+  ]);
+  helpers.resolveGlossaryAll();
+  var changedGlossary = helpers.buildMarkdownPackage(
+    "changed", new Set(["glossary"])
+  );
+  assert(
+    changedGlossary.markdown.includes("Reader / 阅读器") &&
+      changedGlossary.markdown.includes("Peer / 相关术语") &&
+      changedGlossary.markdown.includes("阅读器用于解释") &&
+      changedGlossary.manifest.selected_glossary_revision_digests.length === 2,
+    "changed Markdown omitted the propagated peer glossary revision"
+  );
+  helpers.state.payload.publication.glossary = [entry, peerEntry];
+  helpers.state.glossaryRevisions = new Map();
+  helpers.state.selectedGlossary = new Map([
+    [entry.entry_id, entry], [peerEntry.entry_id, peerEntry]
+  ]);
+  helpers.state.selectedGlossaryRevisions = new Map([
+    [entry.entry_id, null], [peerEntry.entry_id, null]
+  ]);
+  helpers.state.selected = new Map([
+    [fragment.fragment_id, fragment],
+    [companion.fragment_id, companion],
+    [guide.fragment_id, guide]
+  ]);
+  helpers.state.revisions = new Map([
+    [fragment.fragment_id, [fragment]],
+    [companion.fragment_id, [companion]],
+    [guide.fragment_id, [guide]]
+  ]);
+  var preparedAcrossRoles = await helpers.prepareGlossaryPropagation(
+    {base: entry, entryId: entry.entry_id}, nextEntry,
+    "2026-08-28T00:00:00.500Z"
+  );
+  assert(
+    preparedAcrossRoles.revisions.length === 3 &&
+      preparedAcrossRoles.manifest.fragments.length === 3 &&
+      preparedAcrossRoles.revisions.map(function (item) {
+        return item.metadata.role;
+      }).sort().join(",") === "companion,guide,translation",
+    "glossary propagation did not version all authored reading-aid roles"
+  );
+  helpers.state.selected = new Map([[fragment.fragment_id, fragment]]);
+  helpers.state.revisions = new Map([[fragment.fragment_id, [fragment]]]);
+  helpers.validateStoredGlossaryMentions(
+    Object.assign({}, prepared.revisions[0].metadata, {
+      markdown_body: prepared.revisions[0].markdown
+    }),
+    prepared.revisions[0].markdown,
+    [nextEntry]
+  );
+  var manuallyEdited = JSON.parse(JSON.stringify(fragment));
+  manuallyEdited.provenance = {producer: "alc-translate"};
+  helpers.updateGlossaryMentionProvenance(
+    manuallyEdited.provenance, manuallyEdited, "补充说明：读者。", [entry]
+  );
+  assert(
+    manuallyEdited.provenance.glossary_mentions.length === 1 &&
+      manuallyEdited.provenance.glossary_mentions[0].markdown_start === 5,
+    "manual translation edit did not rebuild shifted mention ranges"
+  );
+  var definitionOnly = await helpers.prepareGlossaryPropagation(
+    {base: entry, entryId: entry.entry_id},
+    Object.assign({}, entry, {definition: "修订解释。"}),
+    "2026-08-28T00:00:01.000Z"
+  );
+  assert(
+    definitionOnly.revisions.length === 0 &&
+      definitionOnly.glossaryRevisions.length === 0 &&
+      definitionOnly.manifest === null,
+    "definition-only glossary edit generated Fragment work"
+  );
+
+  var crossingFragment = Object.assign({}, fragment, {
+    fragment_id: "translation-crossing",
+    markdown_body: "甲乙丙丁",
+    semantic_digest: "2".repeat(64)
+  });
+  helpers.state.payload.publication.glossary = [
+    entry, crossingLeft, crossingRight
+  ];
+  helpers.state.glossaryBase = [entry, crossingLeft, crossingRight];
+  helpers.state.selected = new Map([
+    [fragment.fragment_id, fragment],
+    [crossingFragment.fragment_id, crossingFragment]
+  ]);
+  helpers.state.revisions = new Map([
+    [fragment.fragment_id, [fragment]],
+    [crossingFragment.fragment_id, [crossingFragment]]
+  ]);
+  var unrelatedPrepared = await helpers.prepareGlossaryPropagation(
+    {base: entry, entryId: entry.entry_id}, nextEntry,
+    "2026-08-28T00:00:01.500Z"
+  );
+  assert(
+    unrelatedPrepared.revisions.length === 1 &&
+      unrelatedPrepared.revisions[0].metadata.fragment_id === fragment.fragment_id,
+    "an unrelated crossing glossary range blocked a safe glossary edit"
+  );
+  var targetCrossingRejected = false;
+  try {
+    await helpers.prepareGlossaryPropagation(
+      {base: crossingLeft, entryId: crossingLeft.entry_id},
+      Object.assign({}, crossingLeft, {translated_term: "甲乙丙新"}),
+      "2026-08-28T00:00:02.000Z"
+    );
+  } catch (error) {
+    targetCrossingRejected = error.message.includes(
+      "glossary propagation found overlapping term mentions"
+    );
+  }
+  assert(
+    targetCrossingRejected,
+    "a true crossing range involving the edited glossary entry was accepted"
+  );
+  helpers.state.payload.publication.glossary = [entry];
+  helpers.state.glossaryBase = [entry];
+  helpers.state.selected = new Map([[fragment.fragment_id, fragment]]);
+  helpers.state.revisions = new Map([[fragment.fragment_id, [fragment]]]);
+
+  var baseDigest = await helpers.canonicalDigest(
+    helpers.glossaryBaseMaterial(entry)
+  );
+  helpers.state.glossaryBaseDigests = new Map([[entry.entry_id, baseDigest]]);
+  var glossaryRevision = {
+    schema_version: "alc.render.glossary_revision.v1",
+    entry_id: entry.entry_id,
+    revision: 2,
+    parent_semantic_digest: baseDigest,
+    entry: nextEntry,
+    provenance: {
+      producer: "alc-render-browser",
+      propagation: prepared.manifest
+    },
+    semantic_digest: "e".repeat(64)
+  };
+  var equivalentRetry = Object.assign({}, glossaryRevision, {
+    provenance: {producer: "alc-render-browser", attempt: "retry"},
+    semantic_digest: "f".repeat(64)
+  });
+  var equivalentSuccessor = Object.assign({}, equivalentRetry, {
+    revision: 3,
+    parent_semantic_digest: equivalentRetry.semantic_digest,
+    entry: Object.assign({}, nextEntry, {definition: "continued"}),
+    semantic_digest: "1".repeat(64)
+  });
+  var equivalentMap = new Map([[entry.entry_id, [
+    glossaryRevision, equivalentRetry, equivalentSuccessor
+  ]]]);
+  var equivalentChain = helpers.structurallySelectedGlossaryChains(
+    equivalentMap
+  )[0];
+  assert(
+    equivalentChain.length === 2 &&
+      equivalentChain[0].semantic_digest === equivalentRetry.semantic_digest &&
+      equivalentChain[1].semantic_digest === equivalentSuccessor.semantic_digest,
+    "content-equivalent glossary retry did not follow its unique successor"
+  );
+  var fragmentRevision = Object.assign({}, prepared.revisions[0].metadata, {
+    markdown_body: prepared.revisions[0].markdown,
+    semantic_digest: prepared.revisions[0].digest
+  });
+  assert(
+    helpers.projectedRevisionMarkdown(fragmentRevision) === replaced,
+    "Markdown export path did not consume the materialized Fragment body"
+  );
+  var fragmentRevisions = new Map([[fragment.fragment_id, [fragment]]]);
+  var accepted = helpers.buildCommittedGlossarySnapshot(
+    [glossaryRevision],
+    new Map([[glossaryRevision.semantic_digest, [fragmentRevision]]]),
+    fragmentRevisions,
+    []
+  );
+  assert(
+    accepted.batchRevisions.length === 1 &&
+      accepted.revisions.get(entry.entry_id).length === 1,
+    "complete propagation batch was not admitted atomically"
+  );
+  var peerRevision = Object.assign(
+    {}, prepared.glossaryRevisions[0].metadata, {
+      semantic_digest: prepared.glossaryRevisions[0].digest
+    }
+  );
+  helpers.state.glossaryBase = [entry, peerEntry];
+  helpers.state.glossaryBaseDigests = new Map([
+    [entry.entry_id, baseDigest], [peerEntry.entry_id, peerBaseDigest]
+  ]);
+  var acceptedWithPeer = helpers.buildCommittedGlossarySnapshot(
+    [glossaryRevision, peerRevision],
+    new Map([[glossaryRevision.semantic_digest, {
+      fragments: [fragmentRevision],
+      glossaryRevisions: [peerRevision]
+    }]]),
+    fragmentRevisions,
+    []
+  );
+  assert(
+    acceptedWithPeer.batchRevisions.length === 1 &&
+      acceptedWithPeer.revisions.get(peerEntry.entry_id).some(function (item) {
+        return item.semantic_digest === peerRevision.semantic_digest;
+      }),
+    "peer glossary revision was not admitted with its commit marker"
+  );
+  var missingPeer = helpers.buildCommittedGlossarySnapshot(
+    [glossaryRevision],
+    new Map([[glossaryRevision.semantic_digest, {
+      fragments: [fragmentRevision],
+      glossaryRevisions: [peerRevision]
+    }]]),
+    fragmentRevisions,
+    []
+  );
+  assert(
+    !missingPeer.revisions.has(entry.entry_id) &&
+      missingPeer.batchRevisions.length === 0,
+    "commit marker survived a missing peer glossary member"
+  );
+  helpers.state.glossaryBase = [entry];
+  helpers.state.glossaryBaseDigests = new Map([[entry.entry_id, baseDigest]]);
+
+  var manualV3 = Object.assign({}, fragment, {
+    revision: 3,
+    parent_semantic_digest: fragmentRevision.semantic_digest,
+    markdown_body: "补充：阅读器。",
+    semantic_digest: "6".repeat(64)
+  });
+  var batch2 = "glossary-follow-up";
+  var fragmentV4 = Object.assign({}, fragmentRevision, {
+    revision: 4,
+    parent_semantic_digest: manualV3.semantic_digest,
+    markdown_body: "补充：阅读界面。",
+    semantic_digest: "7".repeat(64),
+    provenance: Object.assign({}, fragmentRevision.provenance, {
+      propagation_batch_id: batch2,
+      glossary_mentions: [{
+        entry_id: entry.entry_id,
+        markdown_start: 3,
+        markdown_end: 7,
+        surface: "阅读界面"
+      }]
+    })
+  });
+  var followUpManifest = {
+    schema_version: "alc.render.glossary_propagation.v1",
+    batch_id: batch2,
+    fragments: [{
+      path: "glossary-batches/" + batch2 + "/fragments/" +
+        "revision-000004-" + fragmentV4.semantic_digest + ".md",
+      fragment_id: fragmentV4.fragment_id,
+      revision: fragmentV4.revision,
+      parent_semantic_digest: fragmentV4.parent_semantic_digest,
+      semantic_digest: fragmentV4.semantic_digest
+    }]
+  };
+  var glossaryV3 = {
+    schema_version: "alc.render.glossary_revision.v1",
+    entry_id: entry.entry_id,
+    revision: 3,
+    parent_semantic_digest: glossaryRevision.semantic_digest,
+    entry: Object.assign({}, entry, {translated_term: "阅读界面"}),
+    provenance: {producer: "alc-render-browser", propagation: followUpManifest},
+    semantic_digest: "8".repeat(64)
+  };
+  var followed = helpers.buildCommittedGlossarySnapshot(
+    [glossaryRevision, glossaryV3],
+    new Map([
+      [glossaryRevision.semantic_digest, [fragmentRevision]],
+      [glossaryV3.semantic_digest, [fragmentV4]]
+    ]),
+    new Map([[fragment.fragment_id, [fragment, manualV3]]]),
+    []
+  );
+  assert(
+    followed.batchRevisions.length === 2 &&
+      followed.revisions.get(entry.entry_id).length === 2,
+    "follow-up glossary batch did not advance through a manual Fragment revision"
+  );
+
+  var staleFragment = Object.assign({}, fragmentRevision, {
+    parent_semantic_digest: "f".repeat(64)
+  });
+  var staleManifest = JSON.parse(JSON.stringify(prepared.manifest));
+  staleManifest.fragments[0].parent_semantic_digest = "f".repeat(64);
+  var staleGlossary = Object.assign({}, glossaryRevision, {
+    provenance: {producer: "alc-render-browser", propagation: staleManifest},
+    semantic_digest: "9".repeat(64)
+  });
+  var staleDiagnostics = [];
+  var rejected = helpers.buildCommittedGlossarySnapshot(
+    [staleGlossary],
+    new Map([[staleGlossary.semantic_digest, [staleFragment]]]),
+    fragmentRevisions,
+    staleDiagnostics
+  );
+  assert(
+    rejected.batchRevisions.length === 0 &&
+      !rejected.revisions.has(entry.entry_id) &&
+      staleDiagnostics.some(function (value) {
+        return value.includes("stale or conflicting");
+      }),
+    "stale propagation parent changed glossary state without its Fragment"
+  );
+  var staleSuccessor = Object.assign({}, staleGlossary, {
+    revision: 3,
+    parent_semantic_digest: staleGlossary.semantic_digest,
+    entry: Object.assign({}, staleGlossary.entry, {definition: "continued"}),
+    provenance: {producer: "alc-render-browser"},
+    semantic_digest: "a".repeat(64)
+  });
+  var readmitted = helpers.buildCommittedGlossarySnapshot(
+    [glossaryRevision, staleGlossary, staleSuccessor],
+    new Map([
+      [glossaryRevision.semantic_digest, [fragmentRevision]],
+      [staleGlossary.semantic_digest, [staleFragment]]
+    ]),
+    fragmentRevisions,
+    []
+  );
+  assert(
+    readmitted.batchRevisions.length === 1 &&
+      readmitted.revisions.get(entry.entry_id).some(function (item) {
+        return item.semantic_digest === glossaryRevision.semantic_digest;
+      }),
+    "an equivalent retry selected after rejection was not re-admitted"
+  );
+  var forkA = Object.assign({}, fragmentRevision, {
+    semantic_digest: "b".repeat(64)
+  });
+  var forkB = Object.assign({}, fragmentRevision, {
+    markdown_body: "另一个分支",
+    semantic_digest: "c".repeat(64)
+  });
+  var forkRejectedSnapshot = helpers.buildCommittedGlossarySnapshot(
+    [glossaryRevision],
+    new Map([[glossaryRevision.semantic_digest, [fragmentRevision]]]),
+    new Map([[fragment.fragment_id, [fragment, forkA, forkB]]]),
+    []
+  );
+  assert(
+    forkRejectedSnapshot.batchRevisions.length === 0 &&
+      !forkRejectedSnapshot.revisions.has(entry.entry_id),
+    "an existing Fragment fork was treated as a writable common parent"
+  );
+})().catch(function (error) {
+  console.error(error.stack || error);
+  process.exitCode = 1;
+});
+"""
+    )
+    completed = subprocess.run(
+        [node, "-"], input=instrumented, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_reader_markdown_supports_tables_and_glossary_math_under_node() -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node is unavailable")
@@ -49,14 +1276,23 @@ def test_reader_overlay_markdown_supports_tables_under_node() -> None:
         + "globalThis.markdownit = module.exports;\n"
         + javascript[:startup]
         + """
-  globalThis.__alcMarkdownTest = {setupMarkdown: setupMarkdown, state: state};
+  globalThis.__alcMarkdownTest = {
+    setupMarkdown: setupMarkdown,
+    markdownPlainText: markdownPlainText,
+    glossarySpeechText: glossarySpeechText,
+    buildGlossarySpeechQueue: buildGlossarySpeechQueue,
+    state: state
+  };
 }());
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 var helpers = globalThis.__alcMarkdownTest;
 helpers.state.payload = {
-  publication: {labels: {}, reader_profile: {}},
+  publication: {
+    labels: {},
+    reader_profile: {source_language: "en-US", target_language: "zh-CN"}
+  },
   resources: [],
   source_identity: null
 };
@@ -69,15 +1305,59 @@ assert(
     rendered.includes("<td>Brass</td>"),
   "overlay Markdown table was rendered as literal pipe text"
 );
+var definition = helpers.state.md.render(
+  "定义包含 **强调** 和 $H_0 = 70$。"
+);
+assert(
+  definition.includes("<strong>强调</strong>") &&
+    definition.includes('class="math math-inline"') &&
+    definition.includes('data-tex="H_0 = 70"'),
+  "glossary definition Markdown or inline math did not render"
+);
+var plainDefinition = helpers.markdownPlainText(
+  "第一段包含 **强调** 和 $H_0$。\\n\\n第二段包含 `code`。"
+);
+assert(
+  plainDefinition === "第一段包含 强调 和 H_0。\\n第二段包含 code。",
+  "glossary tooltip plain text retained Markdown delimiters: " +
+    JSON.stringify(plainDefinition)
+);
+assert(
+  helpers.glossarySpeechText({
+    term: "Hubble parameter",
+    translated_term: "哈勃参数",
+    definition: "定义为 $H_0$。"
+  }) === "哈勃参数\\n定义为 H_0。",
+  "glossary speech did not use target text and plain Markdown definition"
+);
+var glossaryQueue = helpers.buildGlossarySpeechQueue({
+  entry_id: "term-hubble",
+  term: "Hubble parameter",
+  translated_term: "哈勃参数",
+  definition: "定义为 $H_0$。"
+});
+assert(
+  glossaryQueue.length === 2 &&
+    glossaryQueue[0].text === "Hubble parameter" &&
+    glossaryQueue[0].role === "source" &&
+    glossaryQueue[0].language === "en-US" &&
+    glossaryQueue[1].text === "哈勃参数\\n定义为 H_0。" &&
+    glossaryQueue[1].role === "glossary" &&
+    glossaryQueue[1].language === "zh-CN" &&
+    glossaryQueue.every(function (segment) {
+      return segment.glossaryEntryId === "term-hubble";
+    }),
+  "glossary speech queue did not read source before translated content"
+);
 """
     )
-    subprocess.run(
+    completed = subprocess.run(
         [node, "-"],
         input=instrumented,
-        check=True,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_reader_persists_directory_handles_per_source_under_node() -> None:
@@ -163,13 +1443,13 @@ var paperHandle = {queryPermission: async function () { return "denied"; }};
 });
 """
     )
-    subprocess.run(
+    completed = subprocess.run(
         [node, "-"],
         input=instrumented,
-        check=True,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_reader_speech_uses_structured_paragraphs_and_current_viewport() -> None:
@@ -228,6 +1508,7 @@ var controls = {
 };
 var toolbarBottom = 0;
 var speechRows = {};
+var glossarySpeechRow = {};
 var statusProgress = {textContent: "", dataset: {}};
 var statusTitle = {textContent: ""};
 var statusPlayer = {
@@ -242,6 +1523,7 @@ globalThis.document = {
   documentElement: {clientHeight: 600, lang: "zh-CN"},
   getElementById: function (id) { return controls[id] || speechRows[id] || null; },
   querySelector: function (selector) {
+    if (selector.includes("data-glossary-entry-id")) return glossarySpeechRow;
     if (selector !== ".alc-fixed-tools") return null;
     return {getBoundingClientRect: function () { return {bottom: toolbarBottom}; }};
   },
@@ -255,6 +1537,11 @@ helpers.state.payload = {
     reader_profile: {source_language: "en", target_language: "zh-CN"}
   }
 };
+assert(
+  helpers.speechSegmentNode({glossaryEntryId: "term-reader"}) ===
+    glossarySpeechRow,
+  "glossary speech did not retain its active row identity"
+);
 assert(
   helpers.sourceSpeechText({kind: "paragraph", payload: {text: " A  paragraph. "}}) ===
     "A paragraph.",
@@ -1071,9 +2358,9 @@ window.clearTimeout = function (timer) {
 helpers.setStatus("Save or cancel the current edit first.", "error");
 if (
   statusControl.hidden || statusTimers.length !== 1 ||
-  statusTimers[0].delay !== 10000
+  statusTimers[0].delay !== 3000
 ) {
-  throw new Error("toolbar status did not receive a ten-second expiry");
+  throw new Error("toolbar status did not receive a three-second expiry");
 }
 helpers.setStatus("Newer status");
 if (clearedStatusTimers[0] !== 1) {
@@ -1085,7 +2372,7 @@ if (statusControl.textContent !== "Newer status" || statusControl.hidden) {
 }
 statusTimers[1].callback();
 if (statusControl.textContent || !statusControl.hidden) {
-  throw new Error("toolbar status remained visible after ten seconds");
+  throw new Error("toolbar status remained visible after three seconds");
 }
 helpers.validateRevisionMetadata({
   schema_version: "alc.render.fragment_revision.v3",
@@ -2395,6 +3682,23 @@ assert(
     nodes["alc-editor-history"].children.length > 0,
     "multi-revision fragment hid version history"
   );
+  var forkRoot = Object.assign({}, historical, {
+    fragment_id: "forked-history", semantic_digest: "1".repeat(64)
+  });
+  var forkA = Object.assign({}, first, {
+    fragment_id: "forked-history", semantic_digest: "2".repeat(64)
+  });
+  var forkB = Object.assign({}, first, {
+    fragment_id: "forked-history", semantic_digest: "3".repeat(64)
+  });
+  helpers.state.revisions.set("forked-history", [forkRoot, forkA, forkB]);
+  helpers.renderHistory("forked-history");
+  var forkLabels = nodes["alc-editor-history"].children[0].children.slice(1)
+    .map(function (button) { return button.textContent; });
+  assert(
+    forkLabels.join(",") === "v1,v2 · 2222222,v2 · 3333333",
+    "same-version history branches remained indistinguishable"
+  );
   helpers.state.revisions.set("single", [Object.assign({}, historical, {
     fragment_id: "single"
   })]);
@@ -2518,6 +3822,7 @@ assert(
   });
   assert(
     nodes["alc-editor-dialog"].open &&
+      nodes["alc-editor-dialog"].dataset.editorKind === "fragment" &&
       nodes["alc-editor-markdown"].value === "latest inline draft",
     "Advanced did not open on the latest inline draft"
   );
@@ -2770,6 +4075,7 @@ var externalValue = null;
 var externalStamp = 1;
 var entries = [];
 var failEnumeration = false;
+var glossaryRequests = 0;
 var embeddedEntry = {
   kind: "file",
   name: helpers.revisionFilename(1, baseDigest),
@@ -2802,6 +4108,10 @@ var fragments = {
 };
 var directory = {
   getDirectoryHandle: function (name) {
+    if (name === "glossary") {
+      glossaryRequests += 1;
+      return Promise.reject(Object.assign(new Error("missing"), {name: "NotFoundError"}));
+    }
     if (name !== "fragments") throw new Error("unexpected directory: " + name);
     return Promise.resolve(fragments);
   }
@@ -2825,6 +4135,7 @@ function encode(metadata, markdown) {
   entries = [embeddedEntry, externalEntry];
 
   assert(await helpers.loadDirectoryRevisions(directory), "first sync did not commit");
+  assert(glossaryRequests === 1, "legacy payload skipped the glossary directory scan");
   assert(embeddedReads === 0, "embedded revision was read from disk");
   assert(externalGetFileCalls === 1 && externalTextCalls === 1, "external revision was not read once");
   assert(helpers.state.selected.get("note-1").revision === 2, "external child was not selected");
@@ -3561,7 +4872,7 @@ helpers.state.payload = {
     },
     outline: [],
     glossary: [
-      {entry_id: "term-reader", term: "Reader", translated_term: "读者", definition: "阅读者", anchor_ids: ["paragraph"], citations: []},
+      {entry_id: "term-reader", term: "Reader", translated_term: "读者", definition: "[术语附件](report.json)", anchor_ids: ["paragraph"], citations: []},
       {entry_id: "term-opaque", extra: "kept"}
     ],
     bibliography: [
@@ -3649,6 +4960,10 @@ helpers.state.selected = new Map([
   assert(markdown.includes("> Marker-bound note"), "note before a technical marker was dropped");
   assert(!markdown.includes("PDF_PAGE") && !markdown.includes("internal parser marker"), "technical marker leaked into Markdown");
   assert(markdown.includes("## 术语表") && markdown.includes("Reader / 读者"), "glossary was omitted");
+  assert(
+    markdown.includes("[术语附件](" + reportPath + ")"),
+    "glossary definition resource link was not rewritten"
+  );
   assert(markdown.includes('"extra":"kept"'), "unknown glossary data was dropped");
   assert(!markdown.includes('"anchor_ids"'), "glossary leaked internal anchor metadata");
   assert(markdown.includes("## 参考文献"), "bibliography was omitted");
@@ -3716,8 +5031,9 @@ helpers.state.selected = new Map([
     "glossary-only export included document or bibliography content"
   );
   assert(
-    glossaryOnlyPackage.manifest.resources.length === 0,
-    "glossary-only package retained unrelated publication resources"
+    glossaryOnlyPackage.manifest.resources.length === 1 &&
+      glossaryOnlyPackage.manifest.resources[0].path === reportPath,
+    "glossary-only package omitted its referenced resource"
   );
   var referencesOnlyPackage = helpers.buildMarkdownPackage(
     "all", new Set(["references"])
@@ -3936,6 +5252,7 @@ def test_export_panel_syncs_external_changes_before_building_roles() -> None:
   globalThis.__alcReaderTest = {
     state: state,
     openExportPanel: openExportPanel,
+    prepareGlossary: prepareGlossary,
     renderExportOptions: renderExportOptions,
     semanticDigest: semanticDigest,
     stableStringify: stableStringify
@@ -4049,6 +5366,7 @@ globalThis.document = {
 };
 
 (async function () {
+  await helpers.prepareGlossary();
   var metadata = {
     schema_version: "alc.render.fragment_revision.v3",
     source: source,
@@ -4086,6 +5404,9 @@ globalThis.document = {
   };
   helpers.state.directory = {
     getDirectoryHandle: function (name) {
+      if (name === "glossary") {
+        return Promise.reject(Object.assign(new Error("missing"), {name: "NotFoundError"}));
+      }
       assert(name === "fragments", "export sync requested the wrong directory");
       return Promise.resolve(fragments);
     }
@@ -4179,13 +5500,13 @@ globalThis.document = {
 """
     )
 
-    subprocess.run(
+    completed = subprocess.run(
         [node, "-"],
         input=instrumented,
-        check=True,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_reader_rebuilds_directory_state_and_guards_revision_lineage() -> None:
@@ -4205,11 +5526,35 @@ def test_reader_rebuilds_directory_state_and_guards_revision_lineage() -> None:
     assert "await loadDirectoryRevisions(handle)" in javascript
     assert "current.semantic_digest !== base.semantic_digest" in javascript
     assert "nextChildren.length > 0" in javascript
+    assert "!state.activeDraft && !state.activeGlossaryDraft" in javascript
     assert "throw new Error(labels().historyChanged)" in javascript
     assert "var folder = await fragmentsDirectory(true);" in javascript
     assert "async function fragmentsDirectory(create)" in javascript
     assert "getDirectoryHandle(fragmentId" not in javascript
     assert "fragmentDirectory(metadata.fragment_id" not in javascript
+    assert "Array.isArray(state.payload.glossary_revisions)" not in javascript
+    glossary_save = javascript[
+        javascript.index("async function persistGlossaryEditor") :
+        javascript.index("function deleteEditor")
+    ]
+    assert glossary_save.index("loadAllPayload(false);") < glossary_save.index(
+        "prepareGlossaryPropagation(draft, entry, editedAt)"
+    )
+    assert glossary_save.index(
+        "var previousSelected = new Map(state.selected);"
+    ) < glossary_save.index(
+        "refreshChangedSelections(previousSelected);"
+    ) < glossary_save.index(
+        "refreshGlossarySurfaces(previousGlossary);"
+    )
+    directory_loader = javascript[
+        javascript.index("async function loadDirectoryRevisions") :
+        javascript.index("function commitDirectorySnapshot")
+    ]
+    assert directory_loader.index("loadAllPayload(false);") < directory_loader.index(
+        "var revisions = new Map();"
+    )
+    assert directory_loader.count("state.embeddedRevisions.forEach") == 1
 
 
 def test_reader_enforces_strict_browser_revision_contract() -> None:
@@ -4246,6 +5591,7 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert "await restoreDirectoryHandle();" in javascript
     assert "await setupEditor();" in javascript
     assert "alc-history-compare" in javascript
+    assert "historyRevisionLabel" in javascript
     assert "restoreHistoricalRevision" in javascript
     assert (
         '"alc-note-button alc-icon-button", "+", labels().addNote'
@@ -4254,6 +5600,76 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert "alc-edit-button" not in javascript
     assert "beginInlineEdit" in javascript
     assert "openAdvancedEditor" in javascript
+    assert "renderGlossaryRow" in javascript
+    assert "alc-glossary-inline-input" in javascript
+    assert "alc-glossary-inline-definition" in javascript
+    assert "focusGlossaryInlineEditor" in javascript
+    assert "renderGlossaryDefinition" in javascript
+    assert "markdownPlainText(entry.definition" in javascript
+    assert "renderGlossaryCardActions" in javascript
+    assert "playGlossarySpeech" in javascript
+    assert "alc-glossary-card-actions" in stylesheet
+    assert "alc-glossary-inline-column-header" in stylesheet
+    assert ".alc-glossary-edit" not in stylesheet
+    assert "alc-fragment-actions alc-inline-actions" in javascript
+    assert 'glossaryTerm: traditional ? "術語" : "术语"' in javascript
+    assert "GLOSSARY_DISPLAY_WEIGHT" not in javascript
+    assert "strings.glossaryTerm + \" · v\"" in javascript
+    assert 'glossarySourceReadOnly: "原文（不可修改）"' in javascript
+    assert "预览与更多设置" not in javascript
+    assert "Preview and more settings" not in javascript
+    assert '"你已修改当前内容，是否保存？"' in javascript
+    assert 'saveBeforeExit: "You changed the current content. Save it?"' in javascript
+    assert "可以保存修改并退出" not in javascript
+    assert "Save the changes before leaving this editor" not in javascript
+    assert 'dialog.dataset.editorKind = glossaryMode ? "glossary" : "fragment"' in javascript
+    assert 'control.setAttribute("aria-label", labelText)' in javascript
+    assert "alc-glossary-inline-label" not in javascript
+    assert "alc-glossary-inline-label" not in stylesheet
+    assert "alc-glossary-inline-column" in javascript
+    assert "background: var(--alc-translation-bg);" in stylesheet
+    assert "alc-glossary-inline-source-value" in stylesheet
+    assert "alc-glossary-inline-mobile-actions" in javascript
+    assert "alc-glossary-inline-desktop-actions" in javascript
+    assert 'event.target.closest(".alc-glossary-translation")' in javascript
+    assert 'focusField === "translation" ?' in javascript
+    assert (
+        '"textarea", "alc-inline-markdown alc-glossary-inline-definition"'
+        in javascript
+    )
+    assert "height: 8rem;" in stylesheet
+    assert "max-height: 8rem;" in stylesheet
+    assert "#alc-editor-glossary-source" in stylesheet
+    assert "background: #e7eaed;" in stylesheet
+    assert "cursor: not-allowed;" in stylesheet
+    assert "align-items: center;" in stylesheet
+    assert (
+        ".alc-inline-actions.alc-glossary-inline-mobile-actions { display: none; }"
+        in stylesheet
+    )
+    assert "grid-template-rows: auto auto;" in stylesheet
+    assert "height: auto;" in stylesheet
+    assert ".alc-glossary-inline-input:focus-visible" not in stylesheet
+    assert ".alc-glossary-inline-definition:focus-visible" not in stylesheet
+    assert ".alc-dialog-form::-webkit-scrollbar { width: 6px; }" in stylesheet
+    assert "scrollbar-color: transparent transparent;" in stylesheet
+    assert "rgb(79 120 150 / 55%)" in stylesheet
+    assert ".alc-dialog-form:focus-within::-webkit-scrollbar-thumb" in stylesheet
+    assert ".alc-glossary-row.is-inline-editing" in stylesheet
+    assert ".alc-glossary-inline-input" in stylesheet
+    assert ".alc-glossary-inline-definition" in stylesheet
+    assert "html { scroll-behavior: auto; }" in stylesheet
+    assert "html { scroll-behavior: smooth; }" not in stylesheet
+    assert ".alc-storage-status" in stylesheet
+    assert "left: 50%;" in stylesheet
+    assert "transform: translateX(-50%);" in stylesheet
+    assert ".alc-editor-error" in stylesheet
+    assert '.alc-dialog-fields input[aria-invalid="true"]' in stylesheet
+    assert 'showGlossaryValidationError(labels().glossaryTranslatedRequired)' in javascript
+    assert "!activeGlossaryDraftValid()" not in javascript[
+        javascript.index("function updateDraftSaveButtons") :
+        javascript.index("function assertEditorBaseCurrent")
+    ]
     assert "openNewSectionEditor" not in javascript
     assert ".alc-history-compare" in stylesheet
     assert ".alc-section-note-button" not in stylesheet
@@ -4271,6 +5687,8 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert "position: fixed" in stylesheet
     assert "width: min(29rem, calc(100vw - 2rem))" in stylesheet
     assert "height: min(39.5rem, calc(100dvh - 2rem))" in stylesheet
+    assert '.alc-dialog[data-editor-kind="glossary"] { height: fit-content; }' in stylesheet
+    assert '.alc-dialog[data-editor-kind="glossary"] .alc-dialog-form' in stylesheet
     assert "newSaveLocation" in javascript
     assert "changeSaveLocation" in javascript
     assert "buildStandaloneExportHtml" in javascript
@@ -4487,6 +5905,18 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert 'window.addEventListener("beforeunload", guardUnsavedDraftBeforeUnload)' in javascript
     assert "min-height: 2.25rem;\n  padding: .35rem .7rem;" in stylesheet
     assert ".alc-unsaved-dialog button[data-initial-focus]:focus-visible" in stylesheet
+    assert "#alc-editor-glossary-source" in stylesheet
+    assert "cursor: text" in stylesheet
+    math_display = stylesheet[
+        stylesheet.index(".math-display {") :
+        stylesheet.index(".alc-equation-row {")
+    ]
+    assert "overflow-x: auto" in math_display
+    assert "scrollbar-color: transparent transparent" in math_display
+    assert "scrollbar-width: thin" in math_display
+    assert ".math-display::-webkit-scrollbar { height: 6px; }" in math_display
+    assert ".math-display:hover" in math_display
+    assert ".math-display:hover::-webkit-scrollbar-thumb" in math_display
     assert "root._alcSpeechQueue === queue" in javascript
     assert "var items = document.createDocumentFragment();" in javascript
     assert "width: 1.1rem;\n  height: 1.1rem;" in stylesheet
@@ -4913,9 +6343,13 @@ def test_reader_hydrates_external_revision_anchor_before_validation() -> None:
         javascript.index("function commitDirectorySnapshot")
     ]
     outcomes = directory_loader.index("var outcomes =")
-    assert directory_loader.index(
-        "state.embeddedRevisions.forEach(function (revision)", outcomes
-    ) > outcomes
+    embedded = directory_loader.index(
+        "state.embeddedRevisions.forEach(function (revision)"
+    )
+    assert 0 <= embedded < outcomes
+    assert directory_loader.count(
+        "state.embeddedRevisions.forEach(function (revision)"
+    ) == 1
     startup = javascript.rfind("\n  if (document.readyState")
     assert startup > 0
     instrumented = (

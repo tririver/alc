@@ -30,6 +30,21 @@ from .contracts import (
     publication_to_document,
     source_identity_to_document,
 )
+from .glossary import (
+    GLOSSARY_MENTIONS_SCHEMA,
+    GLOSSARY_REVISION_DIRECTORY,
+    GlossaryRevision,
+    glossary_base_semantic_digest,
+    glossary_entry_is_editable,
+    glossary_propagation_fragments,
+    glossary_propagation_glossary_revisions,
+    glossary_revision_from_document,
+    glossary_revision_to_document,
+    parse_glossary_revision_filename,
+    read_glossary_revision,
+    resolve_glossary_revisions,
+    validate_glossary_revision,
+)
 from .markdown import extract_markdown_citation_ids, read_fragment_revision
 from .resolver import (
     RevisionDiagnostic,
@@ -56,6 +71,7 @@ _CSS_URL_PATTERN = re.compile(
     r"(?P<plain>[^)]*))\s*\)",
     re.IGNORECASE,
 )
+_GLOSSARY_PROPAGATION_ROLES = frozenset({"translation", "companion", "guide"})
 
 
 class HTMLRenderError(RuntimeError):
@@ -69,6 +85,7 @@ class RenderedHTML:
     selected_revision_digests: tuple[str, ...]
     warnings: tuple[str, ...] = ()
     renderer_recipe: str = HTML_RENDER_RECIPE
+    selected_glossary_revision_digests: tuple[str, ...] = ()
 
 
 EDITION_DIGEST_SCHEMA = "alc.render.edition.v1"
@@ -89,6 +106,14 @@ class PublicationWorkspaceState:
     diagnostics: tuple[RevisionDiagnostic, ...]
     publication_digest: str
     edition_digest: str
+    glossary_revisions: tuple[GlossaryRevision, ...] = ()
+    selected_glossary_revision_digests: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _LoadedGlossaryPropagationBatch:
+    fragments: tuple[tuple[Path, FragmentRevision], ...] = ()
+    glossary_revisions: tuple[tuple[Path, GlossaryRevision], ...] = ()
 
 
 def publication_edition_digest(
@@ -157,20 +182,34 @@ def read_publication_workspace_state(
         publication = read_publication(source_path)
     except RenderWorkspaceError as exc:
         raise HTMLRenderError(str(exc)) from exc
-    revisions, selected, diagnostics = _load_revisions(
+    base_revisions, _base_selected, _base_diagnostics = _load_revisions(
         publication, source_path.parent
+    )
+    glossary_revisions, selected_glossary, glossary_diagnostics, batch_paths = (
+        _load_glossary_revisions(
+            publication, source_path.parent, base_revisions
+        )
+    )
+    revisions, selected, diagnostics = _load_revisions(
+        publication, source_path.parent, additional_paths=batch_paths
     )
     _validate_selected(publication, selected)
     selected_digests = tuple(item.semantic_digest for item in selected)
+    selected_glossary_digests = tuple(
+        item.semantic_digest for item in selected_glossary
+    )
     return PublicationWorkspaceState(
         publication=publication,
         revisions=revisions,
         selected_revisions=selected,
         selected_revision_digests=selected_digests,
-        diagnostics=diagnostics,
+        glossary_revisions=glossary_revisions,
+        selected_glossary_revision_digests=selected_glossary_digests,
+        diagnostics=diagnostics + glossary_diagnostics,
         publication_digest=publication.publication_digest,
         edition_digest=publication_edition_digest(
-            publication.publication_digest, selected_digests
+            publication.publication_digest,
+            selected_digests,
         ),
     )
 
@@ -190,7 +229,15 @@ def render_html(
     if not root.is_dir():
         raise HTMLRenderError(f"publication project root is missing: {root}")
     output = Path(output_path).resolve()
-    revisions, selected, diagnostics = _load_revisions(publication, root)
+    base_revisions, _base_selected, _base_diagnostics = _load_revisions(
+        publication, root
+    )
+    glossary_revisions, selected_glossary, glossary_diagnostics, batch_paths = (
+        _load_glossary_revisions(publication, root, base_revisions)
+    )
+    revisions, selected, diagnostics = _load_revisions(
+        publication, root, additional_paths=batch_paths
+    )
     _validate_selected(publication, selected)
     resources = _embedded_resources(
         publication,
@@ -202,7 +249,11 @@ def render_html(
         revisions=revisions,
         selected=selected,
         resources=resources,
-        diagnostics=diagnostics,
+        glossary_revisions=glossary_revisions,
+        selected_glossary_revision_digests=tuple(
+            item.semantic_digest for item in selected_glossary
+        ),
+        diagnostics=diagnostics + glossary_diagnostics,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -220,13 +271,16 @@ def render_html(
     validate_standalone_html(publication, output)
     warnings = tuple(
         _diagnostic_text(item)
-        for item in diagnostics
+        for item in (*diagnostics, *glossary_diagnostics)
     )
     return RenderedHTML(
         publication_digest=publication.publication_digest,
         html_path=output,
         selected_revision_digests=tuple(
             item.semantic_digest for item in selected
+        ),
+        selected_glossary_revision_digests=tuple(
+            item.semantic_digest for item in selected_glossary
         ),
         warnings=warnings,
     )
@@ -306,7 +360,16 @@ def validate_standalone_html(
     if actual != expected:
         raise HTMLRenderError("standalone HTML source block order is invalid")
     _validate_reader_resources(publication, payload)
-    selected = _validate_reader_revisions(publication, payload)
+    fragment_revisions: list[FragmentRevision] = []
+    selected = _validate_reader_revisions(
+        publication, payload, all_revisions=fragment_revisions
+    )
+    _validate_reader_glossary_revisions(
+        publication,
+        payload,
+        fragment_revisions=fragment_revisions,
+        selected_fragments=selected,
+    )
     actual_selected = tuple(item.semantic_digest for item in selected)
     if expected_selected is not None and actual_selected != expected_selected:
         raise HTMLRenderError(
@@ -329,6 +392,8 @@ def validate_standalone_html(
 def _load_revisions(
     publication: Publication,
     root: Path,
+    *,
+    additional_paths: Sequence[Path] = (),
 ) -> tuple[
     tuple[FragmentRevision, ...],
     tuple[FragmentRevision, ...],
@@ -416,6 +481,19 @@ def _load_revisions(
             if fragment_id not in fragment_order:
                 fragment_order.append(fragment_id)
 
+    for candidate in additional_paths:
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root.resolve())
+            revision = read_fragment_revision(resolved)
+        except (ValueError, OSError) as exc:
+            raise HTMLRenderError(
+                f"committed glossary propagation Fragment is invalid: {candidate}"
+            ) from exc
+        paths_by_fragment[revision.fragment_id].append(resolved)
+        if revision.fragment_id not in fragment_order:
+            fragment_order.append(revision.fragment_id)
+
     revisions: list[FragmentRevision] = []
     selected: list[FragmentRevision] = []
     diagnostics: list[RevisionDiagnostic] = []
@@ -450,6 +528,454 @@ def _load_revisions(
         key=lambda item: (item.priority, order_index[item.fragment_id])
     )
     return tuple(revisions), tuple(selected), tuple(diagnostics)
+
+
+def _load_glossary_revisions(
+    publication: Publication,
+    root: Path,
+    fragment_revisions: Sequence[FragmentRevision],
+) -> tuple[
+    tuple[GlossaryRevision, ...],
+    tuple[GlossaryRevision, ...],
+    tuple[RevisionDiagnostic, ...],
+    tuple[Path, ...],
+]:
+    """Load optional glossary history without changing the base publication."""
+
+    glossary_root = root / GLOSSARY_REVISION_DIRECTORY
+    if not glossary_root.exists():
+        return (), (), (), ()
+    if not glossary_root.is_dir():
+        raise HTMLRenderError("project glossary path is not a directory")
+    project_root = root.resolve()
+    try:
+        glossary_root.resolve().relative_to(project_root)
+    except ValueError as exc:
+        raise HTMLRenderError("project glossary path escapes the project") from exc
+
+    grouped: dict[str, list[GlossaryRevision]] = defaultdict(list)
+    batches: dict[str, _LoadedGlossaryPropagationBatch] = {}
+    diagnostics: list[RevisionDiagnostic] = []
+    glossary_paths = [
+        *glossary_root.rglob("*.md"),
+        *glossary_root.rglob("*.json"),
+    ]
+    for path in sorted(glossary_paths):
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(project_root)
+        except ValueError:
+            diagnostics.append(
+                RevisionDiagnostic(
+                    code="glossary_path_escapes_project",
+                    message="ignored glossary revision outside the project",
+                    paths=(str(path),),
+                )
+            )
+            continue
+        path = resolved_path
+        claimed_revision: int | None = None
+        try:
+            claimed_revision, _ = parse_glossary_revision_filename(path.name)
+            revision = read_glossary_revision(path)
+        except ValueError as exc:
+            diagnostics.append(
+                RevisionDiagnostic(
+                    code="malformed_glossary_revision",
+                    message=f"ignored malformed glossary revision: {exc}",
+                    revision=claimed_revision,
+                    paths=(str(path),),
+                )
+            )
+            continue
+        try:
+            batch = _load_glossary_propagation_batch(publication, root, revision)
+        except (HTMLRenderError, ValueError) as exc:
+            diagnostics.append(
+                RevisionDiagnostic(
+                    code="incomplete_glossary_propagation",
+                    message=f"ignored incomplete glossary propagation: {exc}",
+                    revision=revision.revision,
+                    paths=(str(path),),
+                )
+            )
+            continue
+        grouped[revision.entry_id].append(revision)
+        if batch.fragments or batch.glossary_revisions:
+            batches[revision.semantic_digest] = batch
+
+    dependent_owners: dict[str, str] = {}
+    for owner_digest, batch in batches.items():
+        for _path, dependent in batch.glossary_revisions:
+            grouped[dependent.entry_id].append(dependent)
+            dependent_owners[dependent.semantic_digest] = owner_digest
+
+    known_ids: set[str] = set()
+    entries_by_id: dict[str, Mapping[str, object]] = {}
+    for entry in publication.glossary:
+        raw_entry_id = entry.get("entry_id")
+        if (
+            not isinstance(raw_entry_id, str)
+            or not glossary_entry_is_editable(entry)
+            or raw_entry_id in known_ids
+        ):
+            if isinstance(raw_entry_id, str) and raw_entry_id in known_ids:
+                diagnostics.append(
+                    RevisionDiagnostic(
+                        code="duplicate_glossary_entry",
+                        message="publication repeats a glossary entry ID; history was not selected twice",
+                    )
+                )
+            continue
+        known_ids.add(raw_entry_id)
+        entries_by_id[raw_entry_id] = entry
+
+    for entry_id, revisions in sorted(grouped.items()):
+        if entry_id in entries_by_id:
+            continue
+        diagnostics.append(
+            RevisionDiagnostic(
+                code="foreign_glossary_entry",
+                message=f"ignored glossary history for an entry absent from the publication: {entry_id}",
+                revision=min(item.revision for item in revisions),
+            )
+        )
+
+    accepted_batches: tuple[
+        tuple[GlossaryRevision, _LoadedGlossaryPropagationBatch], ...
+    ] = ()
+    while True:
+        provisional_chains: list[tuple[GlossaryRevision, ...]] = []
+        for entry_id, entry in entries_by_id.items():
+            resolution = resolve_glossary_revisions(
+                entry, grouped.get(entry_id, ()), initial_diagnostics=()
+            )
+            provisional_chains.append(_selected_glossary_chain(resolution))
+        selected_chain_digests = {
+            revision.semantic_digest
+            for chain in provisional_chains
+            for revision in chain
+        }
+        selected_batches = [
+            (revision, batches[revision.semantic_digest])
+            for chain in provisional_chains
+            for revision in chain
+            if revision.semantic_digest in batches
+        ]
+        rejected = {
+            revision.semantic_digest
+            for revision, batch in selected_batches
+            if any(
+                dependent.semantic_digest not in selected_chain_digests
+                for _path, dependent in batch.glossary_revisions
+            )
+        }
+        rejected.update(
+            digest
+            for digest, owner_digest in dependent_owners.items()
+            if digest in selected_chain_digests
+            and owner_digest not in selected_chain_digests
+        )
+        admissible = [
+            batch
+            for batch in selected_batches
+            if batch[0].semantic_digest not in rejected
+        ]
+        accepted_batches, fragment_rejected = _admit_glossary_batches(
+            fragment_revisions, admissible
+        )
+        rejected.update(fragment_rejected)
+        rejected.update(
+            dependent.semantic_digest
+            for owner, batch in selected_batches
+            if owner.semantic_digest in rejected
+            for _path, dependent in batch.glossary_revisions
+        )
+        if not rejected:
+            break
+        for entry_id, values in tuple(grouped.items()):
+            by_digest = {item.semantic_digest: item for item in values}
+            grouped[entry_id] = [
+                item
+                for item in values
+                if not _glossary_revision_descends_from(
+                    item, rejected, by_digest
+                )
+            ]
+        for glossary_revision, _batch in selected_batches:
+            if glossary_revision.semantic_digest in rejected:
+                diagnostics.append(
+                    RevisionDiagnostic(
+                        code="stale_glossary_propagation_parent",
+                        message=(
+                            "ignored glossary propagation with a stale or "
+                            "conflicting batch member parent"
+                        ),
+                        severity="conflict",
+                        revision=glossary_revision.revision,
+                    )
+                )
+
+    all_revisions: list[GlossaryRevision] = []
+    selected: list[GlossaryRevision] = []
+    selected_chain_digests: set[str] = set()
+    for entry_id, entry in entries_by_id.items():
+        resolution = resolve_glossary_revisions(
+            entry, grouped.get(entry_id, ()), initial_diagnostics=()
+        )
+        all_revisions.extend(resolution.revisions)
+        diagnostics.extend(resolution.diagnostics)
+        chain = _selected_glossary_chain(resolution)
+        selected_chain_digests.update(item.semantic_digest for item in chain)
+        if resolution.selected is not None:
+            selected.append(resolution.selected)
+
+    batch_paths = tuple(
+        path
+        for glossary_revision, batch in accepted_batches
+        if glossary_revision.semantic_digest in selected_chain_digests
+        for path, _fragment in batch.fragments
+    )
+    all_revisions.sort(key=lambda item: (item.entry_id, item.revision, item.semantic_digest))
+    return (
+        tuple(all_revisions),
+        tuple(selected),
+        tuple(diagnostics),
+        batch_paths,
+    )
+
+
+def _load_glossary_propagation_batch(
+    publication: Publication,
+    root: Path,
+    glossary_revision: GlossaryRevision,
+) -> _LoadedGlossaryPropagationBatch:
+    fragment_references = glossary_propagation_fragments(
+        glossary_revision.provenance
+    )
+    glossary_references = glossary_propagation_glossary_revisions(
+        glossary_revision.provenance
+    )
+    members: list[tuple[Path, FragmentRevision]] = []
+    for reference in fragment_references:
+        path = _project_path(root, str(reference["path"]), "glossary propagation")
+        try:
+            fragment = read_fragment_revision(path)
+        except ValueError as exc:
+            raise HTMLRenderError(str(exc)) from exc
+        if (
+            fragment.fragment_id != reference["fragment_id"]
+            or fragment.revision != reference["revision"]
+            or fragment.parent_semantic_digest != reference["parent_semantic_digest"]
+            or fragment.semantic_digest != reference["semantic_digest"]
+            or fragment.provenance.get("reason") != "glossary-propagation"
+            or fragment.provenance.get("propagation_batch_id")
+            != glossary_revision.provenance["propagation"]["batch_id"]
+            or fragment.provenance.get("glossary_entry_id")
+            != glossary_revision.entry_id
+        ):
+            raise HTMLRenderError(
+                "propagation Fragment does not match its glossary commit marker"
+            )
+        _validate_fragment_glossary_mentions(publication, fragment)
+        members.append((path, fragment))
+    entries_by_id: dict[str, Mapping[str, object]] = {}
+    duplicate_ids: set[str] = set()
+    for entry in publication.glossary:
+        entry_id = entry.get("entry_id")
+        if not isinstance(entry_id, str):
+            continue
+        if entry_id in entries_by_id:
+            duplicate_ids.add(entry_id)
+        else:
+            entries_by_id[entry_id] = entry
+    glossary_members: list[tuple[Path, GlossaryRevision]] = []
+    for reference in glossary_references:
+        path = _project_path(
+            root, str(reference["path"]), "glossary propagation"
+        )
+        try:
+            dependent = read_glossary_revision(path)
+        except ValueError as exc:
+            raise HTMLRenderError(str(exc)) from exc
+        base_entry = entries_by_id.get(str(reference["entry_id"]))
+        if (
+            base_entry is None
+            or dependent.entry_id in duplicate_ids
+            or dependent.entry_id == glossary_revision.entry_id
+            or dependent.entry_id != reference["entry_id"]
+            or dependent.revision != reference["revision"]
+            or dependent.parent_semantic_digest
+            != reference["parent_semantic_digest"]
+            or dependent.semantic_digest != reference["semantic_digest"]
+            or dependent.provenance.get("reason") != "glossary-propagation"
+            or dependent.provenance.get("propagation_batch_id")
+            != glossary_revision.provenance["propagation"]["batch_id"]
+            or dependent.provenance.get("glossary_entry_id")
+            != glossary_revision.entry_id
+            or "propagation" in dependent.provenance
+        ):
+            raise HTMLRenderError(
+                "dependent glossary revision does not match its commit marker"
+            )
+        try:
+            validate_glossary_revision(base_entry, dependent)
+        except ValueError as exc:
+            raise HTMLRenderError(str(exc)) from exc
+        glossary_members.append((path, dependent))
+    return _LoadedGlossaryPropagationBatch(
+        fragments=tuple(members),
+        glossary_revisions=tuple(glossary_members),
+    )
+
+
+def _validate_fragment_glossary_mentions(
+    publication: Publication,
+    fragment: FragmentRevision,
+) -> None:
+    provenance = fragment.provenance
+    mentions = provenance.get("glossary_mentions")
+    if (
+        provenance.get("glossary_mentions_schema") != GLOSSARY_MENTIONS_SCHEMA
+        or not isinstance(mentions, tuple)
+    ):
+        raise HTMLRenderError("propagation Fragment has no valid glossary mention index")
+    if fragment.role not in _GLOSSARY_PROPAGATION_ROLES or fragment.deleted:
+        raise HTMLRenderError("propagation Fragment role is not editable by glossary")
+    entries = {
+        item.get("entry_id"): item
+        for item in publication.glossary
+        if isinstance(item.get("entry_id"), str)
+    }
+    previous_end = -1
+    for mention in mentions:
+        if not isinstance(mention, Mapping) or set(mention) != {
+            "entry_id",
+            "markdown_start",
+            "markdown_end",
+            "surface",
+        }:
+            raise HTMLRenderError("propagation Fragment mention has invalid fields")
+        entry = entries.get(mention.get("entry_id"))
+        start = mention.get("markdown_start")
+        end = mention.get("markdown_end")
+        surface = mention.get("surface")
+        if (
+            entry is None
+            or isinstance(start, bool)
+            or not isinstance(start, int)
+            or start < previous_end
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+            or end <= start
+            or not isinstance(surface, str)
+            or not surface
+            or fragment.markdown_body[start:end] != surface
+        ):
+            raise HTMLRenderError(
+                "propagation Fragment mention does not match its Markdown"
+            )
+        previous_end = end
+
+
+def _selected_glossary_chain(resolution: Any) -> tuple[GlossaryRevision, ...]:
+    current = resolution.selected
+    by_digest = {item.semantic_digest: item for item in resolution.revisions}
+    chain: list[GlossaryRevision] = []
+    while current is not None:
+        chain.append(current)
+        current = by_digest.get(current.parent_semantic_digest)
+    chain.reverse()
+    return tuple(chain)
+
+
+def _fragment_heads(
+    revisions: Sequence[FragmentRevision],
+) -> dict[str, FragmentRevision]:
+    grouped: dict[str, list[FragmentRevision]] = defaultdict(list)
+    for revision in revisions:
+        grouped[revision.fragment_id].append(revision)
+    heads: dict[str, FragmentRevision] = {}
+    for fragment_id, values in grouped.items():
+        resolution = resolve_fragment_revisions(values)
+        if resolution.selected is not None and not resolution.has_conflict:
+            heads[fragment_id] = resolution.selected
+    return heads
+
+
+def _admit_glossary_batches(
+    fragment_revisions: Sequence[FragmentRevision],
+    batches: Sequence[
+        tuple[GlossaryRevision, _LoadedGlossaryPropagationBatch]
+    ],
+) -> tuple[
+    tuple[tuple[GlossaryRevision, _LoadedGlossaryPropagationBatch], ...],
+    set[str],
+]:
+    accepted: list[
+        tuple[GlossaryRevision, _LoadedGlossaryPropagationBatch]
+    ] = []
+    accepted_fragments: list[FragmentRevision] = []
+    pending = list(batches)
+    while pending:
+        heads = _fragment_heads((*fragment_revisions, *accepted_fragments))
+        ready = [
+            batch
+            for batch in pending
+            if all(
+                (head := heads.get(fragment.fragment_id)) is not None
+                and (
+                    head.semantic_digest == fragment.semantic_digest
+                    or (
+                        head.semantic_digest == fragment.parent_semantic_digest
+                        and fragment.revision == head.revision + 1
+                        and fragment.source == head.source
+                        and fragment.anchor == head.anchor
+                    )
+                )
+                for _path, fragment in batch[1].fragments
+            )
+        ]
+        owners: dict[str, tuple[GlossaryRevision, _LoadedGlossaryPropagationBatch]] = {}
+        conflicted: set[str] = set()
+        for batch in ready:
+            for _path, fragment in batch[1].fragments:
+                head = heads[fragment.fragment_id]
+                if head.semantic_digest == fragment.semantic_digest:
+                    continue
+                owner = owners.get(fragment.fragment_id)
+                if owner is not None:
+                    conflicted.add(owner[0].semantic_digest)
+                    conflicted.add(batch[0].semantic_digest)
+                else:
+                    owners[fragment.fragment_id] = batch
+        applicable = [
+            batch
+            for batch in ready
+            if batch[0].semantic_digest not in conflicted
+        ]
+        if not applicable:
+            break
+        for batch in applicable:
+            accepted.append(batch)
+            accepted_fragments.extend(
+                fragment for _path, fragment in batch[1].fragments
+            )
+            pending.remove(batch)
+    return tuple(accepted), {batch[0].semantic_digest for batch in pending}
+
+
+def _glossary_revision_descends_from(
+    revision: GlossaryRevision,
+    rejected: set[str],
+    by_digest: Mapping[str, GlossaryRevision],
+) -> bool:
+    current: GlossaryRevision | None = revision
+    while current is not None:
+        if current.semantic_digest in rejected:
+            return True
+        current = by_digest.get(current.parent_semantic_digest)
+    return False
 
 
 def _browser_created_history(
@@ -657,9 +1183,25 @@ def _reader_payload(
     *,
     revisions: Sequence[FragmentRevision],
     selected: Sequence[FragmentRevision],
+    glossary_revisions: Sequence[GlossaryRevision],
+    selected_glossary_revision_digests: Sequence[str],
     resources: Sequence[Mapping[str, Any]],
     diagnostics: Sequence[RevisionDiagnostic],
 ) -> dict[str, Any]:
+    entry_counts: dict[str, int] = defaultdict(int)
+    for entry in publication.glossary:
+        entry_id = entry.get("entry_id")
+        if isinstance(entry_id, str):
+            entry_counts[entry_id] += 1
+    glossary_base_digests = {
+        entry_id: glossary_base_semantic_digest(entry)
+        for entry in publication.glossary
+        if (
+            isinstance((entry_id := entry.get("entry_id")), str)
+            and entry_counts[entry_id] == 1
+            and glossary_entry_is_editable(entry)
+        )
+    }
     return {
         "schema_version": READER_PAYLOAD_SCHEMA,
         "renderer_recipe": HTML_RENDER_RECIPE,
@@ -680,6 +1222,17 @@ def _reader_payload(
         "selected_revision_digests": [
             item.semantic_digest for item in selected
         ],
+        "glossary_revisions": [
+            {
+                **glossary_revision_to_document(item),
+                "semantic_digest": item.semantic_digest,
+            }
+            for item in glossary_revisions
+        ],
+        "selected_glossary_revision_digests": list(
+            selected_glossary_revision_digests
+        ),
+        "glossary_base_digests": glossary_base_digests,
         "resources": list(resources),
         "diagnostics": [_diagnostic_text(item) for item in diagnostics],
     }
@@ -1003,7 +1556,8 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
       </section>
     </div>
   </div>
-  <p id="alc-storage-status" class="alc-storage-status" hidden></p>
+  <p id="alc-storage-status" class="alc-storage-status" role="status"
+    aria-live="polite" hidden></p>
   <div id="alc-speech-dock" class="alc-speech-player alc-speech-dock"
     data-player-kind="dock" hidden></div>
   <div id="alc-shell" class="alc-shell">
@@ -1032,7 +1586,14 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
           </svg>
         </button>
       </header>
+      <p id="alc-editor-error" class="alc-editor-error" role="alert"
+        hidden></p>
       <div class="alc-dialog-fields alc-dialog-primary-fields">
+        <label id="alc-editor-glossary-source-field" hidden>
+          <span id="alc-editor-glossary-source-label">Source (read-only)</span>
+          <textarea id="alc-editor-glossary-source" readonly
+            aria-readonly="true"></textarea>
+        </label>
         <label><span id="alc-editor-title-label">Title</span>
           <input id="alc-editor-title" type="text">
         </label>
@@ -1044,9 +1605,7 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
           </label>
         </div>
       </div>
-      <section id="alc-editor-advanced" class="alc-editor-advanced"
-        aria-labelledby="alc-editor-advanced-label">
-        <h3 id="alc-editor-advanced-label" class="alc-editor-advanced-heading">Preview and more settings</h3>
+      <section id="alc-editor-advanced" class="alc-editor-advanced">
         <div class="alc-editor-extra-content">
           <div class="alc-editor-preview-pane">
             <span id="alc-editor-preview-label">Preview</span>
@@ -1109,7 +1668,7 @@ def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:
         <button id="alc-unsaved-close" type="button" aria-label="Continue editing">×</button>
       </header>
       <p id="alc-unsaved-description">
-        Save the changes before leaving this editor, or leave without saving.
+        You changed the current content. Save it?
       </p>
       <p id="alc-unsaved-error" class="alc-unsaved-error" role="alert" hidden></p>
       <footer>
@@ -1505,6 +2064,8 @@ def _validate_reader_resources(
 def _validate_reader_revisions(
     publication: Publication,
     payload: Mapping[str, Any],
+    *,
+    all_revisions: list[FragmentRevision] | None = None,
 ) -> tuple[FragmentRevision, ...]:
     raw_revisions = payload.get("revisions")
     if not isinstance(raw_revisions, list):
@@ -1549,6 +2110,8 @@ def _validate_reader_revisions(
                 "standalone HTML contains a duplicate fragment revision"
             )
         seen.add(identity)
+        if all_revisions is not None:
+            all_revisions.append(revision)
         if revision.fragment_id not in groups:
             groups[revision.fragment_id] = []
             order.append(revision.fragment_id)
@@ -1580,6 +2143,208 @@ def _validate_reader_revisions(
         raise HTMLRenderError(
             "standalone HTML selected revisions are inconsistent"
         )
+    return tuple(selected)
+
+
+def _validate_reader_glossary_revisions(
+    publication: Publication,
+    payload: Mapping[str, Any],
+    *,
+    fragment_revisions: Sequence[FragmentRevision] = (),
+    selected_fragments: Sequence[FragmentRevision] = (),
+) -> tuple[GlossaryRevision, ...]:
+    """Validate the separate glossary history carried by a Reader payload."""
+
+    raw_revisions = payload.get("glossary_revisions", [])
+    claimed = payload.get("selected_glossary_revision_digests", [])
+    if not isinstance(raw_revisions, list) or not isinstance(claimed, list):
+        raise HTMLRenderError("standalone HTML glossary revisions are invalid")
+    groups: dict[str, list[GlossaryRevision]] = defaultdict(list)
+    seen: set[tuple[str, str]] = set()
+    for raw in raw_revisions:
+        if not isinstance(raw, Mapping):
+            raise HTMLRenderError("standalone HTML glossary revision record is invalid")
+        if set(raw) != {
+            "schema_version",
+            "entry_id",
+            "revision",
+            "parent_semantic_digest",
+            "entry",
+            "provenance",
+            "semantic_digest",
+        }:
+            raise HTMLRenderError("standalone HTML glossary revision record is invalid")
+        digest = raw.get("semantic_digest")
+        material = dict(raw)
+        material.pop("semantic_digest", None)
+        try:
+            revision = glossary_revision_from_document(material)
+        except ValueError as exc:
+            raise HTMLRenderError(
+                "standalone HTML contains malformed glossary metadata"
+            ) from exc
+        if revision.semantic_digest != digest:
+            raise HTMLRenderError(
+                "standalone HTML glossary revision identity is inconsistent"
+            )
+        identity = (revision.entry_id, revision.semantic_digest)
+        if identity in seen:
+            raise HTMLRenderError(
+                "standalone HTML contains a duplicate glossary revision"
+            )
+        seen.add(identity)
+        groups[revision.entry_id].append(revision)
+
+    selected: list[GlossaryRevision] = []
+    selected_chains: list[tuple[GlossaryRevision, ...]] = []
+    publication_ids: set[str] = set()
+    for entry in publication.glossary:
+        entry_id = entry.get("entry_id")
+        if (
+            not isinstance(entry_id, str)
+            or not glossary_entry_is_editable(entry)
+            or entry_id in publication_ids
+        ):
+            continue
+        publication_ids.add(entry_id)
+        try:
+            resolution = resolve_glossary_revisions(
+                entry, groups.pop(entry_id, ())
+            )
+        except ValueError as exc:
+            raise HTMLRenderError(
+                "standalone HTML glossary history is invalid"
+            ) from exc
+        if resolution.selected is not None:
+            selected.append(resolution.selected)
+        selected_chains.append(_selected_glossary_chain(resolution))
+
+    if groups:
+        raise HTMLRenderError(
+            "standalone HTML glossary history contains a foreign entry"
+        )
+    expected = [item.semantic_digest for item in selected]
+    if (
+        any(not isinstance(item, str) for item in claimed)
+        or len(claimed) != len(set(claimed))
+        or claimed != expected
+    ):
+        raise HTMLRenderError(
+            "standalone HTML selected glossary revisions are inconsistent"
+        )
+    fragments_by_digest = {
+        item.semantic_digest: item for item in fragment_revisions
+    }
+    selected_by_id = {item.fragment_id: item for item in selected_fragments}
+    selected_ancestors: dict[str, set[str]] = {}
+    for fragment_id, head in selected_by_id.items():
+        ancestors: set[str] = set()
+        current: FragmentRevision | None = head
+        while current is not None and current.semantic_digest not in ancestors:
+            ancestors.add(current.semantic_digest)
+            current = fragments_by_digest.get(current.parent_semantic_digest or "")
+        selected_ancestors[fragment_id] = ancestors
+    glossary_by_digest = {
+        item.semantic_digest: item
+        for values in groups.values()
+        for item in values
+    }
+    for chain in selected_chains:
+        for item in chain:
+            glossary_by_digest[item.semantic_digest] = item
+    selected_glossary_ancestors: dict[str, set[str]] = defaultdict(set)
+    propagation_owners: dict[str, GlossaryRevision] = {}
+    for chain in selected_chains:
+        for item in chain:
+            selected_glossary_ancestors[item.entry_id].add(
+                item.semantic_digest
+            )
+            propagation = item.provenance.get("propagation")
+            if isinstance(propagation, Mapping):
+                batch_id = str(propagation.get("batch_id", ""))
+                if batch_id in propagation_owners:
+                    raise HTMLRenderError(
+                        "standalone HTML repeats a glossary propagation batch"
+                    )
+                propagation_owners[batch_id] = item
+    for chain in selected_chains:
+        for item in chain:
+            if item.provenance.get("reason") != "glossary-propagation":
+                continue
+            batch_id = str(item.provenance.get("propagation_batch_id", ""))
+            owner = propagation_owners.get(batch_id)
+            references = (
+                glossary_propagation_glossary_revisions(owner.provenance)
+                if owner is not None
+                else ()
+            )
+            if (
+                owner is None
+                or owner.entry_id != item.provenance.get("glossary_entry_id")
+                or not any(
+                    reference["entry_id"] == item.entry_id
+                    and reference["revision"] == item.revision
+                    and reference["parent_semantic_digest"]
+                    == item.parent_semantic_digest
+                    and reference["semantic_digest"] == item.semantic_digest
+                    for reference in references
+                )
+            ):
+                raise HTMLRenderError(
+                    "standalone HTML contains an orphan glossary propagation"
+                )
+    for chain in selected_chains:
+        for glossary_revision in chain:
+            for reference in glossary_propagation_fragments(
+                glossary_revision.provenance
+            ):
+                fragment = fragments_by_digest.get(str(reference["semantic_digest"]))
+                if (
+                    fragment is None
+                    or fragment.fragment_id != reference["fragment_id"]
+                    or fragment.revision != reference["revision"]
+                    or fragment.parent_semantic_digest
+                    != reference["parent_semantic_digest"]
+                    or fragment.provenance.get("reason")
+                    != "glossary-propagation"
+                    or fragment.provenance.get("propagation_batch_id")
+                    != glossary_revision.provenance["propagation"]["batch_id"]
+                    or fragment.provenance.get("glossary_entry_id")
+                    != glossary_revision.entry_id
+                    or fragment.semantic_digest
+                    not in selected_ancestors.get(fragment.fragment_id, set())
+                ):
+                    raise HTMLRenderError(
+                        "standalone HTML glossary propagation is incomplete"
+                    )
+                _validate_fragment_glossary_mentions(publication, fragment)
+            for reference in glossary_propagation_glossary_revisions(
+                glossary_revision.provenance
+            ):
+                dependent = glossary_by_digest.get(
+                    str(reference["semantic_digest"])
+                )
+                if (
+                    dependent is None
+                    or dependent.entry_id == glossary_revision.entry_id
+                    or dependent.entry_id != reference["entry_id"]
+                    or dependent.revision != reference["revision"]
+                    or dependent.parent_semantic_digest
+                    != reference["parent_semantic_digest"]
+                    or dependent.provenance.get("reason")
+                    != "glossary-propagation"
+                    or dependent.provenance.get("propagation_batch_id")
+                    != glossary_revision.provenance["propagation"]["batch_id"]
+                    or dependent.provenance.get("glossary_entry_id")
+                    != glossary_revision.entry_id
+                    or dependent.semantic_digest
+                    not in selected_glossary_ancestors.get(
+                        dependent.entry_id, set()
+                    )
+                ):
+                    raise HTMLRenderError(
+                        "standalone HTML glossary propagation is incomplete"
+                    )
     return tuple(selected)
 
 
