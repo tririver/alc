@@ -1360,6 +1360,264 @@ assert(
     assert completed.returncode == 0, completed.stderr
 
 
+def test_reader_resolves_strict_legacy_bibliography_links_under_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    stylesheet = _text("reader.css")
+    assert "outline: 2px solid currentColor" in stylesheet
+    assert ".alc-unresolved-reference {\n  color: inherit;" in stylesheet
+    assert "@supports (grid-template-rows: subgrid)" in stylesheet
+    assert "@media screen and (min-width: 900px)" in stylesheet
+    assert ".alc-aligned-bibliography" in stylesheet
+    alignment = javascript[javascript.index(
+        "function syncSourceBibliographyAlignment"
+    ) : javascript.index("function decorateLegacyBibliographyLinks")]
+    assert "getBoundingClientRect" not in alignment
+    assert "ResizeObserver" not in alignment
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        _text("markdown-it/markdown-it.min.js")
+        + "\nglobalThis.window = globalThis;\n"
+        + "globalThis.markdownit = module.exports;\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcBibliographyTest = {
+    state: state,
+    setupMarkdown: setupMarkdown,
+    buildSourceBibliographyIndex: buildSourceBibliographyIndex,
+    sourceReferenceTargetId: sourceReferenceTargetId,
+    canonicalReaderTargetId: canonicalReaderTargetId,
+    chunkForTargetId: chunkForTargetId,
+    revealSourceReferenceTarget: revealSourceReferenceTarget,
+    syncSourceBibliographyAlignment: syncSourceBibliographyAlignment,
+    legacyBibliographyTarget: legacyBibliographyTarget,
+    degradeLegacyBibliographyMarkdownLinks:
+      degradeLegacyBibliographyMarkdownLinks
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcBibliographyTest;
+helpers.state.payload = {
+  publication: {labels: {}, reader_profile: {}, source_document: {blocks: []}},
+  resources: [],
+  source_identity: null
+};
+helpers.setupMarkdown();
+assert(
+  helpers.legacyBibliographyTarget("#bib.bib1") &&
+    !helpers.legacyBibliographyTarget("#bib.bibliography") &&
+    !helpers.legacyBibliographyTarget("#bib.bib0"),
+  "legacy bibliography target matching reserved more than exact positive IDs"
+);
+var manifest = [{block_id: "prose", kind: "paragraph"}, {
+  block_id: "references", kind: "list"
+}];
+var descriptors = [{
+  alias: "bib.bib1", block_id: "references", item_index: 0
+}, {
+  alias: "bib.bib2", block_id: "references", item_index: 1
+}];
+var index = helpers.buildSourceBibliographyIndex(descriptors, manifest);
+var firstTarget = helpers.sourceReferenceTargetId("references", 0);
+var secondTarget = helpers.sourceReferenceTargetId("references", 1);
+assert(index.blockId === "references", "References list was not selected");
+assert(index.aliases.size === 2, "validated bibliography aliases were omitted");
+assert(index.aliases.get("bib.bib1") === firstTarget, "bib1 mapped incorrectly");
+assert(index.aliases.get("bib.bib2") === secondTarget, "bib2 mapped incorrectly");
+
+helpers.state.sourceBibliographyIndex = index;
+helpers.state.chunkByTargetId = new Map([[firstTarget, "reference-chunk"]]);
+assert(
+  helpers.canonicalReaderTargetId("bib.bib1") === firstTarget,
+  "legacy alias did not resolve to a canonical Reader target"
+);
+assert(
+  helpers.chunkForTargetId("bib.bib1") === "reference-chunk",
+  "legacy alias did not activate its progressive chunk"
+);
+helpers.state.sourceVisible = false;
+helpers.state.visibilityReady = false;
+assert(
+  helpers.revealSourceReferenceTarget(firstTarget) &&
+    helpers.state.sourceVisible,
+  "source-reference navigation did not reveal its source target"
+);
+helpers.state.sourceVisible = false;
+assert(
+  !helpers.revealSourceReferenceTarget("block-prose") &&
+    !helpers.state.sourceVisible,
+  "ordinary Reader navigation changed Source visibility"
+);
+
+function fakeNode(tagName, className) {
+  var names = new Set(String(className || "").split(/\s+/).filter(Boolean));
+  return {
+    tagName: String(tagName || "div").toUpperCase(),
+    children: [],
+    dataset: {},
+    classList: {
+      add: function (name) { names.add(name); },
+      remove: function (name) { names.delete(name); },
+      contains: function (name) { return names.has(name); }
+    },
+    style: {
+      values: {},
+      setProperty: function (name, value) { this.values[name] = value; },
+      removeProperty: function (name) { delete this.values[name]; }
+    }
+  };
+}
+function listNode(count) {
+  var list = fakeNode("ul");
+  for (var item = 0; item < count; item += 1) {
+    list.children.push(fakeNode("li"));
+  }
+  return list;
+}
+var alignedRow = fakeNode("article");
+alignedRow.dataset.blockId = "references";
+var alignedLanes = fakeNode("div", "alc-lanes");
+var alignedSource = fakeNode("section", "alc-source-card");
+var sourceList = listNode(2);
+alignedSource.children.push(sourceList, fakeNode("div", "alc-card-actions"));
+var alignedTranslation = fakeNode("aside", "alc-fragment");
+alignedTranslation.dataset.role = "translation";
+var saved = fakeNode("div", "alc-fragment-saved-content");
+var renderedMarkdown = fakeNode("div", "alc-markdown");
+var translatedList = listNode(2);
+renderedMarkdown.children.push(translatedList);
+saved.children.push(renderedMarkdown);
+alignedTranslation.children.push(
+  fakeNode("header", "alc-fragment-header"), saved,
+  fakeNode("div", "alc-card-actions")
+);
+alignedLanes.children.push(alignedSource, alignedTranslation);
+alignedRow.children.push(alignedLanes);
+assert(
+  helpers.syncSourceBibliographyAlignment(alignedRow) &&
+    alignedLanes.classList.contains("alc-aligned-bibliography") &&
+    alignedLanes.style.values["--alc-aligned-list-rows"] === "2",
+  "matching source and translation lists were not shape-gated for alignment"
+);
+translatedList.children.pop();
+assert(
+  !helpers.syncSourceBibliographyAlignment(alignedRow) &&
+    !alignedLanes.classList.contains("alc-aligned-bibliography") &&
+    alignedLanes.style.values["--alc-aligned-list-rows"] === undefined,
+  "a mismatched translation list retained item alignment"
+);
+translatedList.children.push(fakeNode("li"));
+renderedMarkdown.children.push(fakeNode("p"));
+assert(
+  !helpers.syncSourceBibliographyAlignment(alignedRow),
+  "translation content outside its one top-level list was aligned"
+);
+renderedMarkdown.children.pop();
+alignedTranslation.classList.add("is-inline-editing");
+assert(
+  !helpers.syncSourceBibliographyAlignment(alignedRow),
+  "an actively edited translation list retained alignment"
+);
+alignedTranslation.classList.remove("is-inline-editing");
+alignedRow.dataset.blockId = "ordinary-list";
+assert(
+  !helpers.syncSourceBibliographyAlignment(alignedRow),
+  "a non-bibliography list received per-item alignment"
+);
+alignedRow.dataset.blockId = "references";
+
+var invalidDescriptors = descriptors.concat([{
+  alias: "bib.bib1", block_id: "references", item_index: 1
+}]);
+var rejected = false;
+try {
+  helpers.buildSourceBibliographyIndex(invalidDescriptors, manifest);
+} catch (_error) {
+  rejected = true;
+}
+assert(rejected, "duplicate bibliography aliases were accepted");
+
+var markdown = [
+  "See [Smith 2020](#bib.bib1), [section](#S2), and " +
+    "[site](https://example.test).",
+  "",
+  "Unclosed ` and [Smith 2020](#bib.bib1).",
+  "",
+  "[Jones 2021][legacy]",
+  "",
+  "[legacy]: #bib.bib2",
+  "",
+  "![Figure reference](#bib.bib1)",
+  "",
+  "Destination [Smith 2020](",
+  "#bib.bib1)",
+  "",
+  "Label [Smith",
+  "2020](#bib.bib1)",
+  "",
+  "Title [Smith 2020](#bib.bib1",
+  " \"Paper\")",
+  "",
+  "`[multiline",
+  "code](#bib.bib1)`",
+  "",
+  "`[inline](#bib.bib1)`",
+  "",
+  "```text",
+  "[fenced](#bib.bib1)",
+  "```",
+  "",
+  "    [indented](#bib.bib1)"
+].join("\n");
+var degraded = helpers.degradeLegacyBibliographyMarkdownLinks(markdown);
+assert(
+  degraded.includes("See Smith 2020, [section](#S2), and " +
+    "[site](https://example.test)."),
+  "export did not degrade the exact legacy bibliography link"
+);
+assert(degraded.includes("`[inline](#bib.bib1)`"), "inline code changed");
+assert(degraded.includes("[fenced](#bib.bib1)"), "fenced code changed");
+assert(degraded.includes("    [indented](#bib.bib1)"), "indented code changed");
+assert(
+  degraded.includes("Unclosed ` and Smith 2020."),
+  "a link after an unmatched backtick remained clickable"
+);
+assert(
+  degraded.includes("Jones 2021") && !degraded.includes("[legacy]:"),
+  "a reference-style bibliography link was not degraded"
+);
+assert(
+  degraded.includes("Figure reference") &&
+    !degraded.includes("!Figure reference"),
+  "a bibliography image link was degraded into broken image syntax"
+);
+assert(
+  degraded.includes("Destination Smith 2020") &&
+    degraded.includes("Label Smith\n2020") &&
+    degraded.includes("Title Smith 2020"),
+  "a multiline CommonMark bibliography link was not degraded"
+);
+assert(
+  degraded.includes("`[multiline\ncode](#bib.bib1)`"),
+  "a multiline code span was rewritten"
+);
+'''
+    )
+    completed = subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_reader_persists_directory_handles_per_source_under_node() -> None:
     node = shutil.which("node")
     if node is None:
@@ -3368,7 +3626,8 @@ function FakeNode(tag) {
   this.attrs = {};
   this.dataset = {};
   this.style = {
-    setProperty: function (name, value) { this[name] = value; }
+    setProperty: function (name, value) { this[name] = value; },
+    removeProperty: function (name) { delete this[name]; }
   };
   this.textContent = "";
   this.value = "";
@@ -3385,6 +3644,11 @@ function FakeNode(tag) {
       if (!this.contains(name)) {
         this.owner.className = (this.owner.className + " " + name).trim();
       }
+    },
+    remove: function (name) {
+      this.owner.className = this.owner.className.split(/\\s+/).filter(
+        function (value) { return value && value !== name; }
+      ).join(" ");
     },
     toggle: function (name, enabled) {
       if (enabled) this.add(name);
@@ -4842,6 +5106,14 @@ var linked = revision(
     "```text\n[report]: resources/" + reportDigest + "/report.json\n```\n\n" +
     "[report]\n\n" +
     "~~~text\n[raw](report.json)\n~~~\n\n    [indent](report.json)\n\n" +
+    "BIB inline [Smith 2020](#bib.bib1).\n\n" +
+    "BIB unmatched ` and [Smith 2020](#bib.bib1).\n\n" +
+    "BIB destination [Smith 2020](\n#bib.bib1).\n\n" +
+    "BIB label [Smith\n2020](#bib.bib1).\n\n" +
+    "BIB title [Smith 2020](#bib.bib1\n \"Paper\").\n\n" +
+    "[Jones 2021][legacy-bib]\n\n" +
+    "[legacy-bib]: #bib.bib2\n\n" +
+    "![Reference figure](#bib.bib3)\n\n" +
     "[^asset]: report.json\n",
   10
 );
@@ -4952,6 +5224,18 @@ helpers.state.selected = new Map([
     "blockquote reference definition was not rewritten"
   );
   assert(markdown.includes("[网站](https://example.test)"), "external link was rewritten");
+  assert(
+    markdown.includes("BIB inline Smith 2020.") &&
+      markdown.includes("BIB unmatched ` and Smith 2020.") &&
+      markdown.includes("BIB destination Smith 2020.") &&
+      markdown.includes("BIB label Smith\n2020.") &&
+      markdown.includes("BIB title Smith 2020.") &&
+      markdown.includes("Jones 2021") &&
+      markdown.includes("Reference figure") &&
+      !markdown.includes("#bib.bib") &&
+      !markdown.includes("!Reference figure"),
+    "Markdown package retained or corrupted a legacy bibliography link"
+  );
   assert(markdown.includes("`[_](report.json)`"), "inline code was rewritten");
   assert(markdown.includes("[raw](report.json)"), "fenced code was rewritten");
   assert(markdown.includes("    [indent](report.json)"), "indented code was rewritten");
@@ -5084,6 +5368,18 @@ helpers.state.selected = new Map([
       plain.includes("[raw](report.json)") &&
       plain.includes("    [indent](report.json)"),
     "plain Markdown did not degrade local links or preserve external/code links"
+  );
+  assert(
+    plain.includes("BIB inline Smith 2020.") &&
+      plain.includes("BIB unmatched ` and Smith 2020.") &&
+      plain.includes("BIB destination Smith 2020.") &&
+      plain.includes("BIB label Smith\n2020.") &&
+      plain.includes("BIB title Smith 2020.") &&
+      plain.includes("Jones 2021") &&
+      plain.includes("Reference figure") &&
+      !plain.includes("#bib.bib") &&
+      !plain.includes("!Reference figure"),
+    "plain Markdown retained or corrupted a legacy bibliography link"
   );
 
   assert(first.archive.type === "application/zip", "archive media type is wrong");

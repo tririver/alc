@@ -16,8 +16,9 @@ from pathlib import Path, PurePosixPath
 import re
 import tempfile
 from typing import Any
+import unicodedata
 
-from ac_document import RichDocument
+from ac_document import RichBlockKind, RichDocument
 
 from .contracts import (
     FragmentRevision,
@@ -72,6 +73,12 @@ _CSS_URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _GLOSSARY_PROPAGATION_ROLES = frozenset({"translation", "companion", "guide"})
+_LEGACY_BIBLIOGRAPHY_TARGET_PATTERN = re.compile(
+    r"#bib[.]bib(?P<number>[1-9][0-9]*)"
+)
+_LEGACY_BIBLIOGRAPHY_SECTION_TITLES = frozenset(
+    {"bibliography", "references"}
+)
 
 
 class HTMLRenderError(RuntimeError):
@@ -359,6 +366,15 @@ def validate_standalone_html(
     ]
     if actual != expected:
         raise HTMLRenderError("standalone HTML source block order is invalid")
+    if (
+        "legacy_bibliography_targets" in payload and
+        payload["legacy_bibliography_targets"] != list(
+            _legacy_bibliography_targets(embedded_publication.source_document)
+        )
+    ):
+        raise HTMLRenderError(
+            "standalone HTML legacy bibliography targets are inconsistent"
+        )
     _validate_reader_resources(publication, payload)
     fragment_revisions: list[FragmentRevision] = []
     selected = _validate_reader_revisions(
@@ -1211,6 +1227,9 @@ def _reader_payload(
             item.block_id: anchor_block_from_rich_block(item).content_fingerprint
             for item in publication.source_document.blocks
         },
+        "legacy_bibliography_targets": list(
+            _legacy_bibliography_targets(publication.source_document)
+        ),
         "revisions": [
             {
                 "metadata": fragment_revision_to_document(item),
@@ -1236,6 +1255,134 @@ def _reader_payload(
         "resources": list(resources),
         "diagnostics": [_diagnostic_text(item) for item in diagnostics],
     }
+
+
+def _legacy_bibliography_targets(
+    document: RichDocument,
+) -> tuple[dict[str, Any], ...]:
+    """Return only an unambiguous ordinal mapping for legacy BIB anchors."""
+
+    maximum_list_items = max(
+        (
+            len(block.payload.get("items", ()))
+            for block in document.blocks
+            if block.kind is RichBlockKind.LIST
+        ),
+        default=0,
+    )
+    labels_by_number: dict[int, list[str]] = defaultdict(list)
+    for block in document.blocks:
+        if block.kind is RichBlockKind.PARAGRAPH:
+            span_groups = (block.payload.get("inline_spans", ()),)
+        elif block.kind is RichBlockKind.LIST:
+            span_groups = tuple(
+                item.get("inline_spans", ())
+                for item in block.payload.get("items", ())
+                if isinstance(item, Mapping)
+            )
+        else:
+            continue
+        for spans in span_groups:
+            if not isinstance(spans, Sequence):
+                continue
+            for span in spans:
+                if not isinstance(span, Mapping) or span.get("kind") != "link":
+                    continue
+                target = span.get("target")
+                if not isinstance(target, str):
+                    continue
+                match = _LEGACY_BIBLIOGRAPHY_TARGET_PATTERN.fullmatch(target)
+                if match is None:
+                    continue
+                number_text = match.group("number")
+                if (
+                    not maximum_list_items
+                    or len(number_text) > len(str(maximum_list_items))
+                ):
+                    return ()
+                number = int(number_text)
+                if number > maximum_list_items:
+                    return ()
+                text = span.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    return ()
+                labels_by_number[number].append(text)
+
+    if not labels_by_number:
+        return ()
+    highest_number = max(labels_by_number)
+    candidates: list[Any] = []
+    for block in document.blocks:
+        if (
+            block.kind is not RichBlockKind.LIST
+            or not _legacy_bibliography_section(
+                document, block.section_path, block.ordinal
+            )
+        ):
+            continue
+        items = block.payload.get("items", ())
+        if not isinstance(items, Sequence) or len(items) < highest_number:
+            continue
+        if all(
+            all(
+                _legacy_bibliography_label_matches(
+                    label, str(items[number - 1].get("text", ""))
+                )
+                for label in labels
+            )
+            for number, labels in labels_by_number.items()
+        ):
+            candidates.append(block)
+
+    if len(candidates) != 1:
+        return ()
+    references = candidates[0]
+    return tuple(
+        {
+            "alias": f"bib.bib{number}",
+            "block_id": references.block_id,
+            "item_index": number - 1,
+        }
+        for number in sorted(labels_by_number)
+    )
+
+
+def _legacy_bibliography_section(
+    document: RichDocument, section_path: Sequence[str], block_ordinal: int
+) -> bool:
+    if not section_path:
+        return False
+    section_id = section_path[-1]
+    section = next(
+        (item for item in document.sections if item.section_id == section_id),
+        None,
+    )
+    if section is None:
+        return False
+    if (
+        section.path != tuple(section_path)
+        or not section.block_start <= block_ordinal < section.block_end
+    ):
+        return False
+    title = unicodedata.normalize("NFKC", section.title)
+    title = re.sub(r"\s+", " ", title).strip().casefold()
+    return title in _LEGACY_BIBLIOGRAPHY_SECTION_TITLES
+
+
+def _legacy_bibliography_label_matches(label: str, item_text: str) -> bool:
+    normalized_label = _normalized_legacy_bibliography_text(label)
+    normalized_item = _normalized_legacy_bibliography_text(item_text)
+    if not normalized_label or not normalized_item.startswith(normalized_label):
+        return False
+    if len(normalized_item) == len(normalized_label):
+        return True
+    return not normalized_item[len(normalized_label)].isalnum()
+
+
+def _normalized_legacy_bibliography_text(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value).replace("\u00a0", " ")
+    value = re.sub(r"[()（）]", "", value)
+    return re.sub(r"\s+", " ", value).strip().casefold()
 
 
 def _html_shell(publication: Publication, payload: Mapping[str, Any]) -> str:

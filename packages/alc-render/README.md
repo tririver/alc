@@ -121,6 +121,15 @@ screens and stacked on narrow screens. More settings controls layout, edit
 activation, fonts, scale, spacing, and content width for the current Reader.
 A Single HTML export captures the current appearance.
 
+Some older rich sources identify in-document bibliography links as
+`#bib.bibN`. The Reader resolves them only when every citation validates
+against one list in a structured `References` or `Bibliography` section. It
+loads and focuses the canonical target, restoring Source visibility when
+needed; unresolved links become unavailable text. Structural `#S...` links are
+not inferred. In a wide side-by-side view, equal-length source and translation
+reference lists also share per-item rows. Complex, mismatched, narrow, and
+stacked layouts keep the ordinary block flow.
+
 Translation, guide, companion, note, and glossary content can be edited inline.
 Single-click or double-click activation follows the Reader setting. Advanced
 editing provides Markdown preview and version history. Saving appends an
@@ -148,6 +157,11 @@ resource links into plain labels. The Markdown package contains `document.md`,
 a manifest, and only the validated resources referenced by the selected
 content. Local resource links are rewritten to digest-addressed `resources/`
 paths. Formulas, code, tables, footnotes, and external links remain Markdown.
+
+Because portable CommonMark has no standard list-item anchor syntax, both
+Markdown modes export exact legacy `#bib.bibN` links as readable labels while
+preserving code, structural `#S...`, external, and resource links. Single HTML
+keeps validated Reader navigation.
 
 Guide, companion, and note fragments are exported as labeled blockquotes.
 Translation remains ordinary document content. Glossary definitions retain

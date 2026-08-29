@@ -46,6 +46,8 @@ from alc_render.html import (
     HTMLRenderError,
     _extract_json_script,
     _extract_reader_payload,
+    _legacy_bibliography_targets,
+    _reader_payload,
     _reader_icon_link,
     _validate_fragment_glossary_mentions,
     render_publication_html,
@@ -135,6 +137,218 @@ def _rich_document(asset_payload: bytes | None = None) -> RichDocument:
         ),
         assets,
     )
+
+
+def _bibliography_document(
+    *,
+    second_label: str = "Jones 2021",
+    second_target: str = "#bib.bib2",
+    reference_title: str = "References",
+    duplicate_list: bool = False,
+) -> RichDocument:
+    document = _rich_document()
+    citation_text = f"Smith 2020; {second_label}"
+    smith_reference = "Smith (2020) S. Smith, Journal 1."
+    jones_reference = "Jones (2021) J. Jones, Journal 2."
+    smith_duplicate = "Smith (2020) Another entry."
+    jones_duplicate = "Jones (2021) Another entry."
+    blocks = [
+        RichBlock(
+            "block-citations",
+            0,
+            RichBlockKind.PARAGRAPH,
+            ("section-reader",),
+            SourceLocator(SourceFormat.MARKDOWN, 1, 1, 1, len(citation_text)),
+            {
+                "text": citation_text,
+                "inline_spans": [
+                    {
+                        "kind": "link",
+                        "start": 0,
+                        "end": 10,
+                        "text": "Smith 2020",
+                        "target": "#bib.bib1",
+                    },
+                    {
+                        "kind": "text",
+                        "start": 10,
+                        "end": 12,
+                        "text": "; ",
+                    },
+                    {
+                        "kind": "link",
+                        "start": 12,
+                        "end": len(citation_text),
+                        "text": second_label,
+                        "target": second_target,
+                    },
+                ],
+            },
+        ),
+        RichBlock(
+            "block-references",
+            1,
+            RichBlockKind.LIST,
+            ("section-references",),
+            SourceLocator(SourceFormat.MARKDOWN, 3, 1, 4, 40),
+            {
+                "ordered": False,
+                "items": [
+                    {
+                        "text": smith_reference,
+                        "inline_spans": [
+                            {
+                                "kind": "text",
+                                "start": 0,
+                                "end": len(smith_reference),
+                                "text": smith_reference,
+                            }
+                        ],
+                    },
+                    {
+                        "text": jones_reference,
+                        "inline_spans": [
+                            {
+                                "kind": "text",
+                                "start": 0,
+                                "end": len(jones_reference),
+                                "text": jones_reference,
+                            }
+                        ],
+                    },
+                ],
+            },
+        ),
+    ]
+    if duplicate_list:
+        blocks.append(
+            RichBlock(
+                "block-other-list",
+                2,
+                RichBlockKind.LIST,
+                ("section-references",),
+                SourceLocator(SourceFormat.MARKDOWN, 6, 1, 7, 40),
+                {
+                    "ordered": False,
+                    "items": [
+                        {
+                            "text": smith_duplicate,
+                            "inline_spans": [
+                                {
+                                    "kind": "text",
+                                    "start": 0,
+                                    "end": len(smith_duplicate),
+                                    "text": smith_duplicate,
+                                }
+                            ],
+                        },
+                        {
+                            "text": jones_duplicate,
+                            "inline_spans": [
+                                {
+                                    "kind": "text",
+                                    "start": 0,
+                                    "end": len(jones_duplicate),
+                                    "text": jones_duplicate,
+                                }
+                            ],
+                        },
+                    ],
+                },
+            )
+        )
+    return RichDocument(
+        document.source,
+        tuple(blocks),
+        (
+            RichSection(
+                "section-reader",
+                "Reader",
+                1,
+                0,
+                ("section-reader",),
+                0,
+                1,
+            ),
+            RichSection(
+                "section-references",
+                reference_title,
+                1,
+                1,
+                ("section-references",),
+                1,
+                len(blocks),
+            ),
+        ),
+    )
+
+
+def test_legacy_bibliography_targets_require_one_exact_ordinal_mapping() -> None:
+    assert _legacy_bibliography_targets(_bibliography_document()) == (
+        {
+            "alias": "bib.bib1",
+            "block_id": "block-references",
+            "item_index": 0,
+        },
+        {
+            "alias": "bib.bib2",
+            "block_id": "block-references",
+            "item_index": 1,
+        },
+    )
+    assert _legacy_bibliography_targets(
+        _bibliography_document(duplicate_list=True)
+    ) == ()
+    assert _legacy_bibliography_targets(
+        _bibliography_document(second_label="Different 2021")
+    ) == ()
+    assert _legacy_bibliography_targets(
+        _bibliography_document(reference_title="Reading plan")
+    ) == ()
+    assert _legacy_bibliography_targets(
+        _bibliography_document(second_target="#bib.bib" + "9" * 5000)
+    ) == ()
+
+
+def test_reader_v2_boot_preserves_legacy_bibliography_targets() -> None:
+    publication = Publication(
+        source_document=_bibliography_document(),
+        layers=(),
+        glossary=(),
+        bibliography=(),
+        labels={},
+        resources=(),
+        reader_profile={},
+    )
+    payload = _reader_payload(
+        publication,
+        revisions=(),
+        selected=(),
+        glossary_revisions=(),
+        selected_glossary_revision_digests=(),
+        resources=(),
+        diagnostics=(),
+    )
+    html = (
+        '<script id="alc-render-payload" type="application/json">'
+        + json.dumps(payload)
+        + "</script>"
+    )
+
+    boot = _boot_payload(_split_reader_payload(html))
+
+    assert boot["legacy_bibliography_targets"] == [
+        {
+            "alias": "bib.bib1",
+            "block_id": "block-references",
+            "item_index": 0,
+        },
+        {
+            "alias": "bib.bib2",
+            "block_id": "block-references",
+            "item_index": 1,
+        },
+    ]
 
 
 def _revision(

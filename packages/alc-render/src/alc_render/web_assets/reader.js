@@ -90,6 +90,9 @@
     editorAnchor: null,
     editorHistorical: null,
     bibliographyIndexCache: null,
+    sourceBibliographyIndex: {
+      blockId: "", aliases: new Map(), itemIndexes: new Set()
+    },
     glossarySurfaceCache: {source: null, target: null},
     glossaryBase: [],
     glossaryDuplicateIds: new Set(),
@@ -582,6 +585,7 @@
       loading: "正在读取版本……",
       historyChanged: "目录中的当前版本已变化；请关闭编辑器并重新打开后再保存。",
       unknownCitation: "引用不在当前参考文献中：",
+      referenceUnavailable: traditional ? "參考文獻連結不可用" : "参考文献链接不可用",
       compareCurrent: "当前版本",
       compareHistorical: "历史版本",
       restore: "恢复为新版本",
@@ -727,6 +731,7 @@
       loading: "Loading revisions…",
       historyChanged: "The current directory revision changed; close and reopen the editor before saving.",
       unknownCitation: "Citation is absent from the bibliography: ",
+      referenceUnavailable: "Reference link unavailable",
       compareCurrent: "Current revision",
       compareHistorical: "Historical revision",
       restore: "Restore as new revision",
@@ -1476,6 +1481,7 @@
       citationTargets: citationTargets()
     });
     removeVisibleHtmlTags(wrapper);
+    decorateLegacyBibliographyLinks(wrapper);
     if (!options || options.decorateGlossary !== false) {
       decorateGlossary(wrapper, "target");
     }
@@ -2725,6 +2731,11 @@
     var documentValue = publication.source_document;
     var strings = labels();
 
+    state.sourceBibliographyIndex = buildSourceBibliographyIndex(
+      state.payload.legacy_bibliography_targets || [],
+      documentValue.blocks || []
+    );
+
     loadPayloadForBlockRange(0, 1);
     state.fragmentGroups = groupedFragments(documentValue);
     renderBookHeader(documentValue);
@@ -2773,6 +2784,15 @@
           if (block.kind === "heading") {
             state.chunkByTargetId.set(
               "heading-" + safeToken(block.block_id), chunk
+            );
+          }
+          if (block.block_id === state.sourceBibliographyIndex.blockId) {
+            state.sourceBibliographyIndex.itemIndexes.forEach(
+              function (itemIndex) {
+                state.chunkByTargetId.set(
+                  sourceReferenceTargetId(block.block_id, itemIndex), chunk
+                );
+              }
             );
           }
         }
@@ -3119,10 +3139,157 @@
 
   function chunkForTargetId(targetId) {
     if (!targetId) return null;
+    targetId = canonicalReaderTargetId(targetId);
     if (targetId.indexOf("reference-") === 0) {
       return state.chunkByTargetId.get("alc-references") || null;
     }
     return state.chunkByTargetId.get(targetId) || null;
+  }
+
+  function sourceReferenceTargetId(blockId, itemIndex) {
+    return "source-reference-" + safeToken(blockId) + "-" +
+      String(itemIndex + 1);
+  }
+
+  function buildSourceBibliographyIndex(descriptors, blocks) {
+    var empty = {blockId: "", aliases: new Map(), itemIndexes: new Set()};
+    if (descriptors === undefined) return empty;
+    if (!Array.isArray(descriptors) || !Array.isArray(blocks)) {
+      throw new Error("ALC reader legacy bibliography manifest is invalid");
+    }
+    var blocksById = new Map();
+    blocks.forEach(function (block) {
+      if (block && normalizedNonblank(block.block_id)) {
+        blocksById.set(block.block_id, block);
+      }
+    });
+    var blockId = "";
+    var aliases = new Map();
+    var itemIndexes = new Set();
+    descriptors.forEach(function (descriptor) {
+      var keys = descriptor && typeof descriptor === "object" ?
+        Object.keys(descriptor).sort().join(",") : "";
+      var aliasMatch = descriptor && typeof descriptor.alias === "string" ?
+        /^bib[.]bib([1-9][0-9]*)$/.exec(descriptor.alias) : null;
+      var block = descriptor ? blocksById.get(descriptor.block_id) : null;
+      var items = block && block.payload && block.payload.items;
+      if (
+        keys !== "alias,block_id,item_index" ||
+        !aliasMatch || Number(aliasMatch[1]) !== descriptor.item_index + 1 ||
+        !normalizedNonblank(descriptor.block_id) ||
+        !nonnegativeInteger(descriptor.item_index) ||
+        !block || block.kind !== "list" ||
+        (Array.isArray(items) && descriptor.item_index >= items.length) ||
+        (blockId && blockId !== descriptor.block_id) ||
+        aliases.has(descriptor.alias) ||
+        itemIndexes.has(descriptor.item_index)
+      ) {
+        throw new Error("ALC reader legacy bibliography manifest is invalid");
+      }
+      blockId = descriptor.block_id;
+      var targetId = sourceReferenceTargetId(blockId, descriptor.item_index);
+      aliases.set(descriptor.alias, targetId);
+      itemIndexes.add(descriptor.item_index);
+    });
+    return {blockId: blockId, aliases: aliases, itemIndexes: itemIndexes};
+  }
+
+  function canonicalReaderTargetId(targetId) {
+    return state.sourceBibliographyIndex.aliases.get(targetId) || targetId;
+  }
+
+  function revealSourceReferenceTarget(targetId) {
+    if (targetId.indexOf("source-reference-") !== 0) return false;
+    if (state.sourceVisible) return true;
+    state.sourceVisible = true;
+    if (state.visibilityReady) {
+      renderVisibilityOptions();
+      applyVisibility();
+    }
+    return true;
+  }
+
+  function syncSourceBibliographyAlignment(row) {
+    var lanes = directChildWithClass(row, "alc-lanes");
+    if (!lanes) return false;
+    lanes.classList.remove("alc-aligned-bibliography");
+    lanes.style.removeProperty("--alc-aligned-list-rows");
+    if (
+      !row.dataset ||
+      row.dataset.blockId !== state.sourceBibliographyIndex.blockId ||
+      lanes.children.length !== 2
+    ) return false;
+    var source = directChildWithClass(lanes, "alc-source-card");
+    var translations = Array.from(lanes.children).filter(function (node) {
+      return node.classList.contains("alc-fragment") &&
+        node.dataset.role === "translation" &&
+        !node.classList.contains("is-inline-editing");
+    });
+    if (!source || translations.length !== 1) return false;
+    var sourceLists = directListChildren(source);
+    var saved = directChildWithClass(
+      translations[0], "alc-fragment-saved-content"
+    );
+    var markdown = directChildWithClass(saved, "alc-markdown");
+    var translatedLists = directListChildren(markdown);
+    if (
+      sourceLists.length !== 1 || translatedLists.length !== 1 ||
+      markdown.children.length !== 1
+    ) return false;
+    var sourceItems = Array.from(sourceLists[0].children);
+    var translatedItems = Array.from(translatedLists[0].children);
+    if (
+      !sourceItems.length || sourceItems.length !== translatedItems.length ||
+      !sourceItems.every(isListItem) || !translatedItems.every(isListItem)
+    ) return false;
+    lanes.style.setProperty(
+      "--alc-aligned-list-rows", String(sourceItems.length)
+    );
+    lanes.classList.add("alc-aligned-bibliography");
+    return true;
+  }
+
+  function directChildWithClass(parent, className) {
+    return parent && Array.from(parent.children || []).find(function (node) {
+      return node.classList && node.classList.contains(className);
+    }) || null;
+  }
+
+  function directListChildren(parent) {
+    return parent ? Array.from(parent.children || []).filter(function (node) {
+      return node.tagName === "OL" || node.tagName === "UL";
+    }) : [];
+  }
+
+  function isListItem(node) {
+    return node && node.tagName === "LI";
+  }
+
+  function decorateLegacyBibliographyLinks(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return;
+    Array.from(root.querySelectorAll('a[href^="#bib.bib"]')).filter(
+      function (link) {
+        return legacyBibliographyTarget(link.getAttribute("href"));
+      }
+    ).forEach(
+      function (link) {
+        var sourceHref = link.getAttribute("href") || "";
+        var alias = hashTargetId(sourceHref);
+        var canonical = state.sourceBibliographyIndex.aliases.get(alias);
+        if (canonical) {
+          link.setAttribute("href", "#" + canonical);
+          link.removeAttribute("rel");
+          return;
+        }
+        var unavailable = element("span", "alc-unresolved-reference");
+        unavailable.textContent = link.textContent || alias;
+        unavailable.appendChild(document.createTextNode(
+          " (" + labels().referenceUnavailable + ")"
+        ));
+        unavailable.title = labels().referenceUnavailable;
+        link.replaceWith(unavailable);
+      }
+    );
   }
 
   function hashTargetId(hash) {
@@ -3249,6 +3416,7 @@
       openNewEditor(block);
     });
     row.appendChild(noteButton);
+    syncSourceBibliographyAlignment(row);
     return row;
   }
 
@@ -3331,8 +3499,16 @@
     }
     if (block.kind === "list") {
       var list = element(payload.ordered ? "ol" : "ul");
-      (payload.items || []).forEach(function (item) {
+      (payload.items || []).forEach(function (item, itemIndex) {
         var listItem = element("li");
+        if (
+          block.block_id === state.sourceBibliographyIndex.blockId &&
+          state.sourceBibliographyIndex.itemIndexes.has(itemIndex)
+        ) {
+          listItem.id = sourceReferenceTargetId(block.block_id, itemIndex);
+          listItem.className = "alc-source-reference-target";
+          listItem.tabIndex = -1;
+        }
         appendInlineSpans(listItem, item.inline_spans, item.text);
         list.appendChild(listItem);
       });
@@ -3453,6 +3629,7 @@
       }
     });
     removeVisibleHtmlTags(parent);
+    decorateLegacyBibliographyLinks(parent);
     decorateGlossary(parent, "source");
     typeset(parent);
   }
@@ -6015,13 +6192,15 @@
   }
 
   function activateHashTarget(hash, updateHistory) {
-    var targetId = hashTargetId(hash);
+    var requestedTargetId = hashTargetId(hash);
+    var targetId = canonicalReaderTargetId(requestedTargetId);
+    var canonicalHash = targetId === requestedTargetId ? hash : "#" + targetId;
     if (targetId === "alc-book-header") {
       if (updateHistory) {
-        if (window.location.hash === hash) {
-          window.history.replaceState(null, "", hash);
+        if (window.location.hash === canonicalHash) {
+          window.history.replaceState(null, "", canonicalHash);
         } else {
-          window.history.pushState(null, "", hash);
+          window.history.pushState(null, "", canonicalHash);
         }
       }
       state.hashCalibration = null;
@@ -6030,14 +6209,17 @@
     }
     var chunk = chunkForTargetId(targetId);
     if (!chunk) return false;
+    revealSourceReferenceTarget(targetId);
     renderChunk(chunk);
-    armHashCalibration(hash);
+    armHashCalibration(canonicalHash);
     if (updateHistory) {
-      if (window.location.hash === hash) {
-        window.history.replaceState(null, "", hash);
+      if (window.location.hash === canonicalHash) {
+        window.history.replaceState(null, "", canonicalHash);
       } else {
-        window.history.pushState(null, "", hash);
+        window.history.pushState(null, "", canonicalHash);
       }
+    } else if (targetId !== requestedTargetId) {
+      window.history.replaceState(null, "", canonicalHash);
     }
     scrollToHashTarget(targetId);
     return true;
@@ -6075,6 +6257,20 @@
       root.style.scrollBehavior = "auto";
       target.scrollIntoView({block: "start", behavior: "auto"});
       root.style.scrollBehavior = previousBehavior;
+      if (target.classList.contains("alc-source-reference-target")) {
+        document.querySelectorAll(".alc-reference-target-active").forEach(
+          function (node) { node.classList.remove("alc-reference-target-active"); }
+        );
+        target.classList.add("alc-reference-target-active");
+        try {
+          target.focus({preventScroll: true});
+        } catch (_error) {
+          target.focus();
+        }
+        window.setTimeout(function () {
+          target.classList.remove("alc-reference-target-active");
+        }, 2400);
+      }
     });
   }
 
@@ -6632,6 +6828,9 @@
       buildChangedMarkdown(resourcePaths, categories) :
       buildCompleteMarkdown(resourcePaths, categories);
     if (!complete.markdown) return null;
+    complete.markdown = degradeLegacyBibliographyMarkdownLinks(
+      complete.markdown
+    );
     var includedResourcePaths = markdownReferencedResourcePaths(
       complete.markdown, resourcePaths
     );
@@ -6677,7 +6876,9 @@
       buildChangedMarkdown(resourcePaths, categories) :
       buildCompleteMarkdown(resourcePaths, categories);
     if (!complete.markdown) return "";
-    return stripPortableMarkdownResources(complete.markdown, resourcePaths);
+    return stripPortableMarkdownResources(
+      degradeLegacyBibliographyMarkdownLinks(complete.markdown), resourcePaths
+    );
   }
 
   function buildCompleteMarkdown(resourcePaths, selectedCategories) {
@@ -7566,12 +7767,14 @@
     return targets;
   }
 
-  function markdownCodeLineIndexes(markdown) {
+  function markdownCodeLineIndexes(markdown, parsedTokens) {
     if (!state.md || typeof state.md.parse !== "function") {
       throw new Error("Markdown parser is required for export");
     }
     var lines = new Set();
-    state.md.parse(normalizeMarkdown(String(markdown || "")), {}).forEach(
+    (parsedTokens || state.md.parse(
+      normalizeMarkdown(String(markdown || "")), {}
+    )).forEach(
       function (token) {
         if (
           ["fence", "code_block"].indexOf(token.type) < 0 ||
@@ -7583,6 +7786,138 @@
       }
     );
     return lines;
+  }
+
+  function degradeLegacyBibliographyMarkdownLinks(markdown) {
+    var normalized = normalizeMarkdown(String(markdown || ""));
+    var tokens = state.md.parse(normalized, {});
+    var codeLines = markdownCodeLineIndexes(normalized, tokens);
+    var lines = normalized.split("\n");
+    var references = legacyBibliographyMarkdownReferences(lines, codeLines);
+    lines = lines.map(function (line, lineNumber) {
+      if (references.definitionLines.has(lineNumber)) {
+        var quote = /^((?: {0,3}> ?)*)/.exec(line);
+        return quote ? quote[1].replace(/[ \t]+$/, "") : "";
+      }
+      return line;
+    });
+    var output = [];
+    var lineNumber = 0;
+    markdownInlineLineRanges(tokens).forEach(function (range) {
+      if (lineNumber < range.start) {
+        output.push(lines.slice(lineNumber, range.start).join("\n"));
+      }
+      output.push(degradeLegacyBibliographyMarkdownChunk(
+        lines.slice(range.start, range.end).join("\n"), references.aliases
+      ));
+      lineNumber = range.end;
+    });
+    if (lineNumber < lines.length) {
+      output.push(lines.slice(lineNumber).join("\n"));
+    }
+    return output.join("\n");
+  }
+
+  function markdownInlineLineRanges(tokens) {
+    var ranges = tokens.filter(function (token) {
+      return token.type === "inline" && Array.isArray(token.map) &&
+        nonnegativeInteger(token.map[0]) &&
+        nonnegativeInteger(token.map[1]) && token.map[0] < token.map[1];
+    }).map(function (token) {
+      return {start: token.map[0], end: token.map[1]};
+    }).sort(function (left, right) {
+      return left.start - right.start || left.end - right.end;
+    });
+    return ranges.reduce(function (merged, range) {
+      var previous = merged[merged.length - 1];
+      if (previous && range.start < previous.end) {
+        previous.end = Math.max(previous.end, range.end);
+      } else {
+        merged.push(range);
+      }
+      return merged;
+    }, []);
+  }
+
+  function degradeLegacyBibliographyMarkdownChunk(value, referenceAliases) {
+    var output = "";
+    var position = 0;
+    while (position < value.length) {
+      if (value.charAt(position) === "`") {
+        var run = 1;
+        while (value.charAt(position + run) === "`") run += 1;
+        var codeEnd = markdownCodeSpanEnd(value, position + run, run);
+        if (codeEnd < 0) {
+          output += value.slice(position, position + run);
+          position += run;
+          continue;
+        }
+        output += value.slice(position, codeEnd + run);
+        position = codeEnd + run;
+        continue;
+      }
+      var isImage = value.slice(position, position + 2) === "![";
+      var bracket = isImage ? position + 1 :
+        value.charAt(position) === "[" ? position : -1;
+      if (bracket >= 0 && !markdownCharacterEscaped(value, bracket)) {
+        var labelEnd = markdownLabelEnd(value, bracket);
+        var label = labelEnd >= 0 ? value.slice(bracket + 1, labelEnd) : "";
+        if (labelEnd >= 0 && value.charAt(labelEnd + 1) === "(") {
+          var destination = markdownDestinationRange(value, labelEnd + 2);
+          var linkEnd = markdownInlineLinkEnd(value, labelEnd + 1);
+          if (destination && linkEnd >= 0) {
+            var target = value.slice(destination.start, destination.end);
+            if (legacyBibliographyTarget(target)) {
+              output += label;
+              position = linkEnd + 1;
+              continue;
+            }
+          }
+        } else if (labelEnd >= 0 && value.charAt(labelEnd + 1) === "[") {
+          var referenceEnd = markdownLabelEnd(value, labelEnd + 1);
+          if (referenceEnd >= 0) {
+            var reference = value.slice(labelEnd + 2, referenceEnd) || label;
+            if (referenceAliases.has(markdownReferenceKey(reference))) {
+              output += label;
+              position = referenceEnd + 1;
+              continue;
+            }
+          }
+        } else if (
+          labelEnd >= 0 &&
+          referenceAliases.has(markdownReferenceKey(label))
+        ) {
+          output += label;
+          position = labelEnd + 1;
+          continue;
+        }
+      }
+      output += value.charAt(position);
+      position += 1;
+    }
+    return output;
+  }
+
+  function legacyBibliographyMarkdownReferences(lines, codeLines) {
+    var aliases = new Set();
+    var definitionLines = new Set();
+    var seen = new Set();
+    lines.forEach(function (line, lineNumber) {
+      if (codeLines.has(lineNumber)) return;
+      var definition = markdownReferenceDefinition(line);
+      if (!definition || definition.label.charAt(0) === "^") return;
+      var key = markdownReferenceKey(definition.label);
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (!legacyBibliographyTarget(definition.target)) return;
+      aliases.add(key);
+      definitionLines.add(lineNumber);
+    });
+    return {aliases: aliases, definitionLines: definitionLines};
+  }
+
+  function legacyBibliographyTarget(target) {
+    return /^#bib[.]bib[1-9][0-9]*$/.test(String(target || ""));
   }
 
   function markdownReferencedResourcePaths(markdown, resourcePaths) {
@@ -7892,7 +8227,10 @@
   }
 
   function markdownDestinationRange(line, start) {
-    while (line.charAt(start) === " " || line.charAt(start) === "\t") {
+    while (
+      line.charAt(start) === " " || line.charAt(start) === "\t" ||
+      line.charAt(start) === "\n"
+    ) {
       start += 1;
     }
     if (line.charAt(start) === "<") {
@@ -7915,7 +8253,10 @@
       } else if (character === ")") {
         if (depth === 0) return {start: start, end: index};
         depth -= 1;
-      } else if ((character === " " || character === "\t") && depth === 0) {
+      } else if (
+        (character === " " || character === "\t" || character === "\n") &&
+        depth === 0
+      ) {
         return {start: start, end: index};
       }
     }
@@ -9554,11 +9895,13 @@
     var card = document.querySelector(
       '.alc-fragment[data-fragment-id="' + cssString(fragmentId) + '"]'
     );
+    var row = card && card.closest ? card.closest(".alc-source-row") : null;
     if (!fragmentIsVisible(current) && card && typeof card.remove === "function") {
       card.remove();
     } else if (current && card && typeof card.replaceWith === "function") {
       card.replaceWith(renderFragment(current));
     }
+    if (row) syncSourceBibliographyAlignment(row);
   }
 
   function historyRevisionLabel(revision, values) {
