@@ -23,6 +23,7 @@ def _report(**overrides: object) -> dict[str, object]:
         "mathErrors": 0,
         "missingFragments": 0,
         "failedImages": 0,
+        "legacyBibliographyLinks": 0,
     }
     values.update(overrides)
     return values
@@ -59,6 +60,8 @@ def test_browser_validation_discovers_system_browser_and_forces_reader_checks(
     assert "image.decode()" in browser_validation._READER_REPORT_EXPRESSION
     assert 'image.loading = "eager"' in browser_validation._READER_REPORT_EXPRESSION
     assert "alc-render-chunk:not(.is-rendered)" in browser_validation._READER_REPORT_EXPRESSION
+    assert "legacyBibliographyLinks" in browser_validation._READER_REPORT_EXPRESSION
+    assert "^#bib[.]bib[1-9][0-9]*$" in browser_validation._READER_REPORT_EXPRESSION
     assert "Date.now() + 120000" in browser_validation._reader_report_expression(120)
     assert "55000" not in browser_validation._reader_report_expression(120)
 
@@ -72,6 +75,10 @@ def test_browser_validation_discovers_system_browser_and_forces_reader_checks(
         (_report(mathErrors=3), "3 math rendering errors"),
         (_report(failedImages=1), "1 failed reader images"),
         (_report(missingFragments=2), "2 missing selected fragments"),
+        (
+            _report(legacyBibliographyLinks=2),
+            "2 unresolved legacy bibliography links",
+        ),
     ),
 )
 def test_browser_validation_reports_reader_runtime_failures(

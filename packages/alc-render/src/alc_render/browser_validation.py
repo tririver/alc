@@ -308,6 +308,7 @@ def _raise_for_report(
     math_errors = report.get("mathErrors")
     failed_images = report.get("failedImages")
     missing_fragments = report.get("missingFragments")
+    legacy_bibliography_links = report.get("legacyBibliographyLinks")
     if ready != "true":
         raise HTMLRenderError(f"browser reader initialization did not complete: {ready}")
     if exceptions:
@@ -319,6 +320,7 @@ def _raise_for_report(
         (math_errors, "math rendering errors"),
         (failed_images, "failed reader images"),
         (missing_fragments, "missing selected fragments"),
+        (legacy_bibliography_links, "unresolved legacy bibliography links"),
     ):
         if not isinstance(count, int):
             raise HTMLRenderError("browser validation report is malformed")
@@ -374,6 +376,13 @@ _READER_REPORT_EXPRESSION: Final = """(async () => {
     })(),
     failedImages: Array.from(document.images).filter(
       image => !image.complete || image.naturalWidth === 0
+    ).length,
+    legacyBibliographyLinks: Array.from(document.querySelectorAll(
+      'a[href^="#bib.bib"]'
+    )).filter(
+      link => /^#bib[.]bib[1-9][0-9]*$/.test(
+        link.getAttribute("href") || ""
+      )
     ).length
   };
 })()"""
