@@ -18,6 +18,10 @@ from .html import (
     validate_publication_workspace,
     validate_standalone_html,
 )
+from .glossary_delivery import (
+    read_glossary_delivery,
+    validate_glossary_delivery,
+)
 from .standalone_html import StandaloneHtmlError, write_standalone_html
 from .workspace import (
     RenderWorkspaceError,
@@ -89,6 +93,11 @@ def _parser() -> argparse.ArgumentParser:
             "resources, and reader_profile"
         ),
     )
+    compose.add_argument(
+        "--glossary",
+        type=Path,
+        help="optional source-bound render glossary delivery",
+    )
     compose.add_argument("--output", type=Path, required=True)
 
     render = subparsers.add_parser(
@@ -149,10 +158,20 @@ def _compose(args: argparse.Namespace) -> dict[str, Any]:
             ) from exc
         layer_refs.append(layer.reference(relative))
 
+    glossary = tuple(metadata["glossary"])
+    if args.glossary is not None:
+        if glossary:
+            raise ValueError(
+                "publication metadata already contains glossary entries"
+            )
+        delivery = read_glossary_delivery(args.glossary)
+        validate_glossary_delivery(document, delivery)
+        glossary = delivery.entries
+
     publication = Publication(
         source_document=document,
         layers=tuple(layer_refs),
-        glossary=tuple(metadata["glossary"]),
+        glossary=glossary,
         bibliography=tuple(metadata["bibliography"]),
         labels=metadata["labels"],
         resources=tuple(metadata["resources"]),
@@ -164,6 +183,7 @@ def _compose(args: argparse.Namespace) -> dict[str, Any]:
         "publication_digest": publication.publication_digest,
         "source_document_digest": document.document_digest,
         "layer_count": len(layer_refs),
+        "glossary_count": len(glossary),
     }
 
 

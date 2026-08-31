@@ -21,6 +21,7 @@ from alc_render import (
     FragmentAppearance,
     FragmentRevision,
     FragmentRevisionRef,
+    GlossaryDelivery,
     Layer,
     Publication,
     PublicationOutlineItem,
@@ -28,9 +29,12 @@ from alc_render import (
     fragment_revision_filename,
     layer_from_document,
     layer_to_document,
+    glossary_delivery_from_document,
+    glossary_delivery_to_document,
     publication_from_document,
     publication_to_document,
     source_identity_from_rich_document,
+    validate_glossary_delivery,
 )
 
 
@@ -221,6 +225,41 @@ def test_layer_only_accepts_initial_revisions() -> None:
                     item.semantic_digest,
                 ),
             ),
+        )
+
+
+def test_glossary_delivery_is_source_bound_exact_and_digest_verified() -> None:
+    document = outlined_rich_document()
+    delivery = GlossaryDelivery(
+        source_identity_from_rich_document(document),
+        ({
+            "entry_id": "term-body",
+            "term": "Body",
+            "translated_term": "正文",
+            "definition": "文档正文。",
+            "anchor_ids": ["block-paragraph"],
+            "citations": [],
+        },),
+    )
+    validate_glossary_delivery(document, delivery)
+    encoded = glossary_delivery_to_document(delivery)
+    assert glossary_delivery_from_document(encoded) == delivery
+
+    encoded["entries"][0]["translated_term"] = "篡改"
+    with pytest.raises(ValueError, match="digest"):
+        glossary_delivery_from_document(encoded)
+
+    unknown = GlossaryDelivery(
+        delivery.source,
+        ({**dict(delivery.entries[0]), "anchor_ids": ["missing-block"]},),
+    )
+    with pytest.raises(ValueError, match="unknown block anchor"):
+        validate_glossary_delivery(document, unknown)
+
+    with pytest.raises(ValueError, match="invalid fields"):
+        GlossaryDelivery(
+            delivery.source,
+            ({**dict(delivery.entries[0]), "extra": True},),
         )
 
 
