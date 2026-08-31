@@ -1,6 +1,6 @@
 """Atomic overlays and standalone publication rendering for ALC."""
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 from .contracts import (
     FRAGMENT_REVISION_SCHEMA,
