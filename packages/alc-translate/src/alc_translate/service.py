@@ -27,6 +27,7 @@ from .contracts import (
     GenerationRecipe,
     GlossaryRequest,
     LanguageRequest,
+    TranslationSource,
     decode_blocks_semantic_input,
     decode_glossary_semantic_input,
     decode_language_semantic_input,
@@ -244,6 +245,31 @@ class TranslationService:
             snapshot.result_ref.artifact_id,
             snapshot.result_ref.digest,
         )
+
+    def request_source(self, run_id: str) -> TranslationSource:
+        """Return the exact rich source frozen into one durable request."""
+
+        spec = self.repository.read_spec(run_id)
+        try:
+            if spec.handler == LANGUAGE_HANDLER:
+                request, _recipe = decode_language_semantic_input(
+                    spec.semantic_input
+                )
+            elif spec.handler == GLOSSARY_HANDLER:
+                request, _recipe = decode_glossary_semantic_input(
+                    spec.semantic_input
+                )
+            elif spec.handler == BLOCKS_HANDLER:
+                request, _recipe = decode_blocks_semantic_input(
+                    spec.semantic_input
+                )
+            else:
+                raise ValueError("unsupported run handler")
+            return request.source
+        except ValueError as exc:
+            raise TranslationServiceError(
+                "run_spec_invalid", "translation run spec is invalid"
+            ) from exc
 
     def _handler(
         self,

@@ -19,6 +19,11 @@ paper discovery or research judgment.
 - Companion build, resume, revision, or render: read
   `workflows/companion.md` and `manuals/alc-companion.md`.
 
+When the requested result includes a reading guide, paragraph companion,
+visible glossary, or a complete learning Reader, select the Companion workflow.
+Standalone translation owns source-plus-translation delivery; it does not
+substitute for Companion merely because it builds a glossary prerequisite.
+
 Read `rules/interaction.md` for user-choice and automation behavior and
 `rules/operating.md` for shared local-state rules. Do not preload unrelated
 manuals.

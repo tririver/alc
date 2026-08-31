@@ -79,6 +79,10 @@ class TranslationProject:
         return self.root / "translation.layer.json"
 
     @property
+    def translation_glossary(self) -> Path:
+        return self.root / "translation.glossary.json"
+
+    @property
     def current_run_id(self) -> str | None:
         return self._read()["current_run_id"]
 

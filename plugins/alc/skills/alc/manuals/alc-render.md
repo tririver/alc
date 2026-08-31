@@ -76,20 +76,25 @@ publication are resolved from the directory containing `publication.json`.
 `--layer` is optional and repeatable; command-line order is publication order.
 Every Layer file must be below the output publication directory and must bind
 the exact `RichDocument`. Its referenced `fragments/` files must also be present
-below that root. When reusing a standalone `alc-translate` result, copy both
-`translation.layer.json` and its complete `fragments/` tree into the exported
-publication directory without changing their relative paths. Do not copy only
-the Layer. After a producer has placed a Layer and its revisions there, compose
-with:
+below that root. When reusing a standalone `alc-translate` result, copy
+`translation.layer.json`, `translation.glossary.json`, and the complete
+`fragments/` tree into the exported publication directory without changing
+their relative paths. Do not copy only the Layer. Compose with:
 
 ```bash
 alc-render compose \
   --source publication/rich-source.json \
   --metadata publication/metadata.json \
+  --glossary publication/translation.glossary.json \
   --layer publication/translation.layer.json \
   --layer publication/companion.layer.json \
   --output publication/publication.json
 ```
+
+`--glossary` is required for a visible standalone translation glossary. It
+binds the exact source and block anchors. Compose fails closed on another
+source, unknown anchors, or non-empty metadata glossary instead of overwriting
+either input.
 
 A Layer outside `publication/` is rejected even when its contents are valid.
 Do not move only a Layer while leaving its referenced revisions elsewhere.

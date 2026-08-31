@@ -35,7 +35,9 @@ from .contracts import (
 )
 from .delivery import (
     TranslationDeliveryError,
+    publish_translation_glossary,
     publish_translation_layer,
+    validate_translation_glossary,
     validate_translation_layer,
 )
 from .project import TranslationProject, TranslationProjectError
@@ -313,7 +315,9 @@ def _build_glossary(args: argparse.Namespace) -> CommandResult:
         keyword_provider=_keyword_provider(paper),
         execution=_execution(args),
     )
-    return _snapshot_result(project, service, snapshot)
+    return _snapshot_result(
+        project, service, snapshot, document=source.rich
+    )
 
 
 def _translate_blocks(args: argparse.Namespace) -> CommandResult:
@@ -335,6 +339,9 @@ def _translate_blocks(args: argparse.Namespace) -> CommandResult:
         paper, args.source, refresh=args.refresh
     )
     _require_same_source(language, source)
+    publish_translation_glossary(
+        project, document=source.rich, result=glossary
+    )
     snapshot = service.prepare_blocks(
         BlocksRequest(
             source,
@@ -360,22 +367,53 @@ def _status(args: argparse.Namespace) -> CommandResult:
         selected = project.run_id(step)
         if selected is not None:
             steps[step] = snapshot_data(service.inspect(selected).snapshot)
-    delivery_ok = (
+    blocks_delivery_ok = (
         project.current_step == "blocks"
         and selected_snapshot.status.value == "succeeded"
         and project.translation_layer.is_file()
+        and project.translation_glossary.is_file()
+    )
+    glossary_delivery_ok = (
+        project.current_step == "glossary"
+        and selected_snapshot.status.value == "succeeded"
+        and project.translation_glossary.is_file()
     )
     warnings = base.warnings
     if (
         project.current_step == "blocks"
         and selected_snapshot.status.value == "succeeded"
-        and not delivery_ok
+        and not blocks_delivery_ok
     ):
         warnings = (*warnings, CommandWarning(
             "delivery_missing",
-            "successful translation has no visible alc-render Layer; "
-            "resume or rerun its publishing step",
+            "successful translation has no complete alc-render "
+            "Layer/glossary delivery; rerun build-glossary and "
+            "translate-blocks with the same source and project",
         ))
+    if (
+        project.current_step == "glossary"
+        and selected_snapshot.status.value == "succeeded"
+        and not glossary_delivery_ok
+    ):
+        warnings = (*warnings, CommandWarning(
+            "delivery_missing",
+            "successful glossary has no source-bound alc-render delivery; "
+            "rerun build-glossary with the same source and project",
+        ))
+    artifacts: tuple[CommandArtifact, ...] = ()
+    if blocks_delivery_ok:
+        artifacts = (
+            CommandArtifact("layer", run_id, str(project.translation_layer)),
+            CommandArtifact(
+                "glossary", run_id, str(project.translation_glossary)
+            ),
+        )
+    elif glossary_delivery_ok:
+        artifacts = (
+            CommandArtifact(
+                "glossary", run_id, str(project.translation_glossary)
+            ),
+        )
     return CommandResult(
         base.status,
         run=base.run,
@@ -384,11 +422,7 @@ def _status(args: argparse.Namespace) -> CommandResult:
             "run": snapshot_data(selected_snapshot),
             "steps": steps,
         },
-        artifacts=(
-            CommandArtifact("layer", run_id, str(project.translation_layer)),
-        )
-        if delivery_ok
-        else (),
+        artifacts=artifacts,
         warnings=warnings,
         error=base.error,
         resume=base.resume,
@@ -409,7 +443,24 @@ def _resume(args: argparse.Namespace) -> CommandResult:
         keyword_provider=keyword_provider,
         execution=_execution(args),
     )
-    return _snapshot_result(project, service, snapshot)
+    document = None
+    if snapshot.status.value == "succeeded":
+        source = service.request_source(run_id)
+        document = source.rich
+        if project.current_step == "blocks" and not project.translation_glossary.is_file():
+            glossary_run = _required_step(project, "glossary")
+            glossary = service.result(glossary_run)
+            if not isinstance(glossary, GlossaryResult):
+                raise TranslationServiceError(
+                    "prerequisite_invalid",
+                    "glossary prerequisite has the wrong type",
+                )
+            publish_translation_glossary(
+                project, document=document, result=glossary
+            )
+    return _snapshot_result(
+        project, service, snapshot, document=document
+    )
 
 
 def _stop(args: argparse.Namespace) -> CommandResult:
@@ -435,31 +486,57 @@ def _validate(args: argparse.Namespace) -> CommandResult:
     report = service.validate(run_id)
     if report.ok:
         snapshot = service.inspect(run_id).snapshot
+        delivery: dict[str, str] | None = None
+        artifacts: tuple[CommandArtifact, ...] = ()
         if snapshot.status.value == "succeeded":
             result = service.result(run_id)
             if isinstance(result, TranslationResult):
                 validate_translation_layer(project, result=result)
+                glossary_run = _required_step(project, "glossary")
+                glossary = service.result(glossary_run)
+                if not isinstance(glossary, GlossaryResult):
+                    raise TranslationServiceError(
+                        "prerequisite_invalid",
+                        "glossary prerequisite has the wrong type",
+                    )
+                validate_translation_glossary(
+                    project,
+                    document=service.request_source(glossary_run).rich,
+                    result=glossary,
+                )
+                delivery = {
+                    "layer": str(project.translation_layer),
+                    "glossary": str(project.translation_glossary),
+                }
+                artifacts = (
+                    CommandArtifact(
+                        "layer", run_id, str(project.translation_layer)
+                    ),
+                    CommandArtifact(
+                        "glossary", run_id, str(project.translation_glossary)
+                    ),
+                )
+            elif isinstance(result, GlossaryResult):
+                validate_translation_glossary(
+                    project,
+                    document=service.request_source(run_id).rich,
+                    result=result,
+                )
+                delivery = {"glossary": str(project.translation_glossary)}
+                artifacts = (
+                    CommandArtifact(
+                        "glossary", run_id, str(project.translation_glossary)
+                    ),
+                )
         return CommandResult(
             CommandStatus.COMPLETED,
             run=CommandRun(snapshot.run_id, snapshot.revision),
             data={
                 "valid": True,
                 "issues": [],
-                "delivery": (
-                    {"layer": str(project.translation_layer)}
-                    if snapshot.status.value == "succeeded"
-                    and isinstance(result, TranslationResult)
-                    else None
-                ),
+                "delivery": delivery,
             },
-            artifacts=(
-                CommandArtifact(
-                    "layer", run_id, str(project.translation_layer)
-                ),
-            )
-            if snapshot.status.value == "succeeded"
-            and isinstance(result, TranslationResult)
-            else (),
+            artifacts=artifacts,
         )
     return _failed(
         "run_invalid",
@@ -521,14 +598,27 @@ def _get_result(args: argparse.Namespace) -> CommandResult:
         "result": result.to_document(),
     }
     artifacts: tuple[CommandArtifact, ...] = ()
-    if args.step == "blocks" and project.translation_layer.is_file():
+    if (
+        args.step == "blocks"
+        and project.translation_layer.is_file()
+        and project.translation_glossary.is_file()
+    ):
         assert isinstance(result, TranslationResult)
         data["delivery"] = {
             "layer": str(project.translation_layer),
+            "glossary": str(project.translation_glossary),
             "revision_count": len(result.revision_artifacts),
         }
         artifacts = (
             CommandArtifact("layer", run_id, str(project.translation_layer)),
+            CommandArtifact(
+                "glossary", run_id, str(project.translation_glossary)
+            ),
+        )
+    elif args.step == "glossary" and project.translation_glossary.is_file():
+        data["delivery"] = {"glossary": str(project.translation_glossary)}
+        artifacts = (
+            CommandArtifact("glossary", run_id, str(project.translation_glossary)),
         )
     return CommandResult(
         CommandStatus.COMPLETED,
@@ -542,6 +632,8 @@ def _snapshot_result(
     project: TranslationProject,
     service: TranslationService,
     snapshot: Any,
+    *,
+    document: Any | None = None,
 ) -> CommandResult:
     base = command_result_from_snapshot(snapshot)
     if snapshot.status.value != "succeeded":
@@ -555,6 +647,33 @@ def _snapshot_result(
             resume=base.resume,
         )
     result = service.result(snapshot.run_id)
+    if isinstance(result, GlossaryResult):
+        if document is None:
+            raise TranslationDeliveryError(
+                "glossary publication requires its exact rich source"
+            )
+        delivery = publish_translation_glossary(
+            project, document=document, result=result
+        )
+        return CommandResult(
+            base.status,
+            run=base.run,
+            data={
+                "run": snapshot_data(snapshot),
+                "delivery": {
+                    "glossary": str(delivery),
+                    "entry_count": len(
+                        _published_glossary(project).entries
+                    ),
+                },
+            },
+            artifacts=(
+                CommandArtifact("glossary", snapshot.run_id, str(delivery)),
+            ),
+            warnings=base.warnings,
+            error=base.error,
+            resume=base.resume,
+        )
     if not isinstance(result, TranslationResult):
         return CommandResult(
             base.status,
@@ -564,6 +683,10 @@ def _snapshot_result(
             warnings=base.warnings,
             error=base.error,
             resume=base.resume,
+        )
+    if not project.translation_glossary.is_file():
+        raise TranslationDeliveryError(
+            "translation has no source-bound glossary delivery"
         )
     delivery = publish_translation_layer(
         project,
@@ -587,17 +710,34 @@ def _snapshot_result(
             "run": snapshot_data(snapshot),
             "delivery": {
                 "layer": str(delivery),
+                "glossary": str(project.translation_glossary),
                 "revision_count": len(result.revision_artifacts),
             },
         },
         artifacts=(
             CommandArtifact("layer", snapshot.run_id, str(delivery)),
+            CommandArtifact(
+                "glossary",
+                snapshot.run_id,
+                str(project.translation_glossary),
+            ),
             *revision_artifacts,
         ),
         warnings=base.warnings,
         error=base.error,
         resume=base.resume,
     )
+
+
+def _published_glossary(project: TranslationProject) -> Any:
+    from alc_render import read_glossary_delivery
+
+    try:
+        return read_glossary_delivery(project.translation_glossary)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise TranslationDeliveryError(
+            "translation glossary delivery is unreadable or invalid"
+        ) from exc
 
 
 def _recipe(args: argparse.Namespace) -> GenerationRecipe:
