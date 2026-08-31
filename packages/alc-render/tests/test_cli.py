@@ -16,7 +16,13 @@ from ac_document import (
     rich_document_to_document,
 )
 
-from alc_render import BrowserValidation
+from alc_render import (
+    BrowserValidation,
+    GlossaryDelivery,
+    read_publication,
+    source_identity_from_rich_document,
+    write_glossary_delivery,
+)
 from alc_render import cli
 from alc_render.cli import main
 
@@ -133,6 +139,103 @@ def test_cli_renders_direct_rich_source_with_copied_asset(
     rendered = html.read_text(encoding="utf-8")
     assert "data:image/png;base64," in rendered
     assert "Measured result" in rendered
+
+
+def test_cli_composes_one_source_bound_glossary_delivery(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    markdown = tmp_path / "paper.md"
+    markdown.write_text("# Result\n\nMeasured result.\n", encoding="utf-8")
+    repository = SourceRepository(tmp_path / "paper-cache")
+    document = RichDocumentParserService(repository).parse_source(
+        repository.import_path(markdown)
+    )
+    source = tmp_path / "source.json"
+    source.write_text(
+        json.dumps(rich_document_to_document(document)), encoding="utf-8"
+    )
+    body = document.blocks[1]
+    glossary = GlossaryDelivery(
+        source_identity_from_rich_document(document),
+        ({
+            "entry_id": "term-result",
+            "term": "result",
+            "translated_term": "结果",
+            "definition": "测量得到的结果。",
+            "anchor_ids": [body.block_id],
+            "citations": [],
+        },),
+    )
+    glossary_path = write_glossary_delivery(
+        tmp_path / "translation.glossary.json", glossary
+    )
+    publication_path = tmp_path / "publication.json"
+
+    assert main([
+        "compose",
+        "--source", str(source),
+        "--glossary", str(glossary_path),
+        "--output", str(publication_path),
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["glossary_count"] == 1
+    assert read_publication(publication_path).glossary == glossary.entries
+
+    other = _source(tmp_path / "other-source.json")
+    with pytest.raises(SystemExit) as mismatch:
+        main([
+            "compose",
+            "--source", str(other),
+            "--glossary", str(glossary_path),
+            "--output", str(tmp_path / "other-publication.json"),
+        ])
+    assert mismatch.value.code == 2
+
+
+def test_cli_rejects_glossary_delivery_over_existing_metadata_glossary(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "paper.md"
+    markdown.write_text("# Source\n\nBody.\n", encoding="utf-8")
+    repository = SourceRepository(tmp_path / "cache")
+    document = RichDocumentParserService(repository).parse_source(
+        repository.import_path(markdown)
+    )
+    source = tmp_path / "source.json"
+    source.write_text(
+        json.dumps(rich_document_to_document(document)), encoding="utf-8"
+    )
+    entry = {
+        "entry_id": "term-body",
+        "term": "Body",
+        "translated_term": "正文",
+        "definition": "正文。",
+        "anchor_ids": [document.blocks[1].block_id],
+        "citations": [],
+    }
+    glossary_path = write_glossary_delivery(
+        tmp_path / "translation.glossary.json",
+        GlossaryDelivery(source_identity_from_rich_document(document), (entry,)),
+    )
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(json.dumps({
+        "glossary": [entry],
+        "bibliography": [],
+        "labels": {},
+        "resources": [],
+        "reader_profile": {},
+    }), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as error:
+        main([
+            "compose",
+            "--source", str(source),
+            "--metadata", str(metadata),
+            "--glossary", str(glossary_path),
+            "--output", str(tmp_path / "publication.json"),
+        ])
+    assert error.value.code == 2
 
 
 def test_compose_help_and_parser_reject_removed_cached_source_flags(

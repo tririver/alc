@@ -34,6 +34,13 @@ A publication may contain no overlay Layers. To include existing Layers, repeat
 revision files must remain below the directory that contains
 `publication.json`.
 
+Standalone translation glossaries use a separate render-native, source-bound
+handoff. Pass it with
+`--glossary publication/translation.glossary.json`. Compose verifies the exact
+RichDocument and every block anchor, and rejects a non-empty metadata glossary
+instead of silently choosing one input. Successful compose output reports both
+`layer_count` and `glossary_count`.
+
 When bare commands are unavailable in an installed ALC Skill, use its runtime:
 
 ```bash
@@ -56,7 +63,7 @@ Successful commands print flat JSON objects:
 
 | Command | Result fields |
 | --- | --- |
-| `compose` | `publication`, `publication_digest`, `source_document_digest`, `layer_count` |
+| `compose` | `publication`, `publication_digest`, `source_document_digest`, `layer_count`, `glossary_count` |
 | `render` | `html`, `publication_digest`, `selected_revision_digests`, `selected_glossary_revision_digests`, `warnings` |
 | `validate` | `publication`, `publication_digest`, `warnings`, plus `html` when supplied and `browser` when requested |
 | `standalone-html` | `html` |
