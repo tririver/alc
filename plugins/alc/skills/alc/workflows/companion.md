@@ -238,6 +238,14 @@ run events, never in reader content.
 root standalone HTML together. A missing or invalid `companion.html` is a
 delivery failure, not a substitute for publication validation.
 
+Completion must come from `alc-companion validate`, not generic
+`alc-render validate` against a manually composed translation Reader. Confirm
+that the selected Companion run succeeded. A translated build must carry its
+source-bound glossary when anchored entries exist. Guide or companion card
+counts may legitimately be zero only after every planned chapter completed
+proposer-reviewer evaluation; never infer that evaluation occurred merely
+because a translation Layer renders successfully.
+
 For a bounded correction to already published fragment text, create a formal
 revision request and run:
 

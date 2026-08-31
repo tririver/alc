@@ -1,30 +1,38 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 from ac_jobs import ArtifactDigest, ArtifactRef
 from ac_document import AcDocumentService, RichDocumentParserService
+from ac_document import rich_document_to_document
 from alc_render import (
     AnchorKind,
     FragmentAnchor,
     FragmentRevision,
+    GlossaryDelivery,
     Layer,
     anchor_block_from_rich_block,
     encode_fragment_revision,
     fragment_revision_filename,
     fragment_revision_ref,
     read_fragment_revision,
+    read_glossary_delivery,
     read_layer,
+    read_publication,
     source_identity_from_rich_document,
 )
+from alc_render.cli import main as render_main
 from alc_translate.delivery import (
     TranslationDeliveryError,
+    publish_translation_glossary,
     publish_translation_layer,
     validate_translation_layer,
 )
 from alc_translate.project import TranslationProject
 from alc_translate.workflow import (
+    GlossaryResult,
     TranslationResult,
     TranslationRevisionArtifact,
 )
@@ -112,6 +120,109 @@ def test_successful_translation_delivery_is_native_layer_and_revision(
     assert published.markdown_body == "翻译后的段落。"
     assert published.priority == 10
     validate_translation_layer(project, result=result)
+
+
+def test_successful_glossary_delivery_is_source_bound_and_render_native(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "paper.md"
+    source_path.write_text(
+        "# Source\n\nA quantum field appears here.\n", encoding="utf-8"
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "cache")
+    artifact = paper.import_source(source_path)
+    document = RichDocumentParserService(paper.repository).parse_source(
+        artifact
+    )
+    result = GlossaryResult(
+        document_digest=document.document_digest,
+        source_digest=document.source.artifact_digest,
+        target_language="zh-CN",
+        approx_count=1,
+        inventory_digest="a" * 64,
+        entries=({
+            "term_id": "term-quantum-field",
+            "term": "quantum field",
+            "aliases": [],
+            "occurrence_count": 1,
+            "source_refs": [],
+            "matched_sentences": [],
+            "preferred_translation": "量子场",
+            "target_definition": "量子理论中的场。",
+        },),
+    )
+    project = TranslationProject.open(tmp_path / "project")
+
+    path = publish_translation_glossary(
+        project, document=document, result=result
+    )
+    delivery = read_glossary_delivery(path)
+    assert isinstance(delivery, GlossaryDelivery)
+    assert delivery.source == source_identity_from_rich_document(document)
+    assert delivery.entries[0]["term"] == "quantum field"
+    assert delivery.entries[0]["translated_term"] == "量子场"
+    assert delivery.entries[0]["anchor_ids"] == (
+        document.blocks[1].block_id,
+    )
+
+    mismatched = GlossaryResult(
+        **{**result.__dict__, "source_digest": "b" * 64}
+    )
+    with pytest.raises(TranslationDeliveryError, match="another rich source"):
+        publish_translation_glossary(
+            project, document=document, result=mismatched
+        )
+
+
+def test_standalone_glossary_delivery_composes_into_publication(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "paper.md"
+    source_path.write_text(
+        "# Source\n\nA quantum field appears here.\n", encoding="utf-8"
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "cache")
+    document = RichDocumentParserService(paper.repository).parse_source(
+        paper.import_source(source_path)
+    )
+    glossary = GlossaryResult(
+        document_digest=document.document_digest,
+        source_digest=document.source.artifact_digest,
+        target_language="zh-CN",
+        approx_count=1,
+        inventory_digest="c" * 64,
+        entries=({
+            "term_id": "term-quantum-field",
+            "term": "quantum field",
+            "aliases": [],
+            "occurrence_count": 1,
+            "source_refs": [],
+            "matched_sentences": [],
+            "preferred_translation": "量子场",
+            "target_definition": "量子理论中的场。",
+        },),
+    )
+    project = TranslationProject.open(tmp_path / "project")
+    glossary_path = publish_translation_glossary(
+        project, document=document, result=glossary
+    )
+    source_json = tmp_path / "rich-source.json"
+    source_json.write_text(
+        json.dumps(rich_document_to_document(document)), encoding="utf-8"
+    )
+    publication_path = tmp_path / "publication.json"
+
+    assert render_main([
+        "compose",
+        "--source", str(source_json),
+        "--glossary", str(glossary_path),
+        "--output", str(publication_path),
+    ]) == 0
+    publication = read_publication(publication_path)
+    assert publication.glossary[0]["term"] == "quantum field"
+    assert publication.glossary[0]["anchor_ids"] == (
+        document.blocks[1].block_id,
+    )
 
 
 def test_selected_translation_cannot_replace_document_layer(tmp_path) -> None:

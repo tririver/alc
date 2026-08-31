@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 
 from ac_jobs import RunEngine, RunRepository, RunSpec, Succeeded
-from alc_render import Layer, SourceIdentity, write_layer
+from ac_document import AcDocumentService, RichDocumentParserService
+from alc_render import (
+    GlossaryDelivery,
+    Layer,
+    SourceIdentity,
+    write_glossary_delivery,
+    write_layer,
+)
 from alc_translate import cli
 from alc_translate.handlers import (
     BLOCKS_HANDLER,
@@ -11,6 +18,7 @@ from alc_translate.handlers import (
     LANGUAGE_HANDLER,
 )
 from alc_translate.project import TranslationProject
+from alc_translate.service import TranslationService
 from alc_translate.workflow import (
     GlossaryResult,
     LanguageResult,
@@ -173,6 +181,51 @@ def test_get_result_returns_canonical_glossary_result(tmp_path, capsys):
     assert envelope["artifacts"] == []
 
 
+def test_successful_glossary_snapshot_materializes_render_delivery(
+    tmp_path, capsys
+):
+    source_path = tmp_path / "paper.md"
+    source_path.write_text(
+        "# Source\n\nA quantum field appears here.\n", encoding="utf-8"
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "cache")
+    document = RichDocumentParserService(paper.repository).parse_source(
+        paper.import_source(source_path)
+    )
+    result = GlossaryResult(
+        document_digest=document.document_digest,
+        source_digest=document.source.artifact_digest,
+        target_language="zh-CN",
+        approx_count=1,
+        inventory_digest="c" * 64,
+        entries=({
+            "term_id": "term-quantum-field",
+            "term": "quantum field",
+            "aliases": [],
+            "occurrence_count": 1,
+            "source_refs": [],
+            "matched_sentences": [],
+            "preferred_translation": "量子场",
+            "target_definition": "量子理论中的场。",
+        },),
+    )
+    project, snapshot = _selected_result(tmp_path, "glossary", result)
+
+    envelope = cli._snapshot_result(
+        project,
+        TranslationService(project.jobs_root),
+        snapshot,
+        document=document,
+    )
+    assert envelope.status.value == "completed"
+    assert envelope.data["delivery"] == {
+        "glossary": str(project.translation_glossary),
+        "entry_count": 1,
+    }
+    assert project.translation_glossary.is_file()
+    assert capsys.readouterr().out == ""
+
+
 def test_get_result_includes_existing_blocks_layer_delivery(tmp_path, capsys):
     source = SourceIdentity(
         "markdown",
@@ -191,6 +244,10 @@ def test_get_result_includes_existing_blocks_layer_delivery(tmp_path, capsys):
     )
     project, snapshot = _selected_result(tmp_path, "blocks", result)
     write_layer(project.translation_layer, result.layer)
+    write_glossary_delivery(
+        project.translation_glossary,
+        GlossaryDelivery(source, ()),
+    )
 
     assert cli.main(
         [
@@ -209,6 +266,7 @@ def test_get_result_includes_existing_blocks_layer_delivery(tmp_path, capsys):
         "result": result.to_document(),
         "delivery": {
             "layer": str(project.translation_layer),
+            "glossary": str(project.translation_glossary),
             "revision_count": 0,
         },
     }
@@ -217,7 +275,12 @@ def test_get_result_includes_existing_blocks_layer_delivery(tmp_path, capsys):
             "role": "layer",
             "id": snapshot.run_id,
             "path": str(project.translation_layer),
-        }
+        },
+        {
+            "role": "glossary",
+            "id": snapshot.run_id,
+            "path": str(project.translation_glossary),
+        },
     ]
 
 
@@ -249,6 +312,33 @@ def test_get_result_omits_blocks_delivery_when_layer_is_absent(tmp_path, capsys)
         ]
     ) == 0
 
+    envelope = _result(capsys)
+    assert "delivery" not in envelope["data"]
+    assert envelope["artifacts"] == []
+
+
+def test_get_result_omits_incomplete_blocks_delivery_without_glossary(
+    tmp_path, capsys
+):
+    source = SourceIdentity(
+        "markdown", "text/markdown", "a" * 64, 10, "b" * 64
+    )
+    result = TranslationResult(
+        source_language="en",
+        target_language="fr",
+        mode="enabled",
+        coverage="document",
+        layer=Layer(source, "alc-translate", ()),
+        revision_artifacts=(),
+    )
+    project, _snapshot = _selected_result(tmp_path, "blocks", result)
+    write_layer(project.translation_layer, result.layer)
+
+    assert cli.main([
+        "get-result",
+        "--project-dir", str(project.root),
+        "--step", "blocks",
+    ]) == 0
     envelope = _result(capsys)
     assert "delivery" not in envelope["data"]
     assert envelope["artifacts"] == []

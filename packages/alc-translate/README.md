@@ -70,9 +70,17 @@ and fenced code blocks.
 `<project-dir>/.alc/translate/`.
 The final translation step publishes immutable revisions below
 `<project-dir>/fragments/` and
-`<project-dir>/translation.layer.json`. Language and glossary steps remain
-durable prerequisites and do not publish a reader delivery. Compose the Layer
-with `alc-render` to produce standalone reader HTML.
+`<project-dir>/translation.layer.json`. A successful glossary step also
+publishes `<project-dir>/translation.glossary.json`, a render-native delivery
+bound to the exact RichDocument and its block anchors. Language and glossary
+steps do not publish a reader by themselves. Compose both deliveries with
+`alc-render`; omitting `--glossary` deliberately creates no visible Reader
+glossary.
+
+For a pre-2.0.2 project whose durable glossary already succeeded, rerun
+`build-glossary` with the identical source, project, cache, and generation
+options. The verified durable result is reused and the missing render handoff
+is materialized without another accepted model generation.
 
 Use `alc-translate --help`, `alc-translate get-result --help`, and each stage's
 `--help` for exact source, prerequisite, result, and durable-control options.

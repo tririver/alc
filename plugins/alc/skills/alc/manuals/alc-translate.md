@@ -109,16 +109,25 @@ prerequisites. A successful block translation reports the native Layer at
 `data.result`, including `source_language`, `target_language`, `mode`, and
 `coverage`. The Layer also appears in `artifacts[]` with role `layer`.
 
-The delivery is normally
-`<project-dir>/translation.layer.json`, with immutable Markdown revisions
-under `<project-dir>/fragments/`. Language and glossary steps publish durable
-prerequisites but no reader. Compose the Layer with `alc-render` to produce
+The deliveries are normally `<project-dir>/translation.layer.json` and
+`<project-dir>/translation.glossary.json`, with immutable Markdown revisions
+under `<project-dir>/fragments/`. The glossary handoff is render-native,
+source-bound, and contains only entries with exact RichDocument block anchors.
+Language and glossary steps publish no reader. Compose both deliveries with
+`alc-render` to produce
 standalone HTML; `alc-translate` itself does not publish a translation HTML
 file. Follow `manuals/alc-render.md`: export the same source with
-`ac-document export-rich-document`, then copy both `translation.layer.json` and
-the complete `fragments/` tree below that publication root before composing.
+`ac-document export-rich-document`, then copy `translation.layer.json`,
+`translation.glossary.json`, and the complete `fragments/` tree below that
+publication root before composing. Pass the glossary file with `--glossary`;
+omitting it deliberately produces no visible Reader glossary.
 The Layer binds the exact rich source, so a different parse is rejected rather
 than silently misanchoring translations.
+
+For a project created before 2.0.2, rerun `build-glossary` with the identical
+source, project, cache, authority, provider, and model options. A valid durable
+result is replayed without another accepted model generation and publishes the
+missing `translation.glossary.json`.
 
 ## Status, Recovery, and Validation
 
@@ -139,8 +148,8 @@ Status reports the selected step at `data.current_step`, its run snapshot at
 `data.run.error`, `data.run.resume`, and the paths under
 `data.run.working_state`. Use `get-result --step language|glossary|blocks`
 only to read a verified successful selected result. Validation returns
-`data.valid`, `data.issues`, and, for a completed block translation,
-`data.delivery.layer`.
+`data.valid`, `data.issues`, and, for a completed block translation, both
+`data.delivery.layer` and `data.delivery.glossary`.
 
 Resume the same project and selected step after a pause, interruption, failure,
 or stop. Omit `--input` when no response is required; otherwise pass either
