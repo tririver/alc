@@ -2279,6 +2279,7 @@ define = undefined;
     isPdfPageMarkerBlock: isPdfPageMarkerBlock,
     isStandaloneHtmlCommentBlock: isStandaloneHtmlCommentBlock,
     katexCandidates: katexCandidates,
+    katexSemanticMacros: katexSemanticMacros,
     katexTex: katexTex,
     syncVisibilityRoles: syncVisibilityRoles,
     validateIntegerJson: validateIntegerJson,
@@ -2371,6 +2372,12 @@ if (
   String.raw`\\begin{aligned}a&=b\\\\&=c\\end{aligned}`
 ) {
   throw new Error("bare TeX alignment rows were not wrapped for KaTeX");
+}
+if (
+  helpers.katexSemanticMacros()[String.raw`\\arcdeg`] !==
+  String.raw`^{\\circ}`
+) {
+  throw new Error("AASTeX arc-degree macro is not registered semantically");
 }
 if (helpers.katexTex(String.raw`A\\&B`) !== String.raw`A\\&B`) {
   throw new Error("escaped TeX ampersand was treated as an alignment tab");
@@ -4700,7 +4707,17 @@ helpers.state.payload = {
   }],
   publication: {
     publication_digest: "c".repeat(64),
-    source_document: {blocks: blocks, metadata: {}},
+    source_document: {blocks: blocks, metadata: {
+      source_notes: {
+        schema_version: "ac.document.source_notes.v1",
+        notes: [{
+          note_id: "source-note-1", ordinal: 0, marker: "1",
+          body: "Source note.", inline_spans: [],
+          owner_block_id: "block-2",
+          anchor: {field: "text", start: 0, end: 1}
+        }]
+      }
+    }},
     outline: [],
     glossary: [],
     bibliography: [],
@@ -4730,19 +4747,29 @@ var note = revision(
     "\\n\\n```text\\n[ignored](resources/" + unusedDigest +
     "/unused.png)\\n```", 110, 1, null
 );
+var sourceNoteTranslation = revision(
+  "source-note-translation", "7".repeat(64), "translation", "block-2",
+  "译注正文", 10, 1, null
+);
+sourceNoteTranslation.provenance.source_note_translation = {
+  schema_version: "alc.render.source_note_translation.v1",
+  note_id: "source-note-1"
+};
 helpers.state.selected = new Map([
   [first.fragment_id, revised],
   [unchanged.fragment_id, unchanged],
   [companion.fragment_id, companion],
   [guide.fragment_id, guide],
-  [note.fragment_id, note]
+  [note.fragment_id, note],
+  [sourceNoteTranslation.fragment_id, sourceNoteTranslation]
 ]);
 helpers.state.revisions = new Map([
   [first.fragment_id, [first, revised]],
   [unchanged.fragment_id, [unchanged]],
   [companion.fragment_id, [companion]],
   [guide.fragment_id, [guide]],
-  [note.fragment_id, [note]]
+  [note.fragment_id, [note]],
+  [sourceNoteTranslation.fragment_id, [sourceNoteTranslation]]
 ]);
 helpers.state.activeFragmentIds = new Set([
   first.fragment_id, unchanged.fragment_id, companion.fragment_id,
@@ -4761,7 +4788,8 @@ assert(
 assert(
   changedTranslation.includes("最新译文") &&
     !changedTranslation.includes("未改译文") &&
-    changedTranslation.includes("## 改动标题"),
+    changedTranslation.includes("## 改动标题") &&
+    changedTranslation.includes("译注正文"),
   "changed translation package does not match current selections"
 );
 assert(
@@ -4894,11 +4922,12 @@ assert(
   "plain changed Markdown did not strip a rewritten HTML image"
 );
 var exported = helpers.exportRevisionState();
-assert(exported.revisions.length === 6, "full export omitted a revision history entry");
+  assert(exported.revisions.length === 7, "full export omitted a revision history entry");
 assert(
   exported.selected_revision_digests.join(",") === [
     revised.semantic_digest,
     unchanged.semantic_digest,
+    sourceNoteTranslation.semantic_digest,
     companion.semantic_digest,
     guide.semantic_digest,
     note.semantic_digest
@@ -4908,13 +4937,13 @@ assert(
 """
     )
 
-    subprocess.run(
+    completed = subprocess.run(
         [node, "-"],
         input=instrumented,
-        check=True,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_reader_builds_complete_portable_markdown_package_under_node() -> None:
@@ -6226,6 +6255,20 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     ) in stylesheet
 
 
+def test_reader_centers_source_and_saved_translated_book_titles() -> None:
+    stylesheet = _text("reader.css")
+
+    title_styles = stylesheet[
+        stylesheet.index(".alc-book-header > h1,") :
+        stylesheet.index(
+            ".alc-book-header > .alc-translated-title > .alc-fragment-header"
+        )
+    ]
+    assert ".alc-translated-title:not(.is-inline-editing)" in title_styles
+    assert ".alc-markdown > :first-child" in title_styles
+    assert "text-align: center" in title_styles
+
+
 def test_touch_card_actions_reveal_before_content_activation_under_node() -> None:
     node = shutil.which("node")
     if node is None:
@@ -6480,14 +6523,17 @@ def test_reader_progressively_hydrates_navigation_find_and_print_content() -> No
     assert "width: 8.5rem;" in stylesheet
     assert "html:lang(zh) .alc-export-panel .alc-export-action { width: 8rem; }" in stylesheet
     assert ".alc-export-action-primary" not in stylesheet
-    assert "activateHashTarget(href, true)" in javascript
+    assert "activateHashTarget(href, true, event.detail === 0)" in javascript
     assert (
         'if (targetId === "alc-book-header") {'
         in javascript
     )
     title_branch = javascript[javascript.index('if (targetId === "alc-book-header") {'):]
     title_branch = title_branch[:title_branch.index("return true;")]
-    assert "scrollToHashTarget(targetId);" in title_branch
+    assert (
+        "scrollToHashTarget(targetId, keyboardNavigation === true);"
+        in title_branch
+    )
     assert "scrollToReaderTop();" not in title_branch
     assert "refreshChangedSelections(previousSelected);" in javascript
     assert "refreshChunkForAnchor(revision.anchor);" in javascript
@@ -6880,12 +6926,314 @@ def test_reader_preserves_source_text_and_glossary_rendering_contracts() -> None
     javascript = _text("reader.js")
 
     assert "removeVisibleHtmlTags(heading)" in javascript
-    assert "removeVisibleHtmlTags(table)" in javascript
+    assert "renderSourceTableBlock" in javascript
     assert "removeVisibleHtmlTags(figure)" in javascript
     assert 'decorateGlossary(original, "source")' in javascript
     assert 'decorateGlossary(translated, "target")' in javascript
     assert "equation_label_reconciliation" in javascript
     assert "reconciliation.effective_label.trim()" in javascript
+
+
+def test_reader_mirrors_authoritative_source_table_data_into_translation() -> None:
+    javascript = _text("reader.js")
+    css = _text("reader.css")
+
+    assert "mirrorSourceTable(source, card, block)" in javascript
+    assert "function mirrorSourceTable(source, card, block)" in javascript
+    assert 'card.classList.add("alc-translation-table-card")' in javascript
+    mirror = javascript[
+        javascript.index("function mirrorSourceTable(source, card, block)") :
+        javascript.index("var sourcePresentationCache")
+    ]
+    assert "!sourceTable || !markdown || !translatedTable" not in mirror
+    assert "if (translatedTable)" in mirror
+    assert "markdown.insertBefore(table" in mirror
+    assert ".alc-translation-table-card" in css
+    assert "padding-inline: .15rem" in css
+    assert ".alc-table-caption" in css
+    assert "font-size: .84rem" in css
+    assert "margin: 0" in css
+    assert ".alc-fragment .alc-markdown > :is(" in css
+    assert "syncParallelTableCaptionAlignment(lanes, block)" in javascript
+    assert "function syncParallelTableCaptionAlignment(lanes, block)" in javascript
+    assert '"alc-parallel-table-caption-before"' in javascript
+    assert '"--alc-parallel-table-caption-height"' in javascript
+    assert "ResizeObserver" in javascript
+    assert ".alc-parallel-table-caption-before" in css
+    assert "min-height: var(--alc-parallel-table-caption-height)" in css
+
+
+def test_reader_keeps_composed_classification_and_navigation_feedback_inline() -> None:
+    javascript = _text("reader.js")
+    css = _text("reader.css")
+
+    assert "alc-classification-composite-editor" in javascript
+    assert "alc-classification-editor-prefix" in javascript
+    assert "renderClassificationActions" in javascript
+    assert "alc-classification-actions" in javascript
+    assert "grid-template-columns: max-content minmax(0, 1fr)" in css
+    assert ".alc-classification-composite-editor > .alc-inline-markdown" in css
+    assert ".alc-source-classification-fragment > .alc-card-actions" in css
+    assert ".alc-classification-actions" in css
+    assert "min-height: 8rem" in css
+    assert ".alc-source-navigation-target:focus-visible" in css
+    assert (
+        ".alc-source-navigation-target.alc-keyboard-navigation-target:focus-visible"
+        in css
+    )
+    assert "event.detail === 0" in javascript
+    assert ".alc-source-navigation-target:focus," not in css
+    focus = css[
+        css.index(".alc-source-navigation-target:focus-visible") :
+        css.index(
+            ".alc-source-navigation-target.alc-keyboard-navigation-target:focus-visible"
+        )
+    ]
+    assert "outline: none" in focus
+    assert "box-shadow" not in focus
+    keyboard_focus = css[
+        css.index(
+            ".alc-source-navigation-target.alc-keyboard-navigation-target:focus-visible"
+        ) : css.index(".alc-source-navigation-target.alc-reference-target-active")
+    ]
+    assert "box-shadow" in keyboard_focus
+    assert "inset" in keyboard_focus
+    active = css[
+        css.index(".alc-source-navigation-target.alc-reference-target-active") :
+        css.index(".alc-unresolved-reference")
+    ]
+    assert "outline: none" in active
+    assert "box-shadow" not in active
+
+
+def test_reader_aligns_one_item_bibliography_rows_without_text_inference() -> None:
+    javascript = _text("reader.js")
+    css = _text("reader.css")
+
+    assert 'row.classList.add("alc-source-bibliography-row")' in javascript
+    assert ".alc-source-bibliography-row" in css
+    assert "> .alc-markdown > :first-child" in css
+    assert "margin-top: 0" in css
+    assert "> .alc-markdown > :last-child" in css
+    assert "margin-bottom: 0" in css
+
+
+def test_reader_aligns_translated_note_content_and_preserves_authored_figure_rows() -> None:
+    javascript = _text("reader.js")
+    css = _text("reader.css")
+
+    assert ".alc-source-note-translation-content" in css
+    assert "> .alc-markdown > :first-child" in css
+    assert "> .alc-markdown > :last-child" in css
+    assert ".alc-figure-panel[data-panel-display-width]" not in css
+    assert "function shareSourceFigureMedia(lanes, source, block)" not in javascript
+    assert '"alc-shared-figure-media"' not in javascript
+    assert "mirrorSourceFigure(source, card, block)" in javascript
+    assert '"--alc-figure-authored-row-columns"' in javascript
+    assert 'panelRoot.dataset.columnSource' in javascript
+    assert 'panelRoot.dataset.columnSource =\n            figurePresentation.layout.column_source || ""' in javascript
+    assert "figurePresentation.layout.row_sources[rowIndex]" in javascript
+    assert "panelRow.dataset.columnSource = rowSource" in javascript
+    assert '"alc-figure-panel-placeholder"' in javascript
+    assert "panelRow.appendChild(placeholder)" in javascript
+    assert '"latexml_ar5iv_flex_size_2"' in javascript
+    assert '"--alc-figure-row-panel-min"' in javascript
+    changed_export = javascript[
+        javascript.index("function buildChangedMarkdown") :
+        javascript.index("function completeTranslationSelections")
+    ]
+    assert "!changedNoteTranslations.size" in changed_export
+    figure_export = javascript[
+        javascript.index("function exportFigureMarkdown") :
+        javascript.index("function exportGlossaryMarkdown")
+    ]
+    assert "sourcePresentationField" in figure_export
+    assert "exportPresentationFieldMarkdown" in figure_export
+    assert ".alc-shared-figure-media" not in css
+    panel_rows = css[
+        css.index(".alc-figure-panel-row {") :
+        css.index(
+            ".alc-figure-panel-row[data-responsive-wrap-profile=",
+            css.index(".alc-figure-panel-row {")
+        )
+    ]
+    assert "var(--alc-figure-authored-row-columns)" in panel_rows
+    assert "minmax(0, 1fr)" in panel_rows
+    assert "auto-fit" not in panel_rows
+    assert ".alc-figure-panels[data-layout-kind=\"flex\"]" in css
+    assert "max-width: 52rem" in css
+    assert ".alc-figure-panel-placeholder" in css
+    assert '[data-responsive-wrap-profile="latexml_ar5iv_flex_size_2"]' in css
+    responsive_rows = css[
+        css.index('[data-responsive-wrap-profile="latexml_ar5iv_flex_size_2"]') :
+        css.index(".alc-figure-panel {", css.index(
+            '[data-responsive-wrap-profile="latexml_ar5iv_flex_size_2"]'
+        ))
+    ]
+    assert "auto-fit" in responsive_rows
+    assert "var(--alc-figure-row-panel-min)" in responsive_rows
+
+
+def test_reader_uses_generic_front_matter_heading_note_and_caption_surfaces() -> None:
+    javascript = _text("reader.js")
+    css = _text("reader.css")
+
+    assert "function effectiveReaderHeadingLevel(block, presentation)" in javascript
+    assert "row.dataset.sourceHeadingLevel" in javascript
+    assert '"alc-source-affiliations"' in javascript
+    assert "function renderSourceCreatorFlow(" in javascript
+    assert "frontMatter.length" in javascript
+    assert "entry.creator_flow" in javascript
+    assert "creator.author_id" in javascript
+    assert "slot.contact_index" in javascript
+    assert "slot.affiliation_id" in javascript
+    assert "affiliationsByMarker" in javascript
+    assert "if (marker) affiliationsByMarker.set(marker, affiliation)" in javascript
+    assert "decorateTranslationSourceNoteTokens" in javascript
+    assert "retargetMirroredSourceNoteReferences" in javascript
+    assert "renderFragment(translation)" in javascript
+    assert "rerenderChunk(rowChunk)" in javascript
+    assert '"alc-translation-note-ref"' in javascript
+    assert "alc-translation-note-backref" in javascript
+    assert 'captionCandidates[0].classList.add("alc-table-caption")' in javascript
+    assert 'markdown.classList.add("alc-figure-caption")' in javascript
+    assert "sourceClassificationForHeading" in javascript
+    assert "sourceClassificationForValue" in javascript
+    assert "renderSourceClassificationRow" in javascript
+    assert "function classificationValueEditorContext" in javascript
+    assert "alc-classification-editor-prefix" in javascript
+    assert "is-editing-classification-value" in javascript
+    assert 'relation.separator_source !==\n          "latexml_ar5iv_classification_after"' in javascript
+    assert "sourceCaptionPresentation" in javascript
+    assert "sourceFigurePresentation" in javascript
+    assert "applySourceCaptionPresentation" in javascript
+    assert 'captionPresentation.placement === "before_content"' in javascript
+    assert 'captionPresentation.placement === "embedded"' in javascript
+    assert 'table.querySelector(":scope > caption")' in javascript
+    assert "applySourceTableCellPresentation" in javascript
+    assert "horizontal_alignment_sources" in javascript
+    assert "rule_edges" in javascript
+    assert 'table.classList.add("alc-source-presentation-table")' in javascript
+
+    assert ".alc-source-affiliations" in css
+    assert ".alc-source-creator-flow" in css
+    assert ".alc-source-creator-slot-affiliation" in css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+    assert ".alc-source-classification-fragment.is-inline-editing" in css
+    assert ".alc-classification-composite-editor" in css
+    assert ".alc-classification-editor-prefix" in css
+    assert ".is-editing-classification-value" in css
+    assert "flex-basis: 100%" in css
+    narrow = css[css.index("@media (max-width: 899px)") :]
+    narrow = narrow[:narrow.index("\n}")]
+    assert ".alc-source-classification-target" in narrow
+    assert "grid-column: 1 / -1;" in narrow
+    assert '.alc-source-row[data-source-heading-level="3"]' in css
+    assert '.alc-source-row[data-source-heading-level="6"]' in css
+    assert ".alc-source-note-translation" in css
+    assert "background: var(--alc-translation-bg)" in css
+    assert ".alc-translation-note-ref" in css
+    assert ".alc-figure-caption" in css
+    assert '[data-caption-alignment="start"]' in css
+    assert '[data-caption-alignment="center"]' in css
+    assert '[data-caption-alignment="end"]' in css
+    assert ".alc-source-presentation-table" in css
+    assert '.alc-figure-panels[data-layout-kind="flex"]' in css
+    assert ".alc-figure-panel-row" in css
+    assert "panelDisplayWidth" in javascript
+    assert '[data-table-rule-top="true"]' in css
+    assert '[data-table-rule-bottom="true"]' in css
+
+
+def test_reader_registers_bidirectional_source_note_navigation_under_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcSourceNoteNavigationTest = {
+    state: state,
+    registerSourceNoteNavigationTargets: registerSourceNoteNavigationTargets,
+    translatedSourceNoteBacklinkTarget: translatedSourceNoteBacklinkTarget
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcSourceNoteNavigationTest;
+var chunk = {chunk_id: "chunk-owner"};
+helpers.state.chunkByTargetId = new Map([["block-owner", chunk]]);
+var documentValue = {metadata: {source_notes: {
+  schema_version: "ac.document.source_notes.v1",
+  notes: [{note_id: "note-1", ordinal: 0, owner_block_id: "owner"}]
+}}};
+helpers.registerSourceNoteNavigationTargets(documentValue);
+[
+  "source-note-note-1",
+  "source-note-ref-note-1",
+  "translation-note-ref-note-1"
+].forEach(function (target) {
+  assert(
+    helpers.state.chunkByTargetId.get(target) === chunk,
+    "source-note target did not route to its owner chunk: " + target
+  );
+});
+var note = {note_id: "note-1"};
+assert(
+  helpers.translatedSourceNoteBacklinkTarget(note, {
+    querySelector: function (selector) {
+      return selector === "#translation-note-ref-note-1" ? {} : null;
+    }
+  }) === "#translation-note-ref-note-1",
+  "translated note did not return to the exact translated marker"
+);
+assert(
+  helpers.translatedSourceNoteBacklinkTarget(note, null) ===
+    "#source-note-ref-note-1",
+  "missing translated marker did not fail closed to the source marker"
+);
+'''
+    )
+    completed = subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    css = _text("reader.css")
+    assert (
+        ".alc-fragment.alc-source-note-translation\n"
+        "  > .alc-source-note-translation-content"
+    ) in css
+
+
+def test_reader_uses_semantic_heading_levels_without_role_overrides() -> None:
+    javascript = _text("reader.js")
+    effective = javascript[
+        javascript.index("function effectiveReaderHeadingLevel") :
+        javascript.index("function appendSourceClassificationValues")
+    ]
+    assert "acknowledgements" not in effective
+    assert "Number(payload.level) + 1" in effective
+
+    presentation = javascript[
+        javascript.index("function sourcePresentationIndex") :
+        javascript.index("function sourcePresentationBlock")
+    ]
+    assert 'role !== "abstract"' in presentation
+
+    exported = javascript[
+        javascript.index("function exportSourceBlockMarkdown") :
+        javascript.index("function exportInlineSpansMarkdown")
+    ]
+    assert "acknowledgement" not in exported
 
 
 def test_reader_uses_explicit_outline_for_navigation_and_section_anchors() -> None:

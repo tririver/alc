@@ -91,8 +91,12 @@
     editorHistorical: null,
     bibliographyIndexCache: null,
     sourceBibliographyIndex: {
-      blockId: "", aliases: new Map(), itemIndexes: new Set()
+      blockId: "", blockIds: new Set(), aliases: new Map(),
+      itemIndexes: new Set(), itemIndexesByBlockId: new Map()
     },
+    sourceStructuralIndex: {aliases: new Map(), blockIds: new Set()},
+    sourceNoteIndex: {aliases: new Map(), targetIds: new Set()},
+    sourceInternalLinkIndex: {aliases: new Map(), targetIds: new Set()},
     glossarySurfaceCache: {source: null, target: null},
     glossaryBase: [],
     glossaryDuplicateIds: new Set(),
@@ -123,6 +127,7 @@
     hydrationQuietTimer: null,
     hydrationActivityReady: false,
     hydrationOrder: [],
+    tableSyncScheduled: false,
     hashCalibration: null,
     diagnosticsRoot: null,
     readerShellReady: false,
@@ -443,9 +448,7 @@
 
   function labels() {
     var publication = state.payload.publication;
-    var language = String(
-      (publication.reader_profile || {}).target_language || ""
-    ).toLowerCase();
+    var language = targetLanguage().toLowerCase();
     var chinese = language === "zh" || language.indexOf("zh-") === 0;
     var traditional = chinese && /(?:^|-)hant(?:-|$)|(?:^|-)(?:tw|hk|mo)(?:-|$)/.test(
       language
@@ -501,6 +504,11 @@
       view: "显示",
       showLayers: "显示内容",
       original: "原文",
+      authors: "作者",
+      affiliations: traditional ? "作者單位" : "作者单位",
+      orcid: "ORCID",
+      sourceNote: traditional ? "腳註" : "脚注",
+      sourceNoteBack: traditional ? "返回腳註標記" : "返回脚注标记",
       documentData: traditional ? "文件資料" : "文档数据",
       documentPage: traditional ? "文件頁" : "文档页",
       noVisibleContent: "未选择要显示的内容。",
@@ -586,6 +594,7 @@
       historyChanged: "目录中的当前版本已变化；请关闭编辑器并重新打开后再保存。",
       unknownCitation: "引用不在当前参考文献中：",
       referenceUnavailable: traditional ? "參考文獻連結不可用" : "参考文献链接不可用",
+      scrollableTable: traditional ? "可水平捲動的表格" : "可横向滚动的表格",
       compareCurrent: "当前版本",
       compareHistorical: "历史版本",
       restore: "恢复为新版本",
@@ -658,6 +667,11 @@
       view: "View",
       showLayers: "Show content",
       original: "Original",
+      authors: "Authors",
+      affiliations: "Affiliations",
+      orcid: "ORCID",
+      sourceNote: "Footnote",
+      sourceNoteBack: "Back to footnote reference",
       documentData: "Document data",
       documentPage: "Document page",
       noVisibleContent: "No content is selected for display.",
@@ -732,6 +746,7 @@
       historyChanged: "The current directory revision changed; close and reopen the editor before saving.",
       unknownCitation: "Citation is absent from the bibliography: ",
       referenceUnavailable: "Reference link unavailable",
+      scrollableTable: "Scrollable table",
       compareCurrent: "Current revision",
       compareHistorical: "Historical revision",
       restore: "Restore as new revision",
@@ -764,6 +779,24 @@
       defaults.translatedTerm = traditional ? "譯文" : "译文";
     }
     return defaults;
+  }
+
+  function targetLanguage() {
+    var publication = state.payload && state.payload.publication || {};
+    var profileLanguage = String(
+      (publication.reader_profile || {}).target_language || ""
+    ).trim();
+    if (profileLanguage) return profileLanguage;
+    var languages = new Set();
+    if (state.selected instanceof Map) {
+      state.selected.forEach(function (revision) {
+        if (
+          revision && revision.role === "translation" &&
+          revision.deleted !== true && normalizedNonblank(revision.language)
+        ) languages.add(String(revision.language).trim());
+      });
+    }
+    return languages.size === 1 ? Array.from(languages)[0] : "";
   }
 
   function labelToolButton(button, label) {
@@ -872,6 +905,7 @@
     body.dataset.alcReaderBlockSpacing = String(next.blockSpacing);
     body.dataset.alcReaderWidth = String(next.width);
     syncReaderPreferenceControls();
+    scheduleScrollableTableSync();
   }
 
   function syncReaderPreferenceControls() {
@@ -1390,6 +1424,9 @@
       return defaultLinkOpen(tokens, index, options, env, renderer);
     };
     state.md = md;
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("resize", scheduleScrollableTableSync);
+    }
   }
 
   function inlineMathEnd(source, start, close) {
@@ -1482,6 +1519,8 @@
     });
     removeVisibleHtmlTags(wrapper);
     decorateLegacyBibliographyLinks(wrapper);
+    decorateLegacyStructuralLinks(wrapper);
+    decorateScrollableTables(wrapper);
     if (!options || options.decorateGlossary !== false) {
       decorateGlossary(wrapper, "target");
     }
@@ -2692,7 +2731,7 @@
     var profile = publication.reader_profile || {};
     var title = readerTitle();
     document.title = title;
-    document.documentElement.lang = profile.target_language ||
+    document.documentElement.lang = targetLanguage() ||
       profile.source_language || "und";
     var titlePromotion = updatePrimaryTitleState(documentValue);
     var header = document.getElementById("alc-book-header");
@@ -2709,7 +2748,16 @@
         profile.target_language || document.documentElement.lang;
       header.appendChild(translatedTitle);
     }
-    if (Array.isArray(profile.authors) && profile.authors.length) {
+    var frontMatter = sourceFrontMatterEntries(documentValue);
+    var promotedFrontMatter = frontMatter.filter(
+      function (entry) {
+        return sourceFrontMatterPromotedToHeader(documentValue, entry);
+      }
+    );
+    promotedFrontMatter.forEach(function (entry) {
+      header.appendChild(renderSourceFrontMatter(entry));
+    });
+    if (!frontMatter.length && Array.isArray(profile.authors) && profile.authors.length) {
       header.appendChild(element("p", "alc-authors", profile.authors.join(", ")));
     }
   }
@@ -2734,6 +2782,16 @@
     state.sourceBibliographyIndex = buildSourceBibliographyIndex(
       state.payload.legacy_bibliography_targets || [],
       documentValue.blocks || []
+    );
+    state.sourceStructuralIndex = buildSourceStructuralIndex(
+      state.payload.legacy_structural_targets || [],
+      documentValue.blocks || []
+    );
+    state.sourceNoteIndex = buildSourceNoteIndex(documentValue);
+    state.sourceInternalLinkIndex = buildSourceInternalLinkIndex(
+      state.sourceBibliographyIndex,
+      state.sourceStructuralIndex,
+      state.sourceNoteIndex
     );
 
     loadPayloadForBlockRange(0, 1);
@@ -2786,8 +2844,10 @@
               "heading-" + safeToken(block.block_id), chunk
             );
           }
-          if (block.block_id === state.sourceBibliographyIndex.blockId) {
-            state.sourceBibliographyIndex.itemIndexes.forEach(
+          if (state.sourceBibliographyIndex.blockIds.has(block.block_id)) {
+            state.sourceBibliographyIndex.itemIndexesByBlockId.get(
+              block.block_id
+            ).forEach(
               function (itemIndex) {
                 state.chunkByTargetId.set(
                   sourceReferenceTargetId(block.block_id, itemIndex), chunk
@@ -2798,6 +2858,20 @@
         }
       }
     });
+    var presentationIndex = sourcePresentationIndex(documentValue);
+    if (presentationIndex) {
+      presentationIndex.classificationByHeading.forEach(function (relation) {
+        var headingTarget = "block-" + safeToken(relation.heading_block_id);
+        var headingChunk = state.chunkByTargetId.get(headingTarget);
+        if (!headingChunk) {
+          throw new Error("source classification render chunk is missing");
+        }
+        relation.value_block_ids.forEach(function (blockId) {
+          state.chunkByTargetId.set("block-" + safeToken(blockId), headingChunk);
+        });
+      });
+    }
+    registerSourceNoteNavigationTargets(documentValue);
     var appendix = state.renderPlan.find(function (chunk) {
       return chunk.kind === "appendices";
     });
@@ -3012,6 +3086,9 @@
         index < chunk.block_end;
         index += 1
       ) {
+        sourceFrontMatterAt(documentValue, index).forEach(function (entry) {
+          content.appendChild(renderSourceFrontMatter(entry));
+        });
         var block = documentValue.blocks[index];
         if (isPdfPageMarkerBlock(block) || isStandaloneHtmlCommentBlock(block)) {
           continue;
@@ -3019,11 +3096,25 @@
         documentNotesBefore(block.block_id).forEach(function (note) {
           content.appendChild(renderDocumentNote(note));
         });
+        var classification = sourceClassificationForHeading(
+          documentValue, block.block_id
+        );
+        if (classification) {
+          loadPayloadForBlockRange(
+            index, index + 1 + classification.value_block_ids.length
+          );
+          content.appendChild(renderSourceClassificationRow(classification));
+          continue;
+        }
+        if (sourceClassificationForValue(documentValue, block.block_id)) continue;
         content.appendChild(renderSourceRow(
           block, state.fragmentGroups.get(block.block_id) || []
         ));
       }
       if (chunk.block_end === documentValue.blocks.length) {
+        sourceFrontMatterAt(documentValue, documentValue.blocks.length).forEach(
+          function (entry) { content.appendChild(renderSourceFrontMatter(entry)); }
+        );
         documentNotesBefore(null).forEach(function (note) {
           content.appendChild(renderDocumentNote(note));
         });
@@ -3033,7 +3124,9 @@
       renderBibliography(content, publication.bibliography || [], labels());
     }
     node.replaceChildren(content);
+    decorateScrollableTables(node);
     applyVisibility(node);
+    syncScrollableTables(node);
   }
 
   function renderAllChunks() {
@@ -3118,12 +3211,17 @@
       return item.fragment_id !== fragmentId;
     });
     var selected = state.selected.get(fragmentId);
-    if (fragmentIsVisible(selected)) values.push(selected);
+    var documentValue = state.payload.publication.source_document;
+    if (
+      fragmentIsVisible(selected) &&
+      !sourceNoteTranslationId(documentValue, selected)
+    ) values.push(selected);
     values.sort(function (left, right) {
       return left.priority - right.priority ||
         left.fragment_id.localeCompare(right.fragment_id);
     });
-    state.fragmentGroups.set(target, values);
+    if (values.length) state.fragmentGroups.set(target, values);
+    else state.fragmentGroups.delete(target);
   }
 
   function chunkForAnchor(anchor) {
@@ -3152,7 +3250,10 @@
   }
 
   function buildSourceBibliographyIndex(descriptors, blocks) {
-    var empty = {blockId: "", aliases: new Map(), itemIndexes: new Set()};
+    var empty = {
+      blockId: "", blockIds: new Set(), aliases: new Map(),
+      itemIndexes: new Set(), itemIndexesByBlockId: new Map()
+    };
     if (descriptors === undefined) return empty;
     if (!Array.isArray(descriptors) || !Array.isArray(blocks)) {
       throw new Error("ALC reader legacy bibliography manifest is invalid");
@@ -3163,9 +3264,11 @@
         blocksById.set(block.block_id, block);
       }
     });
-    var blockId = "";
+    var blockIds = new Set();
     var aliases = new Map();
     var itemIndexes = new Set();
+    var itemIndexesByBlockId = new Map();
+    var targetIds = new Set();
     descriptors.forEach(function (descriptor) {
       var keys = descriptor && typeof descriptor === "object" ?
         Object.keys(descriptor).sort().join(",") : "";
@@ -3173,33 +3276,139 @@
         /^bib[.]bib([1-9][0-9]*)$/.exec(descriptor.alias) : null;
       var block = descriptor ? blocksById.get(descriptor.block_id) : null;
       var items = block && block.payload && block.payload.items;
+      var exactSplitItem = Boolean(descriptor && descriptor.item_index === 0);
+      var ordinalItem = Boolean(
+        aliasMatch && Number(aliasMatch[1]) === descriptor.item_index + 1
+      );
+      var targetId = descriptor ? sourceReferenceTargetId(
+        descriptor.block_id, descriptor.item_index
+      ) : "";
       if (
         keys !== "alias,block_id,item_index" ||
-        !aliasMatch || Number(aliasMatch[1]) !== descriptor.item_index + 1 ||
+        !aliasMatch || (!ordinalItem && !exactSplitItem) ||
         !normalizedNonblank(descriptor.block_id) ||
         !nonnegativeInteger(descriptor.item_index) ||
         !block || block.kind !== "list" ||
         (Array.isArray(items) && descriptor.item_index >= items.length) ||
-        (blockId && blockId !== descriptor.block_id) ||
         aliases.has(descriptor.alias) ||
-        itemIndexes.has(descriptor.item_index)
+        targetIds.has(targetId)
       ) {
         throw new Error("ALC reader legacy bibliography manifest is invalid");
       }
-      blockId = descriptor.block_id;
-      var targetId = sourceReferenceTargetId(blockId, descriptor.item_index);
+      blockIds.add(descriptor.block_id);
+      targetIds.add(targetId);
       aliases.set(descriptor.alias, targetId);
       itemIndexes.add(descriptor.item_index);
+      var blockIndexes = itemIndexesByBlockId.get(descriptor.block_id) || new Set();
+      blockIndexes.add(descriptor.item_index);
+      itemIndexesByBlockId.set(descriptor.block_id, blockIndexes);
     });
-    return {blockId: blockId, aliases: aliases, itemIndexes: itemIndexes};
+    return {
+      blockId: blockIds.size === 1 ? Array.from(blockIds)[0] : "",
+      blockIds: blockIds,
+      aliases: aliases,
+      itemIndexes: itemIndexes,
+      itemIndexesByBlockId: itemIndexesByBlockId
+    };
+  }
+
+  function sourceBibliographyItemIndexes(blockId) {
+    return state.sourceBibliographyIndex.itemIndexesByBlockId.get(blockId) ||
+      new Set();
+  }
+
+  function buildSourceStructuralIndex(descriptors, blocks) {
+    var empty = {aliases: new Map(), blockIds: new Set()};
+    if (descriptors === undefined) return empty;
+    if (!Array.isArray(descriptors) || !Array.isArray(blocks)) {
+      throw new Error("ALC reader legacy structural manifest is invalid");
+    }
+    var blocksById = new Map();
+    blocks.forEach(function (block) {
+      if (block && normalizedNonblank(block.block_id)) {
+        blocksById.set(block.block_id, block);
+      }
+    });
+    var aliases = new Map();
+    var blockIds = new Set();
+    descriptors.forEach(function (descriptor) {
+      var keys = descriptor && typeof descriptor === "object" ?
+        Object.keys(descriptor).sort().join(",") : "";
+      var block = descriptor ? blocksById.get(descriptor.block_id) : null;
+      if (
+        keys !== "alias,block_id" ||
+        !normalizedNonblank(descriptor.alias) ||
+        descriptor.alias.charAt(0) === "#" ||
+        !normalizedNonblank(descriptor.block_id) || !block ||
+        aliases.has(descriptor.alias)
+      ) {
+        throw new Error("ALC reader legacy structural manifest is invalid");
+      }
+      aliases.set(
+        descriptor.alias, "block-" + safeToken(descriptor.block_id)
+      );
+      blockIds.add(descriptor.block_id);
+    });
+    return {aliases: aliases, blockIds: blockIds};
+  }
+
+  function buildSourceNoteIndex(documentValue) {
+    var aliases = new Map();
+    var targetIds = new Set();
+    sourceNotes(documentValue).forEach(function (note) {
+      if (
+        !note || !normalizedNonblank(note.note_id) ||
+        !normalizedNonblank(note.owner_block_id) || aliases.has(note.note_id)
+      ) throw new Error("ALC reader source note index is invalid");
+      var targetId = "source-note-" + safeToken(note.note_id);
+      if (targetIds.has(targetId)) {
+        throw new Error("ALC reader source note target is duplicate");
+      }
+      aliases.set(note.note_id, targetId);
+      targetIds.add(targetId);
+    });
+    return {aliases: aliases, targetIds: targetIds};
+  }
+
+  function buildSourceInternalLinkIndex(bibliography, structural, sourceNotes) {
+    var aliases = new Map();
+    var targetIds = new Set();
+    [bibliography, structural, sourceNotes].forEach(function (index) {
+      if (!index || !(index.aliases instanceof Map)) {
+        throw new Error("ALC reader internal link manifest is invalid");
+      }
+      index.aliases.forEach(function (targetId, alias) {
+        if (
+          !normalizedNonblank(alias) || !normalizedNonblank(targetId) ||
+          aliases.has(alias)
+        ) {
+          throw new Error("ALC reader internal link manifest is invalid");
+        }
+        aliases.set(alias, targetId);
+        targetIds.add(targetId);
+      });
+    });
+    return {aliases: aliases, targetIds: targetIds};
   }
 
   function canonicalReaderTargetId(targetId) {
-    return state.sourceBibliographyIndex.aliases.get(targetId) || targetId;
+    return state.sourceInternalLinkIndex.aliases.get(targetId) ||
+      state.sourceBibliographyIndex.aliases.get(targetId) || targetId;
+  }
+
+  function revealSourceTarget(targetId) {
+    if (!state.sourceInternalLinkIndex.targetIds.has(targetId)) return false;
+    return revealSourceNavigationTarget();
   }
 
   function revealSourceReferenceTarget(targetId) {
     if (targetId.indexOf("source-reference-") !== 0) return false;
+    var known = Array.from(state.sourceBibliographyIndex.aliases.values())
+      .indexOf(targetId) >= 0;
+    return known ? revealSourceNavigationTarget() : false;
+  }
+
+  function revealSourceNavigationTarget() {
     if (state.sourceVisible) return true;
     state.sourceVisible = true;
     if (state.visibilityReady) {
@@ -3275,21 +3484,128 @@
       function (link) {
         var sourceHref = link.getAttribute("href") || "";
         var alias = hashTargetId(sourceHref);
-        var canonical = state.sourceBibliographyIndex.aliases.get(alias);
+        var canonical = state.sourceInternalLinkIndex.aliases.get(alias);
         if (canonical) {
           link.setAttribute("href", "#" + canonical);
           link.removeAttribute("rel");
           return;
         }
-        var unavailable = element("span", "alc-unresolved-reference");
-        unavailable.textContent = link.textContent || alias;
-        unavailable.appendChild(document.createTextNode(
-          " (" + labels().referenceUnavailable + ")"
-        ));
-        unavailable.title = labels().referenceUnavailable;
-        link.replaceWith(unavailable);
+        replaceLegacyLinkWithUnavailable(
+          link, alias, labels().referenceUnavailable
+        );
       }
     );
+  }
+
+  function decorateLegacyStructuralLinks(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return;
+    Array.from(root.querySelectorAll('a[href^="#"]')).filter(
+      function (link) {
+        return legacyStructuralTarget(link.getAttribute("href"));
+      }
+    ).forEach(
+      function (link) {
+        var sourceHref = link.getAttribute("href") || "";
+        var alias = hashTargetId(sourceHref);
+        var canonical = state.sourceInternalLinkIndex.aliases.get(alias);
+        if (canonical) {
+          link.setAttribute("href", "#" + canonical);
+          link.removeAttribute("rel");
+          return;
+        }
+        replaceLegacyStructuralLinkWithText(link, alias);
+      }
+    );
+  }
+
+  function replaceLegacyStructuralLinkWithText(link, alias) {
+    link.replaceWith(document.createTextNode(link.textContent || alias));
+  }
+
+  function replaceLegacyLinkWithUnavailable(link, alias, message) {
+    var unavailable = element("span", "alc-unresolved-reference");
+    unavailable.textContent = link.textContent || alias;
+    unavailable.appendChild(document.createTextNode(" (" + message + ")"));
+    unavailable.title = message;
+    link.replaceWith(unavailable);
+  }
+
+  function decorateScrollableTables(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return;
+    Array.from(root.querySelectorAll("table")).forEach(function (table) {
+      var parent = table.parentElement;
+      if (parent && parent.classList.contains("alc-table-scroll")) return;
+      var region = element("div", "alc-table-scroll");
+      var caption = table.querySelector("caption");
+      var labelledBy = table.getAttribute("aria-labelledby") || "";
+      if (!caption && labelledBy) caption = document.getElementById(labelledBy);
+      region.dataset.tableLabel = String(
+        caption && caption.textContent || labels().scrollableTable
+      ).replace(/\s+/g, " ").trim();
+      region.addEventListener("keydown", function (event) {
+        scrollTableWithKeyboard(region, event);
+      });
+      table.parentNode.insertBefore(region, table);
+      region.appendChild(table);
+    });
+    scheduleScrollableTableSync();
+  }
+
+  function scrollTableWithKeyboard(region, event) {
+    var maximum = Math.max(
+      0, Number(region.scrollWidth) - Number(region.clientWidth)
+    );
+    if (maximum <= 1) return false;
+    var current = Number(region.scrollLeft) || 0;
+    var step = Math.max(48, Number(region.clientWidth) * 0.25);
+    var next;
+    if (event.key === "ArrowLeft") next = current - step;
+    else if (event.key === "ArrowRight") next = current + step;
+    else if (event.key === "PageUp") next = current - Number(region.clientWidth);
+    else if (event.key === "PageDown") next = current + Number(region.clientWidth);
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = maximum;
+    else return false;
+    region.scrollLeft = Math.max(0, Math.min(maximum, next));
+    event.preventDefault();
+    return true;
+  }
+
+  function syncScrollableTableRegion(region) {
+    var overflowing = Number(region.scrollWidth) >
+      Number(region.clientWidth) + 1;
+    region.classList.toggle("is-overflowing", overflowing);
+    if (overflowing) {
+      region.setAttribute("tabindex", "0");
+      region.setAttribute("role", "region");
+      region.setAttribute(
+        "aria-label", region.dataset.tableLabel || labels().scrollableTable
+      );
+      return;
+    }
+    region.removeAttribute("tabindex");
+    region.removeAttribute("role");
+    region.removeAttribute("aria-label");
+  }
+
+  function syncScrollableTables(root) {
+    var scope = root && typeof root.querySelectorAll === "function" ?
+      root : document;
+    Array.from(scope.querySelectorAll(".alc-table-scroll")).forEach(
+      syncScrollableTableRegion
+    );
+  }
+
+  function scheduleScrollableTableSync() {
+    if (
+      state.tableSyncScheduled ||
+      typeof window.requestAnimationFrame !== "function"
+    ) return;
+    state.tableSyncScheduled = true;
+    window.requestAnimationFrame(function () {
+      state.tableSyncScheduled = false;
+      syncScrollableTables(document);
+    });
   }
 
   function hashTargetId(hash) {
@@ -3301,12 +3617,142 @@
     }
   }
 
+  function legacyStructuralTarget(target) {
+    var alias = hashTargetId(String(target || ""));
+    return state.sourceStructuralIndex.aliases.has(alias) ||
+      state.sourceNoteIndex.aliases.has(alias);
+  }
+
   function sourceTitle(documentValue) {
     var first = (documentValue.blocks || []).find(function (block) {
       return block.kind === "heading" && block.payload &&
         Number(block.payload.level) === 1;
     });
     return first ? first.payload.text : "";
+  }
+
+  function listPathEntries(block) {
+    return block && Array.isArray(block.list_path) ? block.list_path : [];
+  }
+
+  function listMarkerText(entry, markdown) {
+    if (!entry || entry.continuation === true) return "";
+    if (entry.ordered === true) {
+      return String(Number(entry.item_index) + 1) + ".";
+    }
+    return markdown ? "-" : "•";
+  }
+
+  function listPathMarkers(block) {
+    return listPathEntries(block).map(function (entry, depth) {
+      return {
+        depth: depth,
+        text: listMarkerText(entry, false),
+        continuation: entry.continuation === true
+      };
+    });
+  }
+
+  function listMarkdownIndent(entry) {
+    var marker = entry && entry.ordered === true ?
+      String(Number(entry.item_index) + 1) + "." : "-";
+    return Math.max(4, marker.length + 1);
+  }
+
+  function indentListMarkdown(markdown, width) {
+    var padding = " ".repeat(Math.max(0, width));
+    return String(markdown || "").split("\n").map(function (line) {
+      return line ? padding + line : "";
+    }).join("\n");
+  }
+
+  function unwrapSoleListItemMarkdown(markdown) {
+    var lines = String(markdown || "").split("\n");
+    var first = /^(?:[-+*]|[0-9]+[.)])\s+(.+)$/.exec(lines[0] || "");
+    if (!first || lines.slice(1).some(function (line) {
+      return /^(?:[-+*]|[0-9]+[.)])\s+/.test(line);
+    })) return markdown;
+    lines[0] = first[1];
+    return lines.join("\n");
+  }
+
+  function exportListOwnedMarkdown(block, markdown, forceContinuation) {
+    var path = listPathEntries(block);
+    markdown = String(markdown || "").replace(/\n+$/, "");
+    if (!path.length || !markdown) return markdown;
+    if (block && block.kind === "list") {
+      markdown = unwrapSoleListItemMarkdown(markdown);
+    }
+    var entry = path[path.length - 1];
+    var baseIndent = path.slice(0, -1).reduce(function (total, ancestor) {
+      return total + listMarkdownIndent(ancestor);
+    }, 0);
+    var continuation = forceContinuation === true || entry.continuation === true;
+    if (continuation) {
+      return indentListMarkdown(
+        markdown, baseIndent + listMarkdownIndent(entry)
+      );
+    }
+    var marker = listMarkerText(entry, true);
+    var lines = markdown.split("\n");
+    var firstPrefix = " ".repeat(baseIndent) + marker + " ";
+    var followingIndent = baseIndent + listMarkdownIndent(entry);
+    return firstPrefix + lines[0] + (lines.length > 1 ?
+      "\n" + indentListMarkdown(lines.slice(1).join("\n"), followingIndent) :
+      "");
+  }
+
+  function renderListMarkerRail(block) {
+    var markers = listPathMarkers(block);
+    var rail = element("span", "alc-list-marker-rail");
+    rail.style.setProperty("--alc-list-depth", String(markers.length));
+    markers.forEach(function (value) {
+      var marker = element("span", "alc-list-marker", value.text);
+      marker.dataset.listDepth = String(value.depth);
+      marker.classList.toggle("is-continuation", value.continuation);
+      rail.appendChild(marker);
+    });
+    return rail;
+  }
+
+  function decorateListOwnedCard(card, block, content) {
+    var path = listPathEntries(block);
+    if (!card || !content || !path.length) return false;
+    var item = path[path.length - 1];
+    card.classList.add("alc-list-owned-card");
+    card.style.setProperty("--alc-list-depth", String(path.length));
+    card.dataset.listContainerId = String(item.container_id || "");
+    card.dataset.listItemId = String(item.item_id || "");
+    card.dataset.listItemIndex = String(item.item_index);
+    card.dataset.listSegmentIndex = String(item.segment_index);
+    card.dataset.listContinuation = String(item.continuation === true);
+    card.insertBefore(renderListMarkerRail(block), content);
+    return true;
+  }
+
+  function flattenListOwnedFragment(card, block) {
+    if (!card || block.kind !== "list" || !listPathEntries(block).length) {
+      return;
+    }
+    var saved = directChildWithClass(card, "alc-fragment-saved-content");
+    var markdown = directChildWithClass(saved, "alc-markdown");
+    var lists = directListChildren(markdown);
+    if (
+      !markdown || markdown.children.length !== 1 || lists.length !== 1 ||
+      lists[0].children.length !== 1 || !isListItem(lists[0].children[0])
+    ) return;
+    var list = lists[0];
+    var item = list.children[0];
+    while (item.firstChild) markdown.insertBefore(item.firstChild, list);
+    list.remove();
+  }
+
+  function decorateListOwnedFragment(card, block) {
+    if (!card || card.dataset.role !== "translation") return;
+    flattenListOwnedFragment(card, block);
+    decorateListOwnedCard(
+      card, block, directChildWithClass(card, "alc-fragment-saved-content")
+    );
   }
 
   function isPdfPageMarkerBlock(block) {
@@ -3328,6 +3774,7 @@
     var groups = new Map();
     state.selected.forEach(function (fragment) {
       if (!fragmentIsVisible(fragment)) return;
+      if (sourceNoteTranslationId(documentValue, fragment)) return;
       var target = fragmentTargetId(fragment);
       if (!target) return;
       var values = groups.get(target) || [];
@@ -3361,11 +3808,454 @@
     return target || null;
   }
 
+  function renderSourceFrontMatter(entry) {
+    var root = element("section", "alc-source-front-matter");
+    root.dataset.frontMatterId = String(entry.front_matter_id || "");
+    var heading = element("h2", "alc-visually-hidden", labels().authors);
+    heading.id = "source-front-matter-" + safeToken(entry.front_matter_id) + "-heading";
+    root.setAttribute("aria-labelledby", heading.id);
+    root.appendChild(heading);
+
+    var affiliationsByMarker = new Map();
+    var affiliationsById = new Map();
+    (entry.affiliations || []).forEach(function (affiliation) {
+      var marker = String(affiliation.marker || "");
+      var affiliationId = String(affiliation.affiliation_id || "");
+      if (
+        (marker && affiliationsByMarker.has(marker)) ||
+        !affiliationId || affiliationsById.has(affiliationId)
+      ) {
+        throw new Error("source front matter affiliation markers are invalid");
+      }
+      if (marker) affiliationsByMarker.set(marker, affiliation);
+      affiliationsById.set(affiliationId, affiliation);
+    });
+
+    var authorsById = new Map();
+    (entry.authors || []).forEach(function (author) {
+      var authorId = String(author.author_id || "");
+      if (!authorId || authorsById.has(authorId)) {
+        throw new Error("source front matter author identities are invalid");
+      }
+      authorsById.set(authorId, author);
+      (author.markers || []).forEach(function (marker) {
+        if (!affiliationsByMarker.has(String(marker))) {
+          throw new Error("source front matter author marker is unresolved");
+        }
+      });
+    });
+
+    if (entry.creator_flow !== undefined) {
+      root.appendChild(renderSourceCreatorFlow(
+        entry, authorsById, affiliationsById
+      ));
+      return root;
+    }
+
+    var authors = element("ul", "alc-source-author-list");
+    (entry.authors || []).forEach(function (author) {
+      var item = element("li", "alc-source-author");
+      item.appendChild(renderSourceAuthorIdentity(author));
+
+      var contacts = element("div", "alc-source-author-contacts");
+      (author.contacts || []).forEach(function (contact) {
+        contacts.appendChild(renderSourceAuthorContact(contact));
+      });
+      if (contacts.childNodes.length) item.appendChild(contacts);
+      authors.appendChild(item);
+    });
+    root.appendChild(authors);
+    if ((entry.affiliations || []).length) {
+      var affiliationsHeading = element(
+        "h3", "alc-visually-hidden", labels().affiliations
+      );
+      affiliationsHeading.id =
+        "source-front-matter-" + safeToken(entry.front_matter_id) +
+        "-affiliations";
+      root.appendChild(affiliationsHeading);
+      var affiliations = element("ul", "alc-source-affiliations");
+      affiliations.setAttribute("aria-labelledby", affiliationsHeading.id);
+      (entry.affiliations || []).forEach(function (affiliation) {
+        var affiliationItem = element("li", "alc-source-affiliation-item");
+        affiliationItem.appendChild(element(
+          "sup", "alc-source-affiliation-marker", affiliation.marker || ""
+        ));
+        affiliationItem.appendChild(element(
+          "span", "alc-source-affiliation", affiliation.text || ""
+        ));
+        affiliations.appendChild(affiliationItem);
+      });
+      root.appendChild(affiliations);
+    }
+    return root;
+  }
+
+  function renderSourceAuthorIdentity(author) {
+    var identity = element("div", "alc-source-author-identity");
+    identity.appendChild(element(
+      "span", "alc-source-author-name", author.name || ""
+    ));
+    (author.markers || []).forEach(function (marker) {
+      identity.appendChild(element("sup", "alc-source-author-marker", marker));
+    });
+    if (author.orcid_url) {
+      var orcid = element("a", "alc-source-author-orcid", labels().orcid);
+      orcid.href = author.orcid_url;
+      orcid.rel = "noopener noreferrer";
+      orcid.setAttribute(
+        "aria-label", labels().orcid + " · " + String(author.name || "")
+      );
+      identity.appendChild(orcid);
+    }
+    return identity;
+  }
+
+  function renderSourceAuthorContact(contact) {
+    if (contact.target) {
+      var link = element("a", "alc-source-author-contact", contact.value || "");
+      link.href = contact.target;
+      link.rel = "noopener noreferrer";
+      if (contact.label) link.title = contact.label;
+      return link;
+    }
+    return element("span", "alc-source-author-contact", contact.value || "");
+  }
+
+  function renderSourceAffiliationOccurrence(affiliation) {
+    var value = element("div", "alc-source-creator-slot-affiliation");
+    value.appendChild(element(
+      "sup", "alc-source-affiliation-marker", affiliation.marker || ""
+    ));
+    value.appendChild(element(
+      "span", "alc-source-affiliation", affiliation.text || ""
+    ));
+    return value;
+  }
+
+  function renderSourceCreatorFlow(entry, authorsById, affiliationsById) {
+    var flow = entry.creator_flow;
+    if (
+      !plainObject(flow) || !Array.isArray(flow.creators) ||
+      !Number.isInteger(flow.creator_count) ||
+      flow.creator_count !== flow.creators.length ||
+      !Number.isInteger(flow.slot_count)
+    ) throw new Error("source front matter creator flow is invalid");
+    var creators = element("ol", "alc-source-creator-flow");
+    var slotCount = 0;
+    flow.creators.forEach(function (creator, creatorIndex) {
+      if (
+        !plainObject(creator) || creator.ordinal !== creatorIndex ||
+        !normalizedNonblank(creator.creator_id) ||
+        !normalizedNonblank(creator.author_id) ||
+        !Array.isArray(creator.slots)
+      ) throw new Error("source front matter creator is invalid");
+      var author = authorsById.get(creator.author_id);
+      if (!author) throw new Error("source front matter creator author is unknown");
+      var item = element("li", "alc-source-creator");
+      item.dataset.creatorId = creator.creator_id;
+      var authorSlots = 0;
+      creator.slots.forEach(function (slot, slotIndex) {
+        slotCount += 1;
+        if (
+          !plainObject(slot) || slot.ordinal !== slotIndex ||
+          !normalizedNonblank(slot.slot_id)
+        ) throw new Error("source front matter creator slot is invalid");
+        if (slot.kind === "author") {
+          authorSlots += 1;
+          item.appendChild(renderSourceAuthorIdentity(author));
+        } else if (slot.kind === "contact") {
+          if (
+            !Number.isInteger(slot.contact_index) ||
+            !author.contacts || !author.contacts[slot.contact_index]
+          ) throw new Error("source front matter contact slot is invalid");
+          var contact = element("div", "alc-source-author-contacts");
+          contact.appendChild(renderSourceAuthorContact(
+            author.contacts[slot.contact_index]
+          ));
+          item.appendChild(contact);
+        } else if (slot.kind === "affiliation") {
+          var affiliation = affiliationsById.get(slot.affiliation_id);
+          if (!affiliation) {
+            throw new Error("source front matter affiliation slot is invalid");
+          }
+          item.appendChild(renderSourceAffiliationOccurrence(affiliation));
+        } else {
+          throw new Error("source front matter creator slot kind is unknown");
+        }
+      });
+      if (authorSlots !== 1) {
+        throw new Error("source front matter creator author slot is invalid");
+      }
+      creators.appendChild(item);
+    });
+    if (slotCount !== flow.slot_count) {
+      throw new Error("source front matter creator slot count differs");
+    }
+    return creators;
+  }
+
+  function regularTranslationFragments(blockId) {
+    return (state.fragmentGroups.get(blockId) || []).filter(function (item) {
+      return item.priority <= 100 && item.role === "translation" &&
+        item.fragment_id !== state.primaryTitleFragmentId;
+    });
+  }
+
+  function translationSourceNoteToken(noteId) {
+    return "[^" + String(noteId || "") + "]";
+  }
+
+  function decorateTranslationSourceNoteTokens(rendered, fragment) {
+    var documentValue = state.payload.publication.source_document;
+    if (
+      !rendered || !fragment || fragment.role !== "translation" ||
+      sourceNoteTranslationId(documentValue, fragment)
+    ) return;
+    var blockId = fragmentTargetId(fragment);
+    var notes = sourceNotesForBlock(documentValue, blockId);
+    if (!notes.length) return;
+    notes.forEach(function (note) {
+      var token = translationSourceNoteToken(note.note_id);
+      var matches = [];
+      var walker = document.createTreeWalker(
+        rendered, window.NodeFilter.SHOW_TEXT
+      );
+      var node;
+      while ((node = walker.nextNode())) {
+        var parent = node.parentElement;
+        if (parent && parent.closest("a,code,pre,.math,.katex")) continue;
+        var index = String(node.data || "").indexOf(token);
+        while (index >= 0) {
+          matches.push({node: node, index: index});
+          index = String(node.data || "").indexOf(token, index + token.length);
+        }
+      }
+      if (matches.length > 1) {
+        throw new Error("translation source note token is duplicate");
+      }
+      if (!matches.length) return;
+      var match = matches[0];
+      var tokenNode = match.node.splitText(match.index);
+      tokenNode.splitText(token.length);
+      tokenNode.replaceWith(renderTranslationSourceNoteReference(note));
+    });
+  }
+
+  function translatedSourceNoteBacklinkTarget(note, ownerRow) {
+    var translatedTarget = "translation-note-ref-" + safeToken(note.note_id);
+    if (
+      ownerRow && ownerRow.querySelector &&
+      ownerRow.querySelector("#" + translatedTarget)
+    ) return "#" + translatedTarget;
+    return "#source-note-ref-" + safeToken(note.note_id);
+  }
+
+  function renderSourceNoteGroup(block, ownerRow) {
+    var documentValue = state.payload.publication.source_document;
+    var notes = sourceNotesForBlock(documentValue, block.block_id);
+    if (!notes.length) return null;
+    var translations = sourceNoteTranslations(documentValue);
+    var group = element("div", "alc-source-notes");
+    notes.forEach(function (note) {
+      var row = element("aside", "alc-source-note-row");
+      row.id = "source-note-" + safeToken(note.note_id);
+      row.dataset.sourceNoteId = note.note_id;
+      row.setAttribute("role", "note");
+      var lanes = element("div", "alc-source-note-lanes");
+      var source = element("section", "alc-source-note-card");
+      source.lang = (state.payload.publication.reader_profile || {}).source_language ||
+        document.documentElement.lang;
+      var sourceBody = element("p");
+      var back = element("a", "alc-source-note-backref", String(note.marker || ""));
+      back.href = "#source-note-ref-" + safeToken(note.note_id);
+      back.setAttribute("aria-label", labels().sourceNoteBack);
+      sourceBody.appendChild(back);
+      sourceBody.appendChild(document.createTextNode(" "));
+      var content = element("span", "alc-source-note-content");
+      appendInlineSpans(content, note.inline_spans, note.body);
+      sourceBody.appendChild(content);
+      source.appendChild(sourceBody);
+      lanes.appendChild(source);
+
+      var translation = translations.get(note.note_id);
+      if (translation) {
+        row.classList.add("has-translation");
+        var translated = renderFragment(translation);
+        translated.classList.add(
+          "alc-source-note-card", "alc-source-note-translation"
+        );
+        var translatedContent = translated.querySelector(
+          ".alc-fragment-saved-content"
+        );
+        translatedContent.classList.add("alc-source-note-translation-content");
+        var translatedBack = element(
+          "a", "alc-source-note-backref alc-translation-note-backref",
+          String(note.marker || "")
+        );
+        translatedBack.href = translatedSourceNoteBacklinkTarget(note, ownerRow);
+        translatedBack.setAttribute("aria-label", labels().sourceNoteBack);
+        translatedContent.insertBefore(
+          translatedBack, translatedContent.firstChild
+        );
+        lanes.appendChild(translated);
+      }
+      row.appendChild(lanes);
+      group.appendChild(row);
+    });
+    return group;
+  }
+
+  function sourceClassificationBlocks(documentValue, relation) {
+    var ids = [relation.heading_block_id].concat(relation.value_block_ids);
+    var byId = new Map((documentValue.blocks || []).map(function (block) {
+      return [block.block_id, block];
+    }));
+    return ids.map(function (blockId) {
+      var block = byId.get(blockId);
+      if (!block) throw new Error("source classification block is missing");
+      return block;
+    });
+  }
+
+  function renderSourceClassificationRow(relation) {
+    var documentValue = state.payload.publication.source_document;
+    var blocks = sourceClassificationBlocks(documentValue, relation);
+    var headingBlock = blocks[0];
+    var row = element(
+      "article", "alc-source-row alc-source-classification-row"
+    );
+    row.id = "block-" + safeToken(headingBlock.block_id);
+    row.dataset.blockId = headingBlock.block_id;
+    row.dataset.blockKind = headingBlock.kind;
+    row.dataset.sourceRoles = "classification";
+    row.dataset.sourceClassificationId = relation.classification_id;
+    row.dataset.sourceHeadingLevel = String(
+      effectiveReaderHeadingLevel(
+        headingBlock, sourcePresentationBlock(documentValue, headingBlock.block_id)
+      )
+    );
+    row.classList.add("alc-source-role-classification");
+
+    var lanes = element("div", "alc-lanes alc-source-classification-lanes");
+    var source = element("section", "alc-source-card");
+    source.dataset.role = "source";
+    source.lang = (state.payload.publication.reader_profile || {}).source_language ||
+      document.documentElement.lang;
+    source.appendChild(renderSourceBlock(headingBlock));
+    source.appendChild(renderCardActions("source", headingBlock.block_id, null));
+    setupTouchCardActions(source);
+    lanes.appendChild(source);
+
+    var target = element("div", "alc-source-classification-target");
+    var editorContext = classificationValueEditorContext();
+    if (
+      editorContext &&
+      editorContext.relation.classification_id === relation.classification_id
+    ) target.classList.add("is-editing-classification-value");
+    var renderedHeadingTranslation = false;
+    var renderedValueTranslation = false;
+    var classificationFragments = [];
+    var valueFragments = [];
+    blocks.forEach(function (block, blockIndex) {
+      var fragments = regularTranslationFragments(block.block_id);
+      if (
+        blockIndex > 0 && renderedHeadingTranslation &&
+        !renderedValueTranslation && fragments.length
+      ) {
+        target.appendChild(element(
+          "span", "alc-source-classification-separator", relation.separator
+        ));
+      }
+      fragments.forEach(function (fragment, fragmentIndex) {
+        classificationFragments.push(fragment);
+        if (blockIndex > 0) valueFragments.push(fragment);
+        var card = renderFragment(fragment);
+        card.classList.add("alc-source-classification-fragment");
+        card.classList.toggle(
+          "alc-source-classification-heading-fragment", blockIndex === 0
+        );
+        if (block.kind === "figure") mirrorSourceFigure(source, card, block);
+        if (block.kind === "table") mirrorSourceTable(source, card, block);
+        decorateListOwnedFragment(card, block);
+        target.appendChild(card);
+      });
+      if (blockIndex === 0 && fragments.length) {
+        renderedHeadingTranslation = true;
+      } else if (blockIndex > 0 && fragments.length) {
+        renderedValueTranslation = true;
+      }
+    });
+    if (renderedHeadingTranslation && renderedValueTranslation) {
+      target.appendChild(renderClassificationActions(
+        relation,
+        classificationFragments,
+        valueFragments.length === 1 ? valueFragments[0] : null
+      ));
+      setupTouchCardActions(target);
+    }
+    if (target.childNodes.length) {
+      lanes.classList.add("has-parallel-translation");
+      lanes.appendChild(target);
+    }
+    row.appendChild(lanes);
+
+    blocks.forEach(function (block) {
+      var notes = renderSourceNoteGroup(block, row);
+      if (notes) {
+        row.classList.add("alc-has-source-notes");
+        row.appendChild(notes);
+      }
+    });
+    var full = blocks.flatMap(function (block) {
+      return (state.fragmentGroups.get(block.block_id) || []).filter(function (item) {
+        return item.priority >= 101 ||
+          (item.priority <= 100 && item.role !== "translation");
+      });
+    });
+    if (full.length) {
+      var fullRows = element("div", "alc-full-rows");
+      full.forEach(function (item) {
+        fullRows.appendChild(renderFragment(item));
+      });
+      row.appendChild(fullRows);
+    }
+    var noteButton = iconButton(
+      "alc-note-button alc-icon-button", "+", labels().addNote
+    );
+    noteButton.addEventListener("click", function () {
+      openNewEditor(headingBlock);
+    });
+    row.appendChild(noteButton);
+    return row;
+  }
+
   function renderSourceRow(block, fragments) {
     var row = element("article", "alc-source-row");
     row.id = "block-" + safeToken(block.block_id);
     row.dataset.blockId = block.block_id;
     row.dataset.blockKind = block.kind;
+    var presentation = ["heading", "paragraph", "list", "figure", "table"]
+      .indexOf(block.kind) >= 0 ? sourcePresentationBlock(
+        state.payload.publication.source_document, block.block_id
+      ) : null;
+    if (presentation && presentation.roles.length) {
+      row.dataset.sourceRoles = presentation.roles.join(" ");
+      presentation.roles.forEach(function (role) {
+        row.classList.add("alc-source-role-" + safeToken(role));
+      });
+    }
+    if (block.kind === "heading") {
+      row.dataset.sourceHeadingLevel = String(
+        effectiveReaderHeadingLevel(block, presentation)
+      );
+    }
+    if (sourceBibliographyItemIndexes(block.block_id).size) {
+      row.classList.add("alc-source-bibliography-row");
+    }
+    if (state.sourceStructuralIndex.blockIds.has(block.block_id)) {
+      row.classList.add("alc-source-navigation-target");
+      row.tabIndex = -1;
+    }
     if (
       block.block_id === state.primaryTitleBlockId &&
       state.primaryTitleFragmentId
@@ -3384,7 +4274,21 @@
     source.dataset.role = "source";
     source.lang = (state.payload.publication.reader_profile || {}).source_language ||
       document.documentElement.lang;
-    source.appendChild(renderSourceBlock(block));
+    var sourceBlock = renderSourceBlock(block);
+    if (listPathEntries(block).length) {
+      var sourceContent = element("div", "alc-list-owned-content");
+      sourceContent.appendChild(sourceBlock);
+      source.appendChild(sourceContent);
+      decorateListOwnedCard(source, block, sourceContent);
+      var deepestOwner = listPathEntries(block).slice(-1)[0];
+      row.dataset.listItemId = String(deepestOwner.item_id || "");
+      row.dataset.listSegmentIndex = String(deepestOwner.segment_index);
+      row.dataset.listContinuation = String(
+        deepestOwner.continuation === true
+      );
+    } else {
+      source.appendChild(sourceBlock);
+    }
     source.appendChild(renderCardActions("source", block.block_id, null));
     setupTouchCardActions(source);
     lanes.appendChild(source);
@@ -3395,11 +4299,24 @@
     }).forEach(function (item) {
       var card = renderFragment(item);
       if (block.kind === "figure" && item.role === "translation") {
-        mirrorSourceFigure(source, card);
+        mirrorSourceFigure(source, card, block);
       }
+      if (block.kind === "table" && item.role === "translation") {
+        mirrorSourceTable(source, card, block);
+      }
+      decorateListOwnedFragment(card, block);
       lanes.appendChild(card);
     });
     row.appendChild(lanes);
+    if (block.kind === "table") {
+      syncParallelTableCaptionAlignment(lanes, block);
+    }
+
+    var sourceNoteGroup = renderSourceNoteGroup(block, row);
+    if (sourceNoteGroup) {
+      row.classList.add("alc-has-source-notes");
+      row.appendChild(sourceNoteGroup);
+    }
 
     var full = fragments.filter(function (item) {
       return item.priority >= 101;
@@ -3420,7 +4337,7 @@
     return row;
   }
 
-  function mirrorSourceFigure(source, card) {
+  function mirrorSourceFigure(source, card, block) {
     var sourceFigure = source && source.querySelector("figure");
     var saved = card && card.querySelector(".alc-fragment-saved-content");
     if (!sourceFigure || !saved || saved.querySelector("img")) return;
@@ -3432,8 +4349,1046 @@
     });
     var caption = figure.querySelector("figcaption");
     if (caption) caption.remove();
-    saved.insertAdjacentElement("beforebegin", figure);
+    var markdown = saved.querySelector(".alc-markdown");
+    var figureCaptionText = (block.payload || {}).caption;
+    var captionPresentation = typeof figureCaptionText === "string" &&
+      Boolean(figureCaptionText.trim()) ?
+      sourceCaptionPresentation(
+        state.payload.publication.source_document, block.block_id
+      ) : null;
+    if (markdown && captionPresentation) {
+      markdown.classList.add("alc-figure-caption");
+      applySourceCaptionPresentation(
+        markdown, captionPresentation
+      );
+    }
+    if (
+      captionPresentation &&
+      captionPresentation.placement === "before_content"
+    ) {
+      saved.insertAdjacentElement("afterend", figure);
+    } else {
+      saved.insertAdjacentElement("beforebegin", figure);
+    }
     card.classList.add("alc-translation-figure-card");
+  }
+
+  function retargetMirroredSourceNoteReferences(table, block) {
+    var documentValue = state.payload.publication.source_document;
+    sourceNotesForBlock(documentValue, block.block_id).forEach(function (note) {
+      var anchor = note.anchor || {};
+      if (
+        anchor.field !== "table_header" && anchor.field !== "table_cell"
+      ) return;
+      var selector =
+        '[data-source-field="' + anchor.field + '"]' +
+        '[data-source-column-index="' + anchor.column_index + '"]';
+      if (anchor.field === "table_cell") {
+        selector += '[data-source-row-index="' + anchor.row_index + '"]';
+      }
+      var cell = table.querySelector(selector);
+      var references = cell ? Array.from(
+        cell.querySelectorAll(".alc-source-note-ref")
+      ).filter(function (reference) {
+        return reference.textContent === String(note.marker || "");
+      }) : [];
+      if (references.length !== 1) {
+        throw new Error("mirrored Table source note anchor is invalid");
+      }
+      var reference = references[0];
+      reference.id = "translation-note-ref-" + safeToken(note.note_id);
+      reference.classList.add("alc-translation-note-ref");
+      var link = reference.querySelector("a");
+      if (!link) throw new Error("mirrored Table source note link is missing");
+      link.href = "#source-note-" + safeToken(note.note_id);
+      link.setAttribute(
+        "aria-label", labels().sourceNote + " " + String(note.marker || "")
+      );
+    });
+  }
+
+  function mirrorSourceTable(source, card, block) {
+    var sourceFigure = source && source.querySelector(".alc-table-figure");
+    var sourceTable = sourceFigure && sourceFigure.querySelector(":scope > table");
+    var saved = card && card.querySelector(".alc-fragment-saved-content");
+    var markdown = saved && saved.querySelector(".alc-markdown");
+    var translatedTable = markdown && markdown.querySelector("table");
+    if (!sourceTable || !markdown) return;
+    var tableRoot = translatedTable && translatedTable.parentElement &&
+      translatedTable.parentElement.classList.contains("alc-table-scroll") ?
+      translatedTable.parentElement : translatedTable;
+    var table = sourceTable.cloneNode(true);
+    table.removeAttribute("aria-labelledby");
+    Array.from(table.querySelectorAll("[id]")).forEach(function (node) {
+      node.removeAttribute("id");
+    });
+    retargetMirroredSourceNoteReferences(table, block);
+    if (translatedTable) {
+      translatedTable.replaceWith(table);
+    } else {
+      var placement = sourceCaptionPresentation(
+        state.payload.publication.source_document, block.block_id
+      );
+      if (placement && placement.placement === "after_content") {
+        markdown.insertBefore(table, markdown.firstChild);
+      } else {
+        markdown.appendChild(table);
+      }
+      tableRoot = table;
+    }
+    var directChildren = Array.from(markdown.children);
+    var captionCandidates = directChildren.filter(function (node) {
+      return node !== tableRoot && node.tagName === "P";
+    });
+    var tableCaptionText = (block.payload || {}).caption;
+    var captionPresentation = typeof tableCaptionText === "string" &&
+      Boolean(tableCaptionText.trim()) ?
+      sourceCaptionPresentation(
+        state.payload.publication.source_document, block.block_id
+      ) : null;
+    var sourceCaptionAfter = captionPresentation &&
+      captionPresentation.placement === "after_content";
+    if (
+      captionCandidates.length === 1 &&
+      directChildren.every(function (node) {
+        return node === tableRoot || node === captionCandidates[0];
+      })
+    ) {
+      captionCandidates[0].classList.add("alc-table-caption");
+      applySourceCaptionPresentation(captionCandidates[0], captionPresentation);
+      if (captionPresentation && captionPresentation.placement === "embedded") {
+        var embeddedCaption = table.querySelector(":scope > caption");
+        if (!embeddedCaption) {
+          throw new Error("embedded source Table caption is missing");
+        }
+        embeddedCaption.replaceChildren(
+          ...Array.from(captionCandidates[0].childNodes)
+        );
+        embeddedCaption.classList.add("alc-table-caption");
+        applySourceCaptionPresentation(
+          embeddedCaption, captionPresentation
+        );
+        captionCandidates[0].remove();
+      } else if (sourceCaptionAfter) {
+        markdown.appendChild(captionCandidates[0]);
+      } else {
+        markdown.insertBefore(captionCandidates[0], tableRoot);
+      }
+    }
+    if (captionPresentation) {
+      card.dataset.tableCaptionPlacement = captionPresentation.placement;
+    }
+    decorateScrollableTables(markdown);
+    syncScrollableTables(markdown);
+    card.classList.add("alc-translation-table-card");
+  }
+
+  function syncParallelTableCaptionAlignment(lanes, block) {
+    var tableCaptionText = (block.payload || {}).caption;
+    if (typeof tableCaptionText !== "string" || !tableCaptionText.trim()) {
+      return;
+    }
+    var presentation = sourceCaptionPresentation(
+      state.payload.publication.source_document, block.block_id
+    );
+    if (!presentation || presentation.placement !== "before_content") return;
+    var captions = Array.from(lanes.querySelectorAll(
+      ":scope > .alc-source-card .alc-table-caption, " +
+      ":scope > .alc-fragment[data-role=\"translation\"] .alc-table-caption"
+    ));
+    if (captions.length < 2) return;
+    lanes.classList.add("alc-parallel-table-caption-before");
+    var width = null;
+    var frame = null;
+    function align() {
+      frame = null;
+      var nextWidth = lanes.getBoundingClientRect().width;
+      if (!nextWidth) return;
+      var widthChanged = width === null || Math.abs(nextWidth - width) >= 0.5;
+      var renderedHeight = Math.max.apply(null, captions.map(function (caption) {
+        return caption.getBoundingClientRect().height;
+      }));
+      if (!widthChanged) {
+        var appliedHeight = Number.parseFloat(lanes.style.getPropertyValue(
+          "--alc-parallel-table-caption-height"
+        ));
+        if (renderedHeight > appliedHeight + 0.5) {
+          lanes.style.setProperty(
+            "--alc-parallel-table-caption-height", renderedHeight + "px"
+          );
+        }
+        return;
+      }
+      width = nextWidth;
+      lanes.style.removeProperty("--alc-parallel-table-caption-height");
+      var height = Math.max.apply(null, captions.map(function (caption) {
+        return caption.getBoundingClientRect().height;
+      }));
+      if (height > 0) {
+        lanes.style.setProperty(
+          "--alc-parallel-table-caption-height", height + "px"
+        );
+      }
+    }
+    function scheduleAlignment() {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(align);
+    }
+    scheduleAlignment();
+    if (typeof ResizeObserver === "function") {
+      var observer = new ResizeObserver(scheduleAlignment);
+      observer.observe(lanes);
+      lanes._alcTableCaptionResizeObserver = observer;
+    }
+  }
+
+  function sourceFigureTargetPanels(documentValue) {
+    var manifest = ((documentValue || {}).metadata || {})
+      .source_target_manifest;
+    if (manifest === undefined) return new Map();
+    if (
+      !plainObject(manifest) ||
+      manifest.schema_version !== "ac.document.source_target_manifest.v1" ||
+      !Array.isArray(manifest.targets)
+    ) throw new Error("source Figure target manifest is invalid");
+    var output = new Map();
+    manifest.targets.forEach(function (target) {
+      if (!target || target.kind !== "figure" ||
+        !Array.isArray(target.panels) || !target.panels.length) return;
+      if (!normalizedNonblank(target.block_id) || output.has(target.block_id)) {
+        throw new Error("source Figure panel targets reuse a block");
+      }
+      output.set(target.block_id, target.panels);
+    });
+    return output;
+  }
+
+  function positiveFigureDimension(value) {
+    return Number.isInteger(value) && !Number.isNaN(value) &&
+      value >= 1 && value <= 1000000;
+  }
+
+  function figureIntegerGcd(left, right) {
+    var a = Math.abs(left);
+    var b = Math.abs(right);
+    while (b) {
+      var remainder = a % b;
+      a = b;
+      b = remainder;
+    }
+    return a;
+  }
+
+  function validateSourceFigurePanelDimensions(panel, neutral) {
+    var width = panel.display_width;
+    var height = panel.display_height;
+    var dimensionSource = panel.dimension_source;
+    var dimensionsAbsent = width === null && height === null;
+    if (dimensionsAbsent) {
+      if (dimensionSource !== null) {
+        throw new Error("source Figure panel dimension provenance is invalid");
+      }
+    } else if (
+      !positiveFigureDimension(width) || !positiveFigureDimension(height) ||
+      dimensionSource !== "attributes:width,height"
+    ) {
+      throw new Error("source Figure panel dimensions are invalid");
+    }
+    var ratio = panel.aspect_ratio;
+    var ratioSource = panel.aspect_ratio_source;
+    if (ratio === null) {
+      if (ratioSource !== null) {
+        throw new Error("source Figure aspect provenance is invalid");
+      }
+    } else if (
+      !Array.isArray(ratio) || ratio.length !== 2 ||
+      !positiveFigureDimension(ratio[0]) ||
+      !positiveFigureDimension(ratio[1]) ||
+      figureIntegerGcd(ratio[0], ratio[1]) !== 1 ||
+      ratioSource !== "style:aspect-ratio"
+    ) {
+      throw new Error("source Figure aspect ratio is invalid");
+    }
+    if (width !== null && ratio !== null) {
+      var divisor = figureIntegerGcd(width, height);
+      if (width / divisor !== ratio[0] || height / divisor !== ratio[1]) {
+        throw new Error("source Figure aspect ratio differs from dimensions");
+      }
+    }
+    if (neutral && (!dimensionsAbsent || ratio !== null)) {
+      throw new Error("neutral source Figure claims display geometry");
+    }
+  }
+
+  function validateSourceFigureLayout(entry, targetPanels) {
+    var layout = entry.layout;
+    var panels = entry.panels;
+    if (
+      !plainObject(layout) || Object.keys(layout).sort().join(",") !==
+        "break_after_panel_indexes,break_source,column_count,column_source," +
+        "kind,row_count,row_sources,rows" ||
+      !Array.isArray(panels) || !panels.length ||
+      !Array.isArray(targetPanels) || panels.length !== targetPanels.length ||
+      ["single", "flex", "neutral"].indexOf(layout.kind) < 0 ||
+      !Array.isArray(layout.rows) ||
+      !Array.isArray(layout.row_sources) ||
+      !Array.isArray(layout.break_after_panel_indexes)
+    ) throw new Error("source Figure layout is invalid");
+    var neutral = layout.kind === "neutral";
+    var expectedPositions = new Map();
+    if (neutral) {
+      if (
+        layout.column_count !== null || layout.row_count !== null ||
+        layout.rows.length || layout.column_source !== null ||
+        layout.row_sources.length ||
+        layout.break_after_panel_indexes.length || layout.break_source !== null
+      ) throw new Error("neutral source Figure claims authored layout");
+    } else {
+      var sourceContracts = {
+        "latexml_ar5iv_direct_graphic": ["single", 1],
+        "class:ltx_flex_size_1": ["flex", 1],
+        "class:ltx_flex_size_2": ["flex", 2],
+        "class:ltx_flex_size_3": ["flex", 3]
+      };
+      if (
+        !Number.isInteger(layout.column_count) || layout.column_count < 1 ||
+        !Number.isInteger(layout.row_count) || layout.row_count < 1 ||
+        layout.row_count !== layout.rows.length ||
+        layout.row_count !== layout.row_sources.length
+      ) throw new Error("source Figure layout provenance is invalid");
+      var flattened = [];
+      var rowEnds = new Set();
+      var rowCapacities = [];
+      var normalizedRowSources = [];
+      layout.rows.forEach(function (row, rowIndex) {
+        var rowSource = layout.row_sources[rowIndex];
+        var rowContract = sourceContracts[rowSource];
+        if (
+          !rowContract || rowContract[0] !== layout.kind ||
+          !Array.isArray(row) || !row.length || row.length > rowContract[1]
+        ) {
+          throw new Error("source Figure layout row is invalid");
+        }
+        normalizedRowSources.push(rowSource);
+        rowCapacities.push(rowContract[1]);
+        row.forEach(function (panelIndex, columnIndex) {
+          if (!Number.isInteger(panelIndex) || panelIndex < 0) {
+            throw new Error("source Figure layout row index is invalid");
+          }
+          flattened.push(panelIndex);
+          expectedPositions.set(panelIndex, [rowIndex, columnIndex]);
+        });
+        if (rowIndex < layout.rows.length - 1) rowEnds.add(row[row.length - 1]);
+      });
+      if (layout.column_count !== Math.max.apply(null, rowCapacities)) {
+        throw new Error("source Figure layout column count is invalid");
+      }
+      var uniqueRowSources = new Set(normalizedRowSources);
+      var expectedColumnSource = uniqueRowSources.size === 1 ?
+        normalizedRowSources[0] : null;
+      if (layout.column_source !== expectedColumnSource) {
+        throw new Error("source Figure layout column provenance is invalid");
+      }
+      if (flattened.some(function (panelIndex, index) {
+        return panelIndex !== index;
+      }) || flattened.length !== panels.length) {
+        throw new Error("source Figure layout does not preserve panel order");
+      }
+      var previousBreak = -1;
+      layout.break_after_panel_indexes.forEach(function (panelIndex) {
+        if (
+          !Number.isInteger(panelIndex) || panelIndex <= previousBreak ||
+          panelIndex >= panels.length - 1 || !rowEnds.has(panelIndex)
+        ) throw new Error("source Figure layout break is invalid");
+        previousBreak = panelIndex;
+      });
+      if (
+        layout.break_after_panel_indexes.length ?
+          layout.break_source !== "class:ltx_flex_break" :
+          layout.break_source !== null
+      ) throw new Error("source Figure break provenance is invalid");
+      if (layout.kind === "single" && (
+        panels.length !== 1 || stableStringify(layout.rows) !== "[[0]]" ||
+        layout.break_after_panel_indexes.length
+      )) throw new Error("single source Figure layout is invalid");
+    }
+    var occupied = new Set();
+    panels.forEach(function (panel, index) {
+      var target = targetPanels[index];
+      if (
+        !plainObject(panel) || Object.keys(panel).sort().join(",") !==
+          "aspect_ratio,aspect_ratio_source,column_index,dimension_source," +
+          "display_height,display_width,panel_index,row_index,source_id" ||
+        !target || panel.panel_index !== index || target.panel_index !== index ||
+        !normalizedNonblank(panel.source_id) ||
+        panel.source_id !== target.source_id
+      ) throw new Error("source Figure panel binding is invalid");
+      if (neutral) {
+        if (panel.row_index !== null || panel.column_index !== null) {
+          throw new Error("neutral source Figure panel claims a position");
+        }
+      } else {
+        var position = expectedPositions.get(index);
+        var identity = String(panel.row_index) + ":" + panel.column_index;
+        if (
+          !position || panel.row_index !== position[0] ||
+          panel.column_index !== position[1] ||
+          panel.row_index >= layout.row_count ||
+          panel.column_index >= layout.column_count || occupied.has(identity)
+        ) throw new Error("source Figure panel position is invalid");
+        occupied.add(identity);
+      }
+      validateSourceFigurePanelDimensions(panel, neutral);
+    });
+  }
+
+  var sourcePresentationCache = new WeakMap();
+
+  function sourcePresentationIndex(documentValue) {
+    var value = ((documentValue || {}).metadata || {}).source_presentation;
+    if (value === undefined) return null;
+    if (sourcePresentationCache.has(documentValue)) {
+      return sourcePresentationCache.get(documentValue);
+    }
+    if (
+      !plainObject(value) ||
+      Object.keys(value).sort().join(",") !==
+        "blocks,captions,classifications,figures,schema_version,tables" ||
+      value.schema_version !== "ac.document.source_presentation.v1" ||
+      !Array.isArray(value.blocks) || !Array.isArray(value.classifications) ||
+      !Array.isArray(value.captions) || !Array.isArray(value.figures) ||
+      !Array.isArray(value.tables)
+    ) throw new Error("source presentation metadata is invalid");
+    var documentBlocks = documentValue.blocks || [];
+    var presentable = documentBlocks.filter(function (block) {
+      return ["heading", "paragraph", "list", "figure", "table"]
+        .indexOf(block.kind) >= 0;
+    });
+    if (value.blocks.length !== presentable.length) {
+      throw new Error("source presentation block coverage is invalid");
+    }
+    var blocks = new Map();
+    value.blocks.forEach(function (entry, index) {
+      var block = presentable[index];
+      if (
+        !plainObject(entry) ||
+        Object.keys(entry).sort().join(",") !== "block_id,fields,roles" ||
+        entry.block_id !== block.block_id || blocks.has(entry.block_id) ||
+        !Array.isArray(entry.roles) || !Array.isArray(entry.fields) ||
+        entry.roles.some(function (role) {
+          return role !== "abstract" && role !== "classification" &&
+            role !== "acknowledgements";
+        }) || new Set(entry.roles).size !== entry.roles.length ||
+        (entry.roles.length && block.kind !== "heading")
+      ) throw new Error("source presentation block is invalid");
+      blocks.set(entry.block_id, entry);
+    });
+    var blockById = new Map(documentBlocks.map(function (block) {
+      return [block.block_id, block];
+    }));
+    var blockIndexById = new Map(documentBlocks.map(function (block, index) {
+      return [block.block_id, index];
+    }));
+    var classificationByHeading = new Map();
+    var classificationByValue = new Map();
+    var previousClassificationIndex = -1;
+    value.classifications.forEach(function (relation) {
+      if (
+        !plainObject(relation) || Object.keys(relation).sort().join(",") !==
+          "classification_id,composition,heading_block_id,locator,separator," +
+          "separator_source,value_block_ids" ||
+        !/^classification-[0-9a-f]{24}$/.test(relation.classification_id) ||
+        relation.composition !== "inline" || relation.separator !== ": " ||
+        relation.separator_source !==
+          "latexml_ar5iv_classification_after" ||
+        !Array.isArray(relation.value_block_ids) ||
+        !relation.value_block_ids.length ||
+        !validateSourcePresentationLocator(
+          relation.locator, ((documentValue.source || {}).source_format || "")
+        )
+      ) throw new Error("source classification presentation is invalid");
+      var heading = blockById.get(relation.heading_block_id);
+      var headingPresentation = blocks.get(relation.heading_block_id);
+      var headingIndex = blockIndexById.get(relation.heading_block_id);
+      if (
+        !heading || heading.kind !== "heading" ||
+        !headingPresentation ||
+        headingPresentation.roles.join(",") !== "classification" ||
+        !Number.isInteger(headingIndex) ||
+        headingIndex <= previousClassificationIndex ||
+        classificationByHeading.has(relation.heading_block_id) ||
+        new Set(relation.value_block_ids).size !==
+          relation.value_block_ids.length
+      ) throw new Error("source classification heading is invalid");
+      relation.value_block_ids.forEach(function (blockId, valueIndex) {
+        var block = blockById.get(blockId);
+        if (
+          !normalizedNonblank(blockId) || !block || block.kind === "heading" ||
+          blockIndexById.get(blockId) !== headingIndex + valueIndex + 1 ||
+          classificationByValue.has(blockId) ||
+          classificationByHeading.has(blockId)
+        ) throw new Error("source classification value is invalid");
+        classificationByValue.set(blockId, relation);
+      });
+      previousClassificationIndex = headingIndex;
+      classificationByHeading.set(relation.heading_block_id, relation);
+    });
+    var captionBlocks = documentBlocks.filter(function (block) {
+      if (block.kind !== "figure" && block.kind !== "table") return false;
+      var blockPresentation = blocks.get(block.block_id);
+      var captionField = blockPresentation && blockPresentation.fields.find(
+        function (field) { return field.field === "caption"; }
+      );
+      return captionField && typeof captionField.text === "string" &&
+        Boolean(captionField.text.trim());
+    });
+    if (value.captions.length !== captionBlocks.length) {
+      throw new Error("source caption presentation coverage is invalid");
+    }
+    var captions = new Map();
+    var captionAlignmentSources = {
+      "class:ltx_centering": "center",
+      "class:ltx_align_center": "center",
+      "style:text-align:start": "start",
+      "style:text-align:center": "center",
+      "style:text-align:end": "end"
+    };
+    value.captions.forEach(function (entry, index) {
+      var block = captionBlocks[index];
+      if (
+        !plainObject(entry) || Object.keys(entry).sort().join(",") !==
+          "alignment,alignment_sources,block_id,kind,placement" ||
+        entry.block_id !== block.block_id || entry.kind !== block.kind ||
+        captions.has(entry.block_id) ||
+        ["before_content", "after_content", "embedded"]
+          .indexOf(entry.placement) < 0 ||
+        (entry.kind === "figure" && entry.placement === "embedded") ||
+        (entry.alignment !== null &&
+          ["start", "center", "end"].indexOf(entry.alignment) < 0) ||
+        !Array.isArray(entry.alignment_sources) ||
+        (entry.alignment === null && entry.alignment_sources.length) ||
+        (entry.alignment !== null && !entry.alignment_sources.length) ||
+        new Set(entry.alignment_sources).size !==
+          entry.alignment_sources.length ||
+        entry.alignment_sources.some(function (source) {
+          return captionAlignmentSources[source] !== entry.alignment;
+        })
+      ) throw new Error("source caption presentation is invalid");
+      captions.set(entry.block_id, entry);
+    });
+    var figureTargets = sourceFigureTargetPanels(documentValue);
+    var figureBlocks = documentBlocks.filter(function (block) {
+      return block.kind === "figure" && figureTargets.has(block.block_id);
+    });
+    if (value.figures.length !== figureBlocks.length) {
+      throw new Error("source Figure presentation coverage is invalid");
+    }
+    var figures = new Map();
+    value.figures.forEach(function (entry, index) {
+      var block = figureBlocks[index];
+      if (
+        !plainObject(entry) ||
+        Object.keys(entry).sort().join(",") !== "block_id,layout,panels" ||
+        entry.block_id !== block.block_id || figures.has(entry.block_id)
+      ) throw new Error("source Figure presentation is invalid");
+      validateSourceFigureLayout(entry, figureTargets.get(entry.block_id));
+      figures.set(entry.block_id, entry);
+    });
+    var tableBlocks = documentBlocks.filter(function (block) {
+      return block.kind === "table";
+    });
+    if (value.tables.length !== tableBlocks.length) {
+      throw new Error("source Table presentation coverage is invalid");
+    }
+    var tables = new Map();
+    value.tables.forEach(function (entry, index) {
+      var block = tableBlocks[index];
+      if (
+        !plainObject(entry) ||
+        Object.keys(entry).sort().join(",") !== "block_id,cells" ||
+        entry.block_id !== block.block_id || tables.has(entry.block_id) ||
+        !Array.isArray(entry.cells)
+      ) throw new Error("source Table presentation is invalid");
+      tables.set(entry.block_id, entry);
+    });
+    var indexed = {
+      blocks: blocks,
+      captions: captions,
+      classificationByHeading: classificationByHeading,
+      classificationByValue: classificationByValue,
+      figures: figures,
+      tables: tables,
+      validatedBlocks: new Set(),
+      validatedTables: new Set()
+    };
+    sourcePresentationCache.set(documentValue, indexed);
+    return indexed;
+  }
+
+  function validateSourcePresentationLocator(locator, sourceFormat) {
+    if (
+      !plainObject(locator) || Object.keys(locator).sort().join(",") !==
+        "column_end,column_start,line_end,line_start,selector,source_format," +
+        "source_id" || locator.source_format !== sourceFormat
+    ) return false;
+    return ["line_start", "column_start", "line_end", "column_end"]
+      .every(function (field) {
+        return locator[field] === null ||
+          (Number.isInteger(locator[field]) && locator[field] >= 0);
+      }) && ["selector", "source_id"].every(function (field) {
+        return typeof locator[field] === "string";
+      });
+  }
+
+  function sourceClassificationForHeading(documentValue, blockId) {
+    var indexed = sourcePresentationIndex(documentValue);
+    return indexed ? indexed.classificationByHeading.get(blockId) || null : null;
+  }
+
+  function sourceClassificationForValue(documentValue, blockId) {
+    var indexed = sourcePresentationIndex(documentValue);
+    return indexed ? indexed.classificationByValue.get(blockId) || null : null;
+  }
+
+  function sourceCaptionPresentation(documentValue, blockId) {
+    var indexed = sourcePresentationIndex(documentValue);
+    if (!indexed) return null;
+    var value = indexed.captions.get(blockId);
+    if (!value) throw new Error("source caption presentation is missing");
+    return value;
+  }
+
+  function sourceFigurePresentation(documentValue, blockId) {
+    var indexed = sourcePresentationIndex(documentValue);
+    if (!indexed) return null;
+    var value = indexed.figures.get(blockId);
+    if (!value) throw new Error("source Figure presentation is missing");
+    return value;
+  }
+
+  function applySourceCaptionPresentation(node, presentation) {
+    if (!node || !presentation) return;
+    node.dataset.captionPlacement = presentation.placement;
+    if (presentation.alignment !== null) {
+      node.dataset.captionAlignment = presentation.alignment;
+    }
+  }
+
+  function sourcePresentationBlock(documentValue, blockId) {
+    var indexed = sourcePresentationIndex(documentValue);
+    if (!indexed) return null;
+    var value = indexed.blocks.get(blockId);
+    if (!value) throw new Error("source presentation block is missing");
+    if (!indexed.validatedBlocks.has(blockId)) {
+      var sourceBlock = (documentValue.blocks || []).find(function (block) {
+        return block.block_id === blockId;
+      });
+      if (!sourceBlock || !plainObject(sourceBlock.payload)) {
+        throw new Error("source presentation block payload is not loaded");
+      }
+      var expected = sourcePresentationFieldKeys(sourceBlock);
+      var actual = value.fields.map(function (field) {
+        validateSourcePresentationField(sourceBlock, field);
+        return sourcePresentationFieldKey(
+          field.field, field.item_index, field.row_index, field.column_index
+        );
+      });
+      if (
+        actual.length !== expected.length || actual.some(function (key, index) {
+          return key !== expected[index];
+        })
+      ) throw new Error("source presentation field coverage is invalid");
+      indexed.validatedBlocks.add(blockId);
+    }
+    return value;
+  }
+
+  function sourcePresentationField(
+    documentValue, blockId, field, itemIndex, rowIndex, columnIndex
+  ) {
+    var block = sourcePresentationBlock(documentValue, blockId);
+    if (!block) return null;
+    var key = sourcePresentationFieldKey(
+      field, itemIndex, rowIndex, columnIndex
+    );
+    var values = block.fields.filter(function (entry) {
+      return sourcePresentationFieldKey(
+        entry.field, entry.item_index, entry.row_index, entry.column_index
+      ) === key;
+    });
+    if (values.length !== 1) {
+      throw new Error("source presentation field is missing or duplicate");
+    }
+    return values[0];
+  }
+
+  function sourceTablePresentation(documentValue, blockId) {
+    var indexed = sourcePresentationIndex(documentValue);
+    if (!indexed) return null;
+    var value = indexed.tables.get(blockId);
+    if (!value) throw new Error("source Table presentation is missing");
+    if (!indexed.validatedTables.has(blockId)) {
+      var sourceBlock = (documentValue.blocks || []).find(function (block) {
+        return block.block_id === blockId;
+      });
+      if (!sourceBlock || !plainObject(sourceBlock.payload)) {
+        throw new Error("source Table presentation payload is not loaded");
+      }
+      validateSourceTableCells(sourceBlock, value.cells);
+      indexed.validatedTables.add(blockId);
+    }
+    return value;
+  }
+
+  function sourcePresentationFieldKey(
+    field, itemIndex, rowIndex, columnIndex
+  ) {
+    return [field, itemIndex, rowIndex, columnIndex].map(function (value) {
+      return value === null || value === undefined ? "" : String(value);
+    }).join(":");
+  }
+
+  function sourcePresentationFieldKeys(block) {
+    var payload = block.payload || {};
+    if (block.kind === "heading" || block.kind === "paragraph") {
+      return [sourcePresentationFieldKey("text", null, null, null)];
+    }
+    if (block.kind === "list") {
+      return (payload.items || []).map(function (_item, itemIndex) {
+        return sourcePresentationFieldKey(
+          "list_item", itemIndex, null, null
+        );
+      });
+    }
+    if (block.kind === "figure") {
+      return [sourcePresentationFieldKey("caption", null, null, null)];
+    }
+    if (block.kind === "table") {
+      return [sourcePresentationFieldKey("caption", null, null, null)]
+        .concat((payload.headers || []).map(function (_value, columnIndex) {
+          return sourcePresentationFieldKey(
+            "table_header", null, null, columnIndex
+          );
+        })).concat((payload.rows || []).flatMap(function (row, rowIndex) {
+          return row.map(function (_value, columnIndex) {
+            return sourcePresentationFieldKey(
+              "table_cell", null, rowIndex, columnIndex
+            );
+          });
+        }));
+    }
+    return [];
+  }
+
+  function validateSourcePresentationField(block, field) {
+    if (
+      !plainObject(field) || Object.keys(field).sort().join(",") !==
+        "column_index,field,inline_spans,item_index,marks,row_index,text" ||
+      typeof field.text !== "string" || !Array.isArray(field.inline_spans) ||
+      !Array.isArray(field.marks)
+    ) throw new Error("source presentation field is invalid");
+    var key = sourcePresentationFieldKey(
+      field.field, field.item_index, field.row_index, field.column_index
+    );
+    var payload = block.payload || {};
+    var expected;
+    if (key === sourcePresentationFieldKey("text", null, null, null)) {
+      expected = payload.text;
+    } else if (field.field === "list_item" && Number.isInteger(field.item_index)) {
+      expected = ((payload.items || [])[field.item_index] || {}).text;
+    } else if (key === sourcePresentationFieldKey("caption", null, null, null)) {
+      expected = payload.caption;
+    } else if (
+      field.field === "table_header" && Number.isInteger(field.column_index)
+    ) {
+      expected = (payload.headers || [])[field.column_index];
+    } else if (
+      field.field === "table_cell" && Number.isInteger(field.row_index) &&
+      Number.isInteger(field.column_index)
+    ) {
+      expected = ((payload.rows || [])[field.row_index] || [])[field.column_index];
+    }
+    if (field.text !== expected) {
+      throw new Error(
+        "source presentation field differs from its block: " +
+        block.block_id + " " + key
+      );
+    }
+    validateSourcePresentationSpans(field.inline_spans, field.text);
+    validateSourcePresentationMarks(field.marks, field.text);
+  }
+
+  function validateSourcePresentationSpans(spans, text) {
+    var cursor = 0;
+    var reconstructed = "";
+    spans.forEach(function (span) {
+      if (!plainObject(span) || ["text", "link", "math"].indexOf(span.kind) < 0) {
+        throw new Error("source presentation inline span is invalid");
+      }
+      var fields = span.kind === "text" ? "end,kind,start,text" :
+        span.kind === "link" ? "end,kind,start,target,text" :
+          "end,kind,source,start,tex,text";
+      if (
+        Object.keys(span).sort().join(",") !== fields ||
+        !Number.isInteger(span.start) || !Number.isInteger(span.end) ||
+        typeof span.text !== "string" || span.start !== cursor ||
+        span.end <= span.start ||
+        span.end - span.start !== Array.from(span.text).length ||
+        (span.kind === "link" && !normalizedNonblank(span.target)) ||
+        (span.kind === "math" &&
+          (!normalizedNonblank(span.tex) || !normalizedNonblank(span.source)))
+      ) throw new Error("source presentation inline span is invalid");
+      cursor = span.end;
+      reconstructed += span.text;
+    });
+    if (reconstructed !== text) {
+      throw new Error("source presentation inline spans do not reconstruct text");
+    }
+  }
+
+  function validateSourcePresentationMarks(marks, text) {
+    var length = Array.from(text).length;
+    var seen = new Set();
+    marks.forEach(function (mark) {
+      if (
+        !plainObject(mark) ||
+        Object.keys(mark).sort().join(",") !== "end,kind,start" ||
+        (mark.kind !== "strong" && mark.kind !== "emphasis") ||
+        !Number.isInteger(mark.start) || !Number.isInteger(mark.end) ||
+        mark.start < 0 || mark.start >= mark.end || mark.end > length
+      ) throw new Error("source presentation mark is invalid");
+      var identity = [mark.kind, mark.start, mark.end].join(":");
+      if (seen.has(identity)) {
+        throw new Error("source presentation mark is duplicate");
+      }
+      seen.add(identity);
+    });
+  }
+
+  function validateSourceTableCells(block, cells) {
+    var payload = block.payload || {};
+    var headerOffset = (payload.headers || []).length ? 1 : 0;
+    var height = headerOffset + (payload.rows || []).length;
+    var width = Math.max(
+      (payload.headers || []).length,
+      0
+    );
+    (payload.rows || []).forEach(function (row) {
+      width = Math.max(width, row.length);
+    });
+    var occupied = new Set();
+    var origins = new Set();
+    var alignmentSources = {
+      "class:ltx_align_left": "left",
+      "class:ltx_align_center": "center",
+      "class:ltx_align_right": "right",
+      "style:text-align:left": "left",
+      "style:text-align:center": "center",
+      "style:text-align:right": "right",
+      "style:text-align:start": "start",
+      "style:text-align:end": "end"
+    };
+    var ruleSources = {
+      "class:ltx_border_t": "top",
+      "class:ltx_border_tt": "top",
+      "class:ltx_border_T": "top",
+      "class:ltx_border_r": "right",
+      "class:ltx_border_rr": "right",
+      "class:ltx_border_R": "right",
+      "class:ltx_border_r_dashed": "right",
+      "class:ltx_border_b": "bottom",
+      "class:ltx_border_bb": "bottom",
+      "class:ltx_border_B": "bottom",
+      "class:ltx_border_b_dashed": "bottom",
+      "class:ltx_border_l": "left",
+      "class:ltx_border_ll": "left",
+      "class:ltx_border_L": "left"
+    };
+    var edgeOrder = {top: 0, right: 1, bottom: 2, left: 3};
+    cells.forEach(function (cell) {
+      if (
+        !plainObject(cell) || Object.keys(cell).sort().join(",") !==
+          "column_index,column_span,horizontal_alignment," +
+          "horizontal_alignment_sources,kind,locator,row_index,row_span," +
+          "rule_edges" ||
+        !Number.isInteger(cell.row_index) ||
+        !Number.isInteger(cell.column_index) ||
+        !Number.isInteger(cell.row_span) ||
+        !Number.isInteger(cell.column_span) ||
+        cell.row_index < 0 || cell.column_index < 0 ||
+        cell.row_span < 1 || cell.column_span < 1 ||
+        cell.row_index + cell.row_span > height ||
+        cell.column_index + cell.column_span > width ||
+        (cell.kind !== "header" && cell.kind !== "data") ||
+        !plainObject(cell.locator) ||
+        !Array.isArray(cell.horizontal_alignment_sources) ||
+        !Array.isArray(cell.rule_edges)
+      ) throw new Error("source Table cell geometry is invalid");
+      var alignment = cell.horizontal_alignment;
+      if (
+        alignment === null ? cell.horizontal_alignment_sources.length !== 0 :
+          ["left", "center", "right", "start", "end"]
+            .indexOf(alignment) < 0 ||
+          !cell.horizontal_alignment_sources.length ||
+          new Set(cell.horizontal_alignment_sources).size !==
+            cell.horizontal_alignment_sources.length ||
+          cell.horizontal_alignment_sources.some(function (source) {
+            return alignmentSources[source] !== alignment;
+          })
+      ) throw new Error("source Table cell alignment is invalid");
+      var previousEdge = -1;
+      var seenEdges = new Set();
+      cell.rule_edges.forEach(function (rule) {
+        if (
+          !plainObject(rule) || Object.keys(rule).sort().join(",") !==
+            "edge,source" || edgeOrder[rule.edge] === undefined ||
+          !normalizedNonblank(rule.source) || seenEdges.has(rule.edge) ||
+          edgeOrder[rule.edge] <= previousEdge ||
+          ruleSources[rule.source] !== rule.edge
+        ) throw new Error("source Table cell rule edge is invalid");
+        seenEdges.add(rule.edge);
+        previousEdge = edgeOrder[rule.edge];
+      });
+      var origin = cell.row_index + ":" + cell.column_index;
+      if (origins.has(origin)) {
+        throw new Error("source Table cell origin is duplicate");
+      }
+      origins.add(origin);
+      for (
+        var row = cell.row_index;
+        row < cell.row_index + cell.row_span;
+        row += 1
+      ) {
+        for (
+          var column = cell.column_index;
+          column < cell.column_index + cell.column_span;
+          column += 1
+        ) {
+          var point = row + ":" + column;
+          if (occupied.has(point)) {
+            throw new Error("source Table cell geometry overlaps");
+          }
+          occupied.add(point);
+        }
+      }
+    });
+  }
+
+  function sourceFrontMatterEntries(documentValue) {
+    var value = ((documentValue || {}).metadata || {}).source_front_matter;
+    if (value === undefined) return [];
+    if (
+      !value || value.schema_version !== "ac.document.source_front_matter.v1" ||
+      !Array.isArray(value.entries)
+    ) throw new Error("source front matter metadata is invalid");
+    return value.entries.slice();
+  }
+
+  function sourceFrontMatterAt(documentValue, blockIndex) {
+    return sourceFrontMatterEntries(documentValue).filter(function (entry) {
+      return entry && entry.kind === "authors" &&
+        Number.isInteger(entry.block_index) && entry.block_index === blockIndex &&
+        !sourceFrontMatterPromotedToHeader(documentValue, entry);
+    });
+  }
+
+  function sourceFrontMatterPromotedToHeader(documentValue, entry) {
+    var first = (documentValue.blocks || [])[0] || {};
+    return entry && entry.kind === "authors" && entry.block_index === 1 &&
+      first.kind === "heading" && Number((first.payload || {}).level) === 1;
+  }
+
+  function sourceNotes(documentValue) {
+    var value = ((documentValue || {}).metadata || {}).source_notes;
+    if (value === undefined) return [];
+    if (
+      !value || value.schema_version !== "ac.document.source_notes.v1" ||
+      !Array.isArray(value.notes)
+    ) throw new Error("source note metadata is invalid");
+    return value.notes.slice();
+  }
+
+  function registerSourceNoteNavigationTargets(documentValue) {
+    sourceNotes(documentValue).forEach(function (note) {
+      if (!note || !normalizedNonblank(note.note_id) ||
+        !normalizedNonblank(note.owner_block_id)) {
+        throw new Error("source note navigation identity is invalid");
+      }
+      var ownerTarget = "block-" + safeToken(note.owner_block_id);
+      var chunk = state.chunkByTargetId.get(ownerTarget);
+      if (!chunk) throw new Error("source note owner render chunk is missing");
+      [
+        "source-note-",
+        "source-note-ref-",
+        "translation-note-ref-"
+      ].forEach(function (prefix) {
+        state.chunkByTargetId.set(prefix + safeToken(note.note_id), chunk);
+      });
+    });
+  }
+
+  function sourceNoteById(documentValue) {
+    var values = new Map();
+    sourceNotes(documentValue).forEach(function (note) {
+      if (!note || !normalizedNonblank(note.note_id) || values.has(note.note_id)) {
+        throw new Error("source note identity is invalid");
+      }
+      values.set(note.note_id, note);
+    });
+    return values;
+  }
+
+  function sourceNotesForBlock(documentValue, blockId) {
+    return sourceNotes(documentValue).filter(function (note) {
+      return note && note.owner_block_id === blockId;
+    }).sort(function (left, right) {
+      return Number(left.ordinal) - Number(right.ordinal);
+    });
+  }
+
+  function sourceNoteTranslationId(documentValue, revision) {
+    var provenance = revision && revision.provenance || {};
+    var contract = provenance.source_note_translation;
+    if (contract === undefined) return "";
+    if (
+      !plainObject(contract) ||
+      Object.keys(contract).sort().join(",") !== "note_id,schema_version" ||
+      contract.schema_version !== "alc.render.source_note_translation.v1" ||
+      !normalizedNonblank(contract.note_id)
+    ) throw new Error("source note translation provenance is invalid");
+    var note = sourceNoteById(documentValue).get(contract.note_id);
+    var anchor = revision && revision.anchor || {};
+    var related = anchor.related_blocks;
+    if (
+      !note || revision.role !== "translation" || anchor.kind !== "block" ||
+      anchor.target_id !== note.owner_block_id || !Array.isArray(related) ||
+      related.length !== 1 || related[0].block_id !== note.owner_block_id
+    ) throw new Error("source note translation anchor differs from its owner");
+    return contract.note_id;
+  }
+
+  function sourceNoteTranslations(documentValue, revisions) {
+    var values = new Map();
+    var fragments = revisions || Array.from(state.selected.values());
+    Array.from(fragments).forEach(function (revision) {
+      if (!fragmentIsVisible(revision)) return;
+      var noteId = sourceNoteTranslationId(documentValue, revision);
+      if (!noteId) return;
+      if (values.has(noteId)) {
+        throw new Error("source note translation has multiple selected fragments");
+      }
+      values.set(noteId, revision);
+    });
+    return values;
+  }
+
+  function sourceNotesForAnchor(block, field, itemIndex, rowIndex, columnIndex) {
+    var documentValue = state.payload.publication.source_document;
+    return sourceNotesForBlock(documentValue, block.block_id).filter(function (note) {
+      var anchor = note.anchor || {};
+      return anchor.field === field && anchor.item_index === itemIndex &&
+        anchor.row_index === rowIndex && anchor.column_index === columnIndex;
+    });
   }
 
   function documentNotesBefore(blockId) {
@@ -3479,37 +5434,134 @@
     return note;
   }
 
+  function effectiveReaderHeadingLevel(block, presentation) {
+    void presentation;
+    var payload = block.payload || {};
+    return Math.max(2, Math.min(6, Number(payload.level) + 1));
+  }
+
+  function appendSourceClassificationValues(
+    parent, relation, documentValue
+  ) {
+    relation.value_block_ids.forEach(function (blockId, index) {
+      var valueBlock = (documentValue.blocks || []).find(function (candidate) {
+        return candidate.block_id === blockId;
+      });
+      if (!valueBlock || !plainObject(valueBlock.payload)) {
+        throw new Error("source classification value payload is not loaded");
+      }
+      if (index) parent.appendChild(document.createTextNode(" "));
+      var value = element("span", "alc-source-classification-value");
+      value.id = "block-" + safeToken(valueBlock.block_id);
+      value.dataset.blockId = valueBlock.block_id;
+      value.appendChild(renderSourceBlock(valueBlock));
+      parent.appendChild(value);
+    });
+  }
+
   function renderSourceBlock(block) {
     var payload = block.payload || {};
     var container = document.createDocumentFragment();
+    var documentValue = state.payload.publication.source_document;
     if (block.kind === "heading") {
-      var level = Math.max(2, Math.min(6, Number(payload.level) + 1));
-      var heading = element("h" + level, "", payload.text || "");
+      var headingPresentation = sourcePresentationBlock(
+        documentValue, block.block_id
+      );
+      var level = effectiveReaderHeadingLevel(block, headingPresentation);
+      var heading = element("h" + level);
       heading.id = "heading-" + safeToken(block.block_id);
-      container.appendChild(heading);
+      var headingView = sourcePresentationField(
+        documentValue, block.block_id, "text", null, null, null
+      );
+      if (headingView) {
+        appendInlineSpans(
+          heading, headingView.inline_spans, headingView.text, [],
+          headingView.marks
+        );
+      } else {
+        heading.textContent = payload.text || "";
+      }
+      var classification = sourceClassificationForHeading(
+        documentValue, block.block_id
+      );
+      if (classification) {
+        var composition = element("div", "alc-source-classification-composition");
+        composition.appendChild(heading);
+        composition.appendChild(element(
+          "span", "alc-source-classification-separator",
+          classification.separator
+        ));
+        appendSourceClassificationValues(
+          composition, classification, documentValue
+        );
+        container.appendChild(composition);
+      } else {
+        container.appendChild(heading);
+      }
       removeVisibleHtmlTags(heading);
       decorateGlossary(heading, "source");
       return container;
     }
     if (block.kind === "paragraph") {
       var paragraph = element("p");
-      appendInlineSpans(paragraph, payload.inline_spans, payload.text);
+      var paragraphView = sourcePresentationField(
+        documentValue, block.block_id, "text", null, null, null
+      );
+      appendInlineSpans(
+        paragraph,
+        paragraphView ? paragraphView.inline_spans : payload.inline_spans,
+        paragraphView ? paragraphView.text : payload.text,
+        sourceNotesForAnchor(block, "text", null, null, null),
+        paragraphView ? paragraphView.marks : []
+      );
       container.appendChild(paragraph);
       return container;
     }
     if (block.kind === "list") {
+      if (listPathEntries(block).length) {
+        var ownedItem = (payload.items || [])[0] || {};
+        var ownedItemView = sourcePresentationField(
+          documentValue, block.block_id, "list_item", 0, null, null
+        );
+        var segment = element("p", "alc-list-segment");
+        if (sourceBibliographyItemIndexes(block.block_id).has(0)) {
+          segment.id = sourceReferenceTargetId(block.block_id, 0);
+          segment.classList.add(
+            "alc-source-reference-target", "alc-source-navigation-target"
+          );
+          segment.tabIndex = -1;
+        }
+        appendInlineSpans(
+          segment,
+          ownedItemView ? ownedItemView.inline_spans : ownedItem.inline_spans,
+          ownedItemView ? ownedItemView.text : ownedItem.text,
+          sourceNotesForAnchor(block, "list_item", 0, null, null),
+          ownedItemView ? ownedItemView.marks : []
+        );
+        container.appendChild(segment);
+        return container;
+      }
       var list = element(payload.ordered ? "ol" : "ul");
       (payload.items || []).forEach(function (item, itemIndex) {
         var listItem = element("li");
+        var listItemView = sourcePresentationField(
+          documentValue, block.block_id, "list_item", itemIndex, null, null
+        );
         if (
-          block.block_id === state.sourceBibliographyIndex.blockId &&
-          state.sourceBibliographyIndex.itemIndexes.has(itemIndex)
+          sourceBibliographyItemIndexes(block.block_id).has(itemIndex)
         ) {
           listItem.id = sourceReferenceTargetId(block.block_id, itemIndex);
-          listItem.className = "alc-source-reference-target";
+          listItem.className =
+            "alc-source-reference-target alc-source-navigation-target";
           listItem.tabIndex = -1;
         }
-        appendInlineSpans(listItem, item.inline_spans, item.text);
+        appendInlineSpans(
+          listItem,
+          listItemView ? listItemView.inline_spans : item.inline_spans,
+          listItemView ? listItemView.text : item.text,
+          sourceNotesForAnchor(block, "list_item", itemIndex, null, null),
+          listItemView ? listItemView.marks : []
+        );
         list.appendChild(listItem);
       });
       container.appendChild(list);
@@ -3533,46 +5585,136 @@
       return container;
     }
     if (block.kind === "table") {
-      var table = element("table");
-      if (payload.caption) table.appendChild(element("caption", "", payload.caption));
-      if ((payload.headers || []).length) {
-        var head = element("thead");
-        var headerRow = element("tr");
-        payload.headers.forEach(function (value) {
-          headerRow.appendChild(element("th", "", value));
-        });
-        head.appendChild(headerRow);
-        table.appendChild(head);
-      }
-      var body = element("tbody");
-      (payload.rows || []).forEach(function (values) {
-        var tr = element("tr");
-        values.forEach(function (value) {
-          tr.appendChild(element("td", "", value));
-        });
-        body.appendChild(tr);
-      });
-      table.appendChild(body);
-      container.appendChild(table);
-      removeVisibleHtmlTags(table);
-      decorateGlossary(table, "source");
+      container.appendChild(renderSourceTableBlock(
+        block, payload, documentValue
+      ));
       return container;
     }
     if (block.kind === "figure") {
       var figure = element("figure");
-      var digest = payload.asset_digest || "";
-      var resource = resourceForDigest(digest);
-      if (resource) {
-        var image = element("img");
-        image.src = resource.data_uri;
-        image.alt = payload.alt_text || "";
-        figure.appendChild(image);
-      } else {
-        figure.appendChild(element(
-          "p", "alc-figure-note", payload.alt_text || payload.logical_name || ""
-        ));
+      var figureCaption = null;
+      var figureCaptionPresentation = payload.caption ?
+        sourceCaptionPresentation(documentValue, block.block_id) : null;
+      if (payload.caption) {
+        figureCaption = element("figcaption", "alc-figure-caption");
+        var figureCaptionView = sourcePresentationField(
+          documentValue, block.block_id, "caption", null, null, null
+        );
+        appendInlineSpans(
+          figureCaption,
+          figureCaptionView ? figureCaptionView.inline_spans : [],
+          figureCaptionView ? figureCaptionView.text : payload.caption,
+          [], figureCaptionView ? figureCaptionView.marks : []
+        );
+        applySourceCaptionPresentation(
+          figureCaption, figureCaptionPresentation
+        );
+        if (
+          figureCaptionPresentation &&
+          figureCaptionPresentation.placement === "before_content"
+        ) figure.appendChild(figureCaption);
       }
-      if (payload.caption) figure.appendChild(element("figcaption", "", payload.caption));
+      var panels = sourceFigurePanels(block);
+      if (panels.length) {
+        var panelRoot = element("div", "alc-figure-panels");
+        panelRoot.dataset.panelCount = String(panels.length);
+        var figurePresentation = sourceFigurePresentation(
+          documentValue, block.block_id
+        );
+        var availablePanels = 0;
+        if (
+          figurePresentation &&
+          figurePresentation.layout.kind !== "neutral"
+        ) {
+          panelRoot.dataset.layoutKind = figurePresentation.layout.kind;
+          panelRoot.dataset.layoutColumns = String(
+            figurePresentation.layout.column_count
+          );
+          panelRoot.dataset.layoutRows = String(
+            figurePresentation.layout.row_count
+          );
+          panelRoot.dataset.columnSource =
+            figurePresentation.layout.column_source || "";
+          figurePresentation.layout.rows.forEach(function (
+            panelIndexes, rowIndex
+          ) {
+            var panelRow = element("div", "alc-figure-panel-row");
+            var rowSource =
+              figurePresentation.layout.row_sources[rowIndex];
+            panelRow.dataset.columnSource = rowSource;
+            panelRow.dataset.authoredColumnCount = String(
+              panelIndexes.length
+            );
+            panelRow.style.setProperty(
+              "--alc-figure-authored-row-columns",
+              String(panelIndexes.length)
+            );
+            if (rowSource === "class:ltx_flex_size_2") {
+              panelRow.dataset.responsiveWrapProfile =
+                "latexml_ar5iv_flex_size_2";
+              panelRow.style.setProperty(
+                "--alc-figure-row-panel-min", "20rem"
+              );
+            }
+            panelIndexes.forEach(function (panelIndex) {
+              var descriptor = figurePresentation.panels[panelIndex];
+              var panel = panels[panelIndex];
+              var image = renderSourceFigurePanelImage(
+                panel, descriptor, payload
+              );
+              if (!image) {
+                var placeholder = element(
+                  "span", "alc-figure-panel-placeholder"
+                );
+                placeholder.dataset.panelIndex = String(panelIndex);
+                placeholder.setAttribute("aria-hidden", "true");
+                if (descriptor && descriptor.aspect_ratio !== null) {
+                  placeholder.style.aspectRatio =
+                    descriptor.aspect_ratio.join(" / ");
+                }
+                panelRow.appendChild(placeholder);
+                return;
+              }
+              panelRow.appendChild(image);
+              availablePanels += 1;
+            });
+            panelRoot.appendChild(panelRow);
+          });
+        } else {
+          panelRoot.dataset.layoutKind = "neutral";
+          panels.forEach(function (panel, panelIndex) {
+            var descriptor = figurePresentation ?
+              figurePresentation.panels[panelIndex] : null;
+            var image = renderSourceFigurePanelImage(
+              panel, descriptor, payload
+            );
+            if (!image) return;
+            panelRoot.appendChild(image);
+            availablePanels += 1;
+          });
+        }
+        panelRoot.dataset.availablePanelCount = String(availablePanels);
+        if (availablePanels) figure.appendChild(panelRoot);
+      } else {
+        var digest = payload.asset_digest || "";
+        var resource = resourceForDigest(digest);
+        if (resource) {
+          var image = element("img");
+          image.src = resource.data_uri;
+          image.alt = payload.alt_text || "";
+          figure.appendChild(image);
+        } else {
+          figure.appendChild(element(
+            "p", "alc-figure-note", payload.alt_text || payload.logical_name || ""
+          ));
+        }
+      }
+      if (
+        figureCaption && (!figureCaptionPresentation ||
+          figureCaptionPresentation.placement === "after_content")
+      ) {
+        figure.appendChild(figureCaption);
+      }
       container.appendChild(figure);
       removeVisibleHtmlTags(figure);
       decorateGlossary(figure, "source");
@@ -3581,6 +5723,186 @@
     container.appendChild(element("p", "", JSON.stringify(payload)));
     removeVisibleHtmlTags(container);
     return container;
+  }
+
+  function renderSourceFigurePanelImage(panel, descriptor, payload) {
+    if (panel.status !== "available") return null;
+    var panelResource = resourceForDigest(panel.asset_digest || "");
+    if (!panelResource) {
+      throw new Error("available source Figure panel resource is missing");
+    }
+    var panelImage = element("img", "alc-figure-panel");
+    panelImage.src = panelResource.data_uri;
+    panelImage.alt = panel.alt_text || payload.alt_text ||
+      payload.caption || panel.logical_name || "";
+    panelImage.dataset.panelIndex = String(panel.panel_index);
+    panelImage.dataset.artifactDigest = String(panel.asset_digest || "");
+    panelImage.dataset.sourceId = String(panel.source_id || "");
+    if (descriptor && descriptor.display_width !== null) {
+      panelImage.dataset.panelDisplayWidth = String(descriptor.display_width);
+    }
+    if (descriptor && descriptor.aspect_ratio !== null) {
+      panelImage.style.aspectRatio = descriptor.aspect_ratio.join(" / ");
+    }
+    return panelImage;
+  }
+
+  function renderSourceTableBlock(block, payload, documentValue) {
+    var presentation = sourceTablePresentation(documentValue, block.block_id);
+    var captionPresentation = payload.caption ?
+      sourceCaptionPresentation(documentValue, block.block_id) : null;
+    var placement = captionPresentation ? captionPresentation.placement :
+      "before_content";
+    var figure = element("figure", "alc-table-figure");
+    var table = element("table");
+    var caption = null;
+    if (payload.caption) {
+      caption = element(
+        placement === "embedded" ? "caption" : "figcaption",
+        "alc-table-caption"
+      );
+      var captionView = sourcePresentationField(
+        documentValue, block.block_id, "caption", null, null, null
+      );
+      appendInlineSpans(
+        caption, captionView ? captionView.inline_spans : [],
+        captionView ? captionView.text : payload.caption, [],
+        captionView ? captionView.marks : []
+      );
+      applySourceCaptionPresentation(caption, captionPresentation);
+      if (placement !== "embedded") {
+        caption.id = "table-caption-" + safeToken(block.block_id);
+        table.setAttribute("aria-labelledby", caption.id);
+      }
+    }
+    if (caption && placement === "before_content") figure.appendChild(caption);
+    if (caption && placement === "embedded") table.appendChild(caption);
+    if (presentation) {
+      table.classList.add("alc-source-presentation-table");
+      renderSourcePresentationTableRows(
+        table, block, payload, documentValue, presentation
+      );
+    } else {
+      renderLegacySourceTableRows(table, block, payload);
+    }
+    figure.appendChild(table);
+    if (caption && placement === "after_content") figure.appendChild(caption);
+    removeVisibleHtmlTags(figure);
+    decorateGlossary(figure, "source");
+    return figure;
+  }
+
+  function identifySourceTableCell(cell, field, rowIndex, columnIndex) {
+    cell.dataset.sourceField = field;
+    if (rowIndex !== null) {
+      cell.dataset.sourceRowIndex = String(rowIndex);
+    }
+    cell.dataset.sourceColumnIndex = String(columnIndex);
+  }
+
+  function applySourceTableCellPresentation(cell, geometry) {
+    if (geometry.horizontal_alignment !== null) {
+      cell.dataset.tableHorizontalAlignment = geometry.horizontal_alignment;
+    }
+    geometry.rule_edges.forEach(function (rule) {
+      var suffix = rule.edge.charAt(0).toUpperCase() + rule.edge.slice(1);
+      cell.dataset["tableRule" + suffix] = "true";
+    });
+  }
+
+  function renderLegacySourceTableRows(table, block, payload) {
+    if ((payload.headers || []).length) {
+      var head = element("thead");
+      var headerRow = element("tr");
+      payload.headers.forEach(function (value, columnIndex) {
+        var header = element("th");
+        identifySourceTableCell(
+          header, "table_header", null, columnIndex
+        );
+        appendInlineSpans(
+          header, [], value,
+          sourceNotesForAnchor(
+            block, "table_header", null, null, columnIndex
+          )
+        );
+        headerRow.appendChild(header);
+      });
+      head.appendChild(headerRow);
+      table.appendChild(head);
+    }
+    var body = element("tbody");
+    (payload.rows || []).forEach(function (values, rowIndex) {
+      var tr = element("tr");
+      values.forEach(function (value, columnIndex) {
+        var cell = element("td");
+        identifySourceTableCell(
+          cell, "table_cell", rowIndex, columnIndex
+        );
+        appendInlineSpans(
+          cell, [], value,
+          sourceNotesForAnchor(
+            block, "table_cell", null, rowIndex, columnIndex
+          )
+        );
+        tr.appendChild(cell);
+      });
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+  }
+
+  function renderSourcePresentationTableRows(
+    table, block, payload, documentValue, presentation
+  ) {
+    var headerOffset = (payload.headers || []).length ? 1 : 0;
+    var cellsByRow = new Map();
+    presentation.cells.forEach(function (cell) {
+      var row = cellsByRow.get(cell.row_index) || [];
+      row.push(cell);
+      cellsByRow.set(cell.row_index, row);
+    });
+    function appendRow(parent, gridRow) {
+      var tr = element("tr");
+      (cellsByRow.get(gridRow) || []).sort(function (left, right) {
+        return left.column_index - right.column_index;
+      }).forEach(function (geometry) {
+        var isHeaderField = headerOffset && gridRow === 0;
+        var rowIndex = isHeaderField ? null : gridRow - headerOffset;
+        var field = isHeaderField ? "table_header" : "table_cell";
+        var view = sourcePresentationField(
+          documentValue, block.block_id, field, null, rowIndex,
+          geometry.column_index
+        );
+        var cell = element(geometry.kind === "header" ? "th" : "td");
+        identifySourceTableCell(
+          cell, field, rowIndex, geometry.column_index
+        );
+        applySourceTableCellPresentation(cell, geometry);
+        if (geometry.row_span > 1) cell.rowSpan = geometry.row_span;
+        if (geometry.column_span > 1) cell.colSpan = geometry.column_span;
+        if (geometry.kind === "header") {
+          cell.scope = isHeaderField ? "col" : "row";
+        }
+        appendInlineSpans(
+          cell, view.inline_spans, view.text,
+          sourceNotesForAnchor(
+            block, field, null, rowIndex, geometry.column_index
+          ), view.marks
+        );
+        tr.appendChild(cell);
+      });
+      parent.appendChild(tr);
+    }
+    if (headerOffset) {
+      var head = element("thead");
+      appendRow(head, 0);
+      table.appendChild(head);
+    }
+    var body = element("tbody");
+    (payload.rows || []).forEach(function (_row, rowIndex) {
+      appendRow(body, rowIndex + headerOffset);
+    });
+    table.appendChild(body);
   }
 
   function effectiveEquationLabel(block, payload) {
@@ -3603,33 +5925,149 @@
     var row = element("div", "alc-equation-row");
     if (math.parentElement) math.replaceWith(row);
     row.appendChild(math);
-    if (label) row.appendChild(element("span", "alc-equation-label", label));
+    var visibleLabel = displayEquationLabel(label);
+    if (visibleLabel) {
+      row.appendChild(element("span", "alc-equation-label", visibleLabel));
+    }
     return row;
   }
 
-  function appendInlineSpans(parent, spans, fallback) {
-    if (!Array.isArray(spans) || spans.length === 0) {
-      parent.textContent = fallback || "";
-      removeVisibleHtmlTags(parent);
-      decorateGlossary(parent, "source");
-      return;
+  function displayEquationLabel(label) {
+    var value = String(label || "").trim();
+    if (!value) return "";
+    return value.charAt(0) === "(" && value.charAt(value.length - 1) === ")" ?
+      value : "(" + value + ")";
+  }
+
+  function appendInlineSpanSlice(parent, span, start, end) {
+    if (end <= start) return;
+    var text = Array.from(String(span.text || "")).slice(start, end).join("");
+    if (span.kind === "math") {
+      if (start !== 0 || end !== Array.from(String(span.text || "")).length) {
+        throw new Error("source note anchor splits an inline math span");
+      }
+      var math = element("span", "math math-inline", span.source || span.tex || text);
+      math.dataset.tex = span.tex || span.source || text;
+      parent.appendChild(math);
+    } else if (span.kind === "link") {
+      var link = element("a", "", text || span.target || "");
+      link.href = span.target || "";
+      link.rel = "noopener noreferrer";
+      parent.appendChild(link);
+    } else {
+      parent.appendChild(document.createTextNode(text));
     }
-    spans.forEach(function (span) {
-      if (span.kind === "math") {
-        var math = element("span", "math math-inline", span.source || span.tex || "");
-        math.dataset.tex = span.tex || span.source || "";
-        parent.appendChild(math);
-      } else if (span.kind === "link") {
-        var link = element("a", "", span.text || span.target || "");
-        link.href = span.target || "";
-        link.rel = "noopener noreferrer";
-        parent.appendChild(link);
-      } else {
-        parent.appendChild(document.createTextNode(span.text || ""));
+  }
+
+  function appendMarkedInlineSpanSlice(
+    parent, span, spanStart, start, end, marks
+  ) {
+    if (end <= start) return;
+    var target = parent;
+    marks.filter(function (mark) {
+      return mark.start <= start && mark.end >= end;
+    }).sort(function (left, right) {
+      return left.start - right.start || right.end - left.end ||
+        (left.kind === "strong" ? -1 : 1);
+    }).forEach(function (mark) {
+      var wrapper = element(mark.kind === "strong" ? "strong" : "em");
+      target.appendChild(wrapper);
+      target = wrapper;
+    });
+    appendInlineSpanSlice(target, span, start - spanStart, end - spanStart);
+  }
+
+  function renderSourceNoteReference(note) {
+    var marker = String(note.marker || "");
+    var reference = element("sup", "alc-source-note-ref");
+    reference.id = "source-note-ref-" + safeToken(note.note_id);
+    var link = element("a", "", marker);
+    link.href = "#source-note-" + safeToken(note.note_id);
+    link.setAttribute("aria-label", labels().sourceNote + " " + marker);
+    reference.appendChild(link);
+    return reference;
+  }
+
+  function renderTranslationSourceNoteReference(note) {
+    var marker = String(note.marker || "");
+    var reference = element(
+      "sup", "alc-source-note-ref alc-translation-note-ref"
+    );
+    reference.id = "translation-note-ref-" + safeToken(note.note_id);
+    var link = element("a", "", marker);
+    link.href = "#source-note-" + safeToken(note.note_id);
+    link.setAttribute("aria-label", labels().sourceNote + " " + marker);
+    reference.appendChild(link);
+    return reference;
+  }
+
+  function appendInlineSpans(
+    parent, spans, fallback, sourceNoteValues, sourceMarks
+  ) {
+    var text = String(fallback || "");
+    var values = Array.isArray(spans) && spans.length ? spans.slice() : [{
+      kind: "text", start: 0, end: Array.from(text).length, text: text
+    }];
+    var notes = Array.isArray(sourceNoteValues) ? sourceNoteValues.slice() : [];
+    var marks = Array.isArray(sourceMarks) ? sourceMarks.slice() : [];
+    notes.sort(function (left, right) {
+      return Number((left.anchor || {}).start) - Number((right.anchor || {}).start);
+    });
+    var markBoundaries = new Set();
+    marks.forEach(function (mark) {
+      markBoundaries.add(Number(mark.start));
+      markBoundaries.add(Number(mark.end));
+    });
+    var noteIndex = 0;
+    values.forEach(function (span) {
+      var spanText = String(span.text || "");
+      var spanStart = Number(span.start);
+      var spanEnd = Number(span.end);
+      if (
+        !Number.isInteger(spanStart) || !Number.isInteger(spanEnd) ||
+        spanEnd - spanStart !== Array.from(spanText).length
+      ) throw new Error("source inline span range is invalid");
+      var cursor = spanStart;
+      while (cursor < spanEnd) {
+        var note = noteIndex < notes.length ? notes[noteIndex] : null;
+        var anchor = note && note.anchor || {};
+        var noteStart = note ? Number(anchor.start) : spanEnd;
+        var noteEnd = note ? Number(anchor.end) : spanEnd;
+        if (note && noteStart < cursor) {
+          throw new Error("source note anchor is outside inline content");
+        }
+        if (note && noteStart === cursor && noteStart < spanEnd) {
+          if (
+            !Number.isInteger(noteStart) || !Number.isInteger(noteEnd) ||
+            noteEnd > spanEnd || noteEnd <= noteStart ||
+            Array.from(spanText).slice(
+              noteStart - spanStart, noteEnd - spanStart
+            ).join("") !== note.marker
+          ) throw new Error("source note anchor differs from inline content");
+          parent.appendChild(renderSourceNoteReference(note));
+          cursor = noteEnd;
+          noteIndex += 1;
+          continue;
+        }
+        var next = Math.min(spanEnd, noteStart);
+        markBoundaries.forEach(function (boundary) {
+          if (boundary > cursor && boundary < next) next = boundary;
+        });
+        if (next <= cursor) {
+          throw new Error("source presentation inline boundary is invalid");
+        }
+        appendMarkedInlineSpanSlice(
+          parent, span, spanStart, cursor, next, marks
+        );
+        cursor = next;
       }
     });
+    if (noteIndex !== notes.length) {
+      throw new Error("source note anchor is outside inline content");
+    }
     removeVisibleHtmlTags(parent);
     decorateLegacyBibliographyLinks(parent);
+    decorateLegacyStructuralLinks(parent);
     decorateGlossary(parent, "source");
     typeset(parent);
   }
@@ -3644,6 +6082,35 @@
     return hydrateResource(
       ensureSourceIndexes().resourcesByLogicalName.get(logicalName) || null
     );
+  }
+
+  function sourceFigurePanels(block) {
+    if (!block || block.kind !== "figure") return [];
+    var documentValue = state.payload && state.payload.publication &&
+      state.payload.publication.source_document || {};
+    var manifest = (documentValue.metadata || {}).source_target_manifest || {};
+    if (
+      manifest.schema_version !== "ac.document.source_target_manifest.v1" ||
+      !Array.isArray(manifest.targets)
+    ) return [];
+    var candidates = manifest.targets.filter(function (target) {
+      return target && target.kind === "figure" &&
+        target.block_id === block.block_id && Array.isArray(target.panels) &&
+        target.panels.length;
+    });
+    if (!candidates.length) return [];
+    var panels = candidates[0].panels;
+    if (candidates.some(function (target) {
+      return stableStringify(target.panels) !== stableStringify(panels);
+    })) {
+      throw new Error("ALC reader Figure panel manifest is inconsistent");
+    }
+    panels.forEach(function (panel, index) {
+      if (!panel || panel.panel_index !== index) {
+        throw new Error("ALC reader Figure panel order is invalid");
+      }
+    });
+    return panels;
   }
 
   function hydrateResource(resource) {
@@ -3841,6 +6308,7 @@
     card.appendChild(header);
     var saved = element("div", "alc-fragment-saved-content");
     var rendered = renderMarkdown(fragment.markdown_body, fragment);
+    decorateTranslationSourceNoteTokens(rendered, fragment);
     decorateOverlayEquation(rendered, fragment);
     saved.appendChild(rendered);
     saved.addEventListener("click", function (event) {
@@ -3919,6 +6387,37 @@
         event.preventDefault();
         event.stopPropagation();
         beginInlineEdit(fragment);
+      });
+      root.appendChild(edit);
+    }
+    return root;
+  }
+
+  function renderClassificationActions(relation, fragments, editFragment) {
+    var root = element("div", "alc-card-actions alc-classification-actions");
+    root.setAttribute("aria-label", roleLabel("translation") + " actions");
+    var speech = element("button", "alc-card-action");
+    speech.type = "button";
+    var speechLabel = labels().listen + " · " + roleLabel("translation");
+    speech.setAttribute("aria-label", speechLabel);
+    speech.title = speechLabel;
+    speech.innerHTML = speechIcon("speaker");
+    speech.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      playClassificationSpeech(relation, fragments);
+    });
+    root.appendChild(speech);
+    if (editFragment) {
+      var edit = element("button", "alc-card-action");
+      edit.type = "button";
+      edit.setAttribute("aria-label", labels().editContent);
+      edit.title = labels().editContent;
+      edit.innerHTML = speechIcon("edit");
+      edit.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        beginInlineEdit(editFragment);
       });
       root.appendChild(edit);
     }
@@ -4013,7 +6512,7 @@
     state.pendingReaderLinkHref = "";
   }
 
-  function followReaderLink(href) {
+  function followReaderLink(href, keyboardNavigation) {
     if (!href) return;
     var url;
     try {
@@ -4027,7 +6526,7 @@
       url.search === window.location.search &&
       url.hash
     ) {
-      activateHashTarget(url.hash, true);
+      activateHashTarget(url.hash, true, keyboardNavigation === true);
       return;
     }
     window.location.assign(url.href);
@@ -4046,7 +6545,7 @@
     state.pendingReaderLinkTimer = window.setTimeout(function () {
       var href = state.pendingReaderLinkHref;
       clearPendingReaderLink();
-      followReaderLink(href);
+      followReaderLink(href, event.detail === 0);
     }, 260);
   }
 
@@ -4096,6 +6595,23 @@
         if (activeDraftHasChanges()) saveEditor(event);
       }
     });
+    var classification = classificationValueEditorContext();
+    if (classification) {
+      root.classList.add("alc-classification-composite-editor");
+      var prefix = element("div", "alc-classification-editor-prefix");
+      prefix.id = "alc-classification-editor-prefix-" + safeToken(
+        classification.relation.classification_id
+      );
+      prefix.appendChild(renderMarkdown(
+        classification.heading.markdown_body, classification.heading
+      ));
+      prefix.appendChild(element(
+        "span", "alc-source-classification-separator",
+        classification.relation.separator
+      ));
+      textarea.setAttribute("aria-describedby", prefix.id);
+      root.appendChild(prefix);
+    }
     root.appendChild(textarea);
     window.requestAnimationFrame(function () {
       resizeInlineTextarea(textarea);
@@ -4103,6 +6619,22 @@
       textarea.setSelectionRange(textarea.value.length, textarea.value.length);
     });
     return root;
+  }
+
+  function classificationValueEditorContext() {
+    var draft = state.activeDraft;
+    var base = draft && draft.base;
+    if (!base || base.role !== "translation") return null;
+    var documentValue = state.payload.publication.source_document;
+    var relation = sourceClassificationForValue(
+      documentValue, fragmentTargetId(base)
+    );
+    if (!relation) return null;
+    var headings = regularTranslationFragments(relation.heading_block_id);
+    if (headings.length !== 1) {
+      throw new Error("source classification heading translation is ambiguous");
+    }
+    return {relation: relation, heading: headings[0]};
   }
 
   function resizeInlineTextarea(textarea) {
@@ -4256,6 +6788,7 @@
         updateContentsTitles();
       }
     }
+    scheduleScrollableTableSync();
   }
 
   function updateVisibilityStyles(channels) {
@@ -5100,6 +7633,30 @@
     speakSpeechIndex(index);
   }
 
+  function playClassificationSpeech(relation, fragments) {
+    if (!state.speechSupported) {
+      setSpeechStatus(labels().speechUnavailable, true);
+      return;
+    }
+    refreshSpeechVoices();
+    if (!state.speechVoices.length) return;
+    var parts = fragments.map(fragmentSpeechText).filter(Boolean);
+    if (!parts.length) {
+      setSpeechStatus(labels().speechNoReadableContent, true);
+      return;
+    }
+    state.speechQueue = [{
+      text: parts[0] + (parts.length > 1 ?
+        relation.separator + parts.slice(1).join(" ") : ""),
+      role: "translation",
+      language: speechLanguage("translation", fragments[0]),
+      blockId: relation.heading_block_id,
+      fragmentId: fragments[0].fragment_id,
+      classificationId: relation.classification_id
+    }];
+    speakSpeechIndex(0);
+  }
+
   function playGlossarySpeech(entry) {
     if (!state.speechSupported) {
       setSpeechStatus(labels().speechUnavailable, true);
@@ -5123,6 +7680,15 @@
   }
 
   function speechSegmentNode(segment) {
+    if (segment.classificationId) {
+      var classification = document.querySelector(
+        '[data-source-classification-id="' +
+        cssString(segment.classificationId) + '"]'
+      );
+      return classification && classification.querySelector(
+        ".alc-source-classification-target"
+      );
+    }
     if (segment.glossaryEntryId) {
       return document.querySelector(
         '.alc-glossary-row[data-glossary-entry-id="' +
@@ -5861,6 +8427,10 @@
     return tex;
   }
 
+  function katexSemanticMacros() {
+    return {"\\arcdeg": "^{\\circ}"};
+  }
+
   function repairMatrixShorthand(value) {
     var tex = String(value || "");
     var opening = /\\left\s*(\[|\()\s*\{\s*([clr](?:\s*[clr])*)\s*\}/g;
@@ -5991,7 +8561,8 @@
         var settings = {
           displayMode: node.classList.contains("math-display"),
           throwOnError: true,
-          strict: "warn"
+          strict: "warn",
+          macros: katexSemanticMacros()
         };
         var candidates = katexCandidates(node.dataset.tex);
         var rendered = candidates.some(function (candidate) {
@@ -6180,7 +8751,7 @@
         !chunkForTargetId(targetId)
       ) return;
       event.preventDefault();
-      activateHashTarget(href, true);
+      activateHashTarget(href, true, event.detail === 0);
     });
     window.addEventListener("hashchange", function () {
       activateHashTarget(window.location.hash, false);
@@ -6191,7 +8762,7 @@
     state.navigationReady = true;
   }
 
-  function activateHashTarget(hash, updateHistory) {
+  function activateHashTarget(hash, updateHistory, keyboardNavigation) {
     var requestedTargetId = hashTargetId(hash);
     var targetId = canonicalReaderTargetId(requestedTargetId);
     var canonicalHash = targetId === requestedTargetId ? hash : "#" + targetId;
@@ -6204,14 +8775,14 @@
         }
       }
       state.hashCalibration = null;
-      scrollToHashTarget(targetId);
+      scrollToHashTarget(targetId, keyboardNavigation === true);
       return true;
     }
     var chunk = chunkForTargetId(targetId);
     if (!chunk) return false;
-    revealSourceReferenceTarget(targetId);
+    revealSourceTarget(targetId);
     renderChunk(chunk);
-    armHashCalibration(canonicalHash);
+    armHashCalibration(canonicalHash, keyboardNavigation === true);
     if (updateHistory) {
       if (window.location.hash === canonicalHash) {
         window.history.replaceState(null, "", canonicalHash);
@@ -6221,7 +8792,7 @@
     } else if (targetId !== requestedTargetId) {
       window.history.replaceState(null, "", canonicalHash);
     }
-    scrollToHashTarget(targetId);
+    scrollToHashTarget(targetId, keyboardNavigation === true);
     return true;
   }
 
@@ -6235,20 +8806,25 @@
     });
   }
 
-  function armHashCalibration(hash) {
+  function armHashCalibration(hash, keyboardNavigation) {
     var targetId = hashTargetId(hash);
     if (!targetId || !chunkForTargetId(targetId)) return;
-    state.hashCalibration = {targetId: targetId};
+    state.hashCalibration = {
+      targetId: targetId,
+      keyboardNavigation: keyboardNavigation === true
+    };
     recalibrateHashTarget();
   }
 
   function recalibrateHashTarget() {
     var calibration = state.hashCalibration;
     if (!calibration) return;
-    scrollToHashTarget(calibration.targetId);
+    scrollToHashTarget(
+      calibration.targetId, calibration.keyboardNavigation === true
+    );
   }
 
-  function scrollToHashTarget(targetId) {
+  function scrollToHashTarget(targetId, keyboardNavigation) {
     window.requestAnimationFrame(function () {
       var target = document.getElementById(targetId);
       if (!target) return;
@@ -6257,7 +8833,15 @@
       root.style.scrollBehavior = "auto";
       target.scrollIntoView({block: "start", behavior: "auto"});
       root.style.scrollBehavior = previousBehavior;
-      if (target.classList.contains("alc-source-reference-target")) {
+      if (target.classList.contains("alc-source-navigation-target")) {
+        document.querySelectorAll(".alc-keyboard-navigation-target").forEach(
+          function (node) {
+            node.classList.remove("alc-keyboard-navigation-target");
+          }
+        );
+        target.classList.toggle(
+          "alc-keyboard-navigation-target", keyboardNavigation === true
+        );
         document.querySelectorAll(".alc-reference-target-active").forEach(
           function (node) { node.classList.remove("alc-reference-target-active"); }
         );
@@ -6828,7 +9412,7 @@
       buildChangedMarkdown(resourcePaths, categories) :
       buildCompleteMarkdown(resourcePaths, categories);
     if (!complete.markdown) return null;
-    complete.markdown = degradeLegacyBibliographyMarkdownLinks(
+    complete.markdown = degradeLegacyInternalMarkdownLinks(
       complete.markdown
     );
     var includedResourcePaths = markdownReferencedResourcePaths(
@@ -6877,7 +9461,7 @@
       buildCompleteMarkdown(resourcePaths, categories);
     if (!complete.markdown) return "";
     return stripPortableMarkdownResources(
-      degradeLegacyBibliographyMarkdownLinks(complete.markdown), resourcePaths
+      degradeLegacyInternalMarkdownLinks(complete.markdown), resourcePaths
     );
   }
 
@@ -6895,12 +9479,27 @@
     });
     var translations = translationSelected ?
       completeTranslationSelections(blocks) : new Map();
+    var noteTranslations = translationSelected ?
+      sourceNoteTranslations(documentValue) : new Map();
     var supplements = completeSupplementSelections(categories);
     var selectedTranslationDigests = [];
     var selectedRevisionDigests = [];
     var selectedGlossaryRevisionDigests = [];
     var parts = [];
-    blocks.forEach(function (block) {
+    var appendedFrontMatter = new Set();
+    function appendFrontMatter(blockIndex) {
+      if (!sourceSelected && !translationSelected) return;
+      sourceFrontMatterEntries(documentValue).filter(function (entry) {
+        return entry && entry.kind === "authors" &&
+          entry.block_index === blockIndex &&
+          !appendedFrontMatter.has(entry.front_matter_id);
+      }).forEach(function (entry) {
+        pushExportPart(parts, exportSourceFrontMatterMarkdown(entry));
+        appendedFrontMatter.add(entry.front_matter_id);
+      });
+    }
+    blocks.forEach(function (block, blockIndex) {
+      appendFrontMatter(blockIndex);
       if (sourceSelected || translationSelected) {
         exportDocumentNotesBefore(documentValue, block.block_id).forEach(
           function (note) { parts.push(note); }
@@ -6913,6 +9512,7 @@
       var sourceMarkdown = exportSourceBlockMarkdown(
         block, documentValue, resourcePaths
       );
+      sourceMarkdown = exportListOwnedMarkdown(block, sourceMarkdown, false);
       if (sourceSelected) pushExportPart(parts, sourceMarkdown);
       if (translationSelected) {
         if (translation) {
@@ -6929,6 +9529,9 @@
               "", translation.title, translatedMarkdown
             );
           }
+          translatedMarkdown = exportListOwnedMarkdown(
+            block, translatedMarkdown, sourceSelected
+          );
           pushExportPart(parts, translatedMarkdown);
           selectedTranslationDigests.push(translation.semantic_digest);
           selectedRevisionDigests.push(translation.semantic_digest);
@@ -6940,6 +9543,28 @@
       ) {
         pushExportPart(parts, sourceMarkdown);
       }
+      sourceNotesForBlock(documentValue, block.block_id).forEach(function (note) {
+        if (sourceSelected) {
+          pushExportPart(
+            parts, exportSourceNoteMarkdown(note, null, resourcePaths)
+          );
+        }
+        if (translationSelected) {
+          var noteTranslation = noteTranslations.get(note.note_id) || null;
+          if (noteTranslation) {
+            pushExportPart(parts, exportSourceNoteMarkdown(
+              note, noteTranslation, resourcePaths
+            ));
+            selectedTranslationDigests.push(noteTranslation.semantic_digest);
+            selectedRevisionDigests.push(noteTranslation.semantic_digest);
+          } else if (!sourceSelected) {
+            pushExportPart(
+              parts, exportSourceNoteMarkdown(note, null, resourcePaths)
+            );
+          }
+        }
+      });
+      appendFrontMatter(blockIndex + 1);
       (supplements.get(block.block_id) || []).forEach(function (revision) {
         pushExportPart(parts, exportSupplementMarkdown(
           revision,
@@ -6950,6 +9575,7 @@
         selectedRevisionDigests.push(revision.semantic_digest);
       });
     });
+    appendFrontMatter(blocks.length);
     var glossary = categories.has("glossary") ?
       exportGlossaryMarkdown(publication.glossary || [], resourcePaths) : "";
     if (glossary) {
@@ -7063,8 +9689,12 @@
     var blockOrder = new Map(blocks.map(function (block, index) {
       return [block.block_id, index];
     }));
-    var revisions = selectedForMarkdown("changed").filter(function (revision) {
-      return categories.has(revision.role) && revision.role !== "source";
+    var changedValues = selectedForMarkdown("changed");
+    var changedNoteTranslations = categories.has("translation") ?
+      sourceNoteTranslations(documentValue, changedValues) : new Map();
+    var revisions = changedValues.filter(function (revision) {
+      return categories.has(revision.role) && revision.role !== "source" &&
+        !sourceNoteTranslationId(documentValue, revision);
     });
     revisions.sort(function (left, right) {
       var leftTarget = fragmentTargetId(left);
@@ -7075,7 +9705,10 @@
         comparePortableText(left.fragment_id, right.fragment_id);
     });
     var glossaryChanges = categories.has("glossary") ? changedGlossaryEntries() : [];
-    if (!revisions.length && !glossaryChanges.length) {
+    if (
+      !revisions.length && !changedNoteTranslations.size &&
+      !glossaryChanges.length
+    ) {
       return {
         markdown: "",
         selectedTranslationDigests: [],
@@ -7111,6 +9744,15 @@
         selectedTranslationDigests.push(revision.semantic_digest);
       }
     });
+    sourceNotes(documentValue).forEach(function (note) {
+      var translation = changedNoteTranslations.get(note.note_id);
+      if (!translation) return;
+      pushExportPart(
+        parts, exportSourceNoteMarkdown(note, translation, resourcePaths)
+      );
+      selectedRevisionDigests.push(translation.semantic_digest);
+      selectedTranslationDigests.push(translation.semantic_digest);
+    });
     if (glossaryChanges.length) {
       pushExportPart(parts, exportGlossaryMarkdown(
         glossaryChanges.map(function (item) { return item.entry; }),
@@ -7129,6 +9771,7 @@
   }
 
   function completeTranslationSelections(blocks) {
+    var documentValue = state.payload.publication.source_document;
     var blockIds = new Set(blocks.map(function (block) {
       return block.block_id;
     }));
@@ -7138,6 +9781,7 @@
       var related = anchor.related_blocks;
       if (
         !fragmentIsVisible(revision) ||
+        sourceNoteTranslationId(documentValue, revision) ||
         revision.role !== "translation" ||
         anchor.kind !== "block" ||
         !blockIds.has(anchor.target_id) ||
@@ -7162,6 +9806,52 @@
     return selected;
   }
 
+  function exportSourceFrontMatterMarkdown(entry) {
+    var authors = (entry.authors || []).map(function (author) {
+      var value = escapeMarkdownStrong(String(author.name || ""));
+      var markers = (author.markers || []).map(String).join(",");
+      if (markers) value += " [" + markers + "]";
+      var details = [];
+      if (author.orcid_url) {
+        details.push("[" + labels().orcid + "](" +
+          markdownLinkDestination(author.orcid_url) + ")");
+      }
+      (author.contacts || []).forEach(function (contact) {
+        var visible = escapeMarkdownLinkLabel(String(contact.value || ""));
+        details.push(contact.target ?
+          "[" + visible + "](" + markdownLinkDestination(contact.target) + ")" :
+          visible);
+      });
+      return value + (details.length ? " (" + details.join("; ") + ")" : "");
+    });
+    var lines = ["**" + labels().authors + ":** " + authors.join("; ")];
+    if ((entry.affiliations || []).length) {
+      lines.push("", "**" + labels().affiliations + ":**");
+      (entry.affiliations || []).forEach(function (affiliation) {
+        lines.push(
+          "- [" + escapeMarkdownInlineText(String(affiliation.marker || "")) +
+          "] " + escapeMarkdownInlineText(String(affiliation.text || ""))
+        );
+      });
+    }
+    return lines.join("\n") + "\n";
+  }
+
+  function exportSourceNoteMarkdown(note, translation, resourcePaths) {
+    var body = translation ? rewriteMarkdownResourceTargets(
+      projectedRevisionMarkdown(translation), resourcePaths
+    ) : exportInlineSpansMarkdown(
+      note.inline_spans, note.body, resourcePaths
+    );
+    body = String(body || "").replace(/\n+$/, "");
+    if (!body) return "";
+    var label = (translation ? labels().translation + " · " : "") +
+      labels().sourceNote + " " + String(note.marker || "");
+    return ["**" + escapeMarkdownStrong(label) + "**", ""].concat(
+      body.split("\n")
+    ).map(function (line) { return line ? "> " + line : ">"; }).join("\n") + "\n";
+  }
+
   function exportDocumentNotesBefore(documentValue, blockId) {
     var notes = (documentValue.metadata || {}).document_notes || {};
     if (
@@ -7182,22 +9872,54 @@
   function exportSourceBlockMarkdown(block, documentValue, resourcePaths) {
     var payload = block.payload || {};
     if (block.kind === "heading") {
+      var headingPresentation = sourcePresentationBlock(
+        documentValue, block.block_id
+      );
+      var headingView = sourcePresentationField(
+        documentValue, block.block_id, "text", null, null, null
+      );
+      var headingText = headingView ?
+        exportPresentationFieldMarkdown(headingView, resourcePaths) :
+        rewriteMarkdownResourceTargets(String(payload.text || ""), resourcePaths);
+      if (
+        headingPresentation &&
+        headingPresentation.roles.indexOf("classification") >= 0
+      ) return "**" + headingText + "**\n";
       var level = Math.max(1, Math.min(6, Number(payload.level) || 1));
-      return "#".repeat(level) + " " + rewriteMarkdownResourceTargets(
-        String(payload.text || ""), resourcePaths
-      ) + "\n";
+      return "#".repeat(level) + " " + headingText + "\n";
     }
     if (block.kind === "paragraph") {
-      return exportInlineSpansMarkdown(
-        payload.inline_spans, payload.text, resourcePaths
-      ) + "\n";
+      var paragraphView = sourcePresentationField(
+        documentValue, block.block_id, "text", null, null, null
+      );
+      return (paragraphView ?
+        exportPresentationFieldMarkdown(paragraphView, resourcePaths) :
+        exportInlineSpansMarkdown(
+          payload.inline_spans, payload.text, resourcePaths
+        )) + "\n";
     }
     if (block.kind === "list") {
+      if (listPathEntries(block).length) {
+        var ownedItem = (payload.items || [])[0] || {};
+        var ownedView = sourcePresentationField(
+          documentValue, block.block_id, "list_item", 0, null, null
+        );
+        return (ownedView ?
+          exportPresentationFieldMarkdown(ownedView, resourcePaths) :
+          exportInlineSpansMarkdown(
+            ownedItem.inline_spans, ownedItem.text, resourcePaths
+          )) + "\n";
+      }
       return (payload.items || []).map(function (item, index) {
         var prefix = payload.ordered ? String(index + 1) + ". " : "- ";
-        var content = exportInlineSpansMarkdown(
-          item.inline_spans, item.text, resourcePaths
-        ).replace(/\n/g, "\n" + " ".repeat(prefix.length));
+        var itemView = sourcePresentationField(
+          documentValue, block.block_id, "list_item", index, null, null
+        );
+        var content = (itemView ?
+          exportPresentationFieldMarkdown(itemView, resourcePaths) :
+          exportInlineSpansMarkdown(
+            item.inline_spans, item.text, resourcePaths
+          )).replace(/\n/g, "\n" + " ".repeat(prefix.length));
         return prefix + content;
       }).join("\n") + "\n";
     }
@@ -7213,10 +9935,12 @@
       var equation = "$$\n" + String(payload.tex || "").trim() + "\n$$";
       var equationLabel = exportEquationLabel(block, documentValue);
       return equation + (equationLabel ?
-        "\n\nEquation label: " + equationLabel : "") + "\n";
+        "\n\nEquation label: " + displayEquationLabel(equationLabel) : "") + "\n";
     }
     if (block.kind === "table") {
-      return exportSourceTableMarkdown(payload, resourcePaths);
+      return exportSourceTableMarkdown(
+        block, documentValue, payload, resourcePaths
+      );
     }
     if (block.kind === "figure") {
       return exportFigureMarkdown(block, null, resourcePaths);
@@ -7248,6 +9972,61 @@
     }).join("");
   }
 
+  function exportPresentationFieldMarkdown(view, resourcePaths) {
+    var marks = view.marks || [];
+    return (view.inline_spans || []).map(function (span) {
+      var boundaries = new Set([span.start, span.end]);
+      marks.forEach(function (mark) {
+        if (mark.start > span.start && mark.start < span.end) {
+          boundaries.add(mark.start);
+        }
+        if (mark.end > span.start && mark.end < span.end) {
+          boundaries.add(mark.end);
+        }
+      });
+      var points = Array.from(boundaries).sort(function (left, right) {
+        return left - right;
+      });
+      return points.slice(0, -1).map(function (start, index) {
+        var end = points[index + 1];
+        var content = exportPresentationSpanSlice(
+          span, start - span.start, end - span.start, resourcePaths
+        );
+        var active = marks.filter(function (mark) {
+          return mark.start <= start && mark.end >= end;
+        }).sort(function (left, right) {
+          return left.start - right.start || right.end - left.end ||
+            (left.kind === "strong" ? -1 : 1);
+        });
+        active.slice().reverse().forEach(function (mark) {
+          var token = mark.kind === "strong" ? "**" : "*";
+          content = token + content + token;
+        });
+        return content;
+      }).join("");
+    }).join("");
+  }
+
+  function exportPresentationSpanSlice(span, start, end, resourcePaths) {
+    var text = Array.from(String(span.text || "")).slice(start, end).join("");
+    if (span.kind === "math") {
+      if (start !== 0 || end !== Array.from(span.text || "").length) {
+        throw new Error("source presentation mark splits an inline math span");
+      }
+      var tex = String(span.tex || span.source || "");
+      return containsUnescapedDollar(tex) ? "\\(" + tex + "\\)" :
+        "$" + tex + "$";
+    }
+    if (span.kind === "link") {
+      var target = portableResourceTarget(
+        String(span.target || ""), resourcePaths
+      );
+      return "[" + escapeMarkdownLinkLabel(text || span.target || "") + "](" +
+        markdownLinkDestination(target) + ")";
+    }
+    return escapeMarkdownInlineText(text);
+  }
+
   function exportEquationLabel(block, documentValue) {
     var reconciliation = (
       (documentValue.metadata || {}).equation_label_reconciliation || {}
@@ -7269,7 +10048,8 @@
       projectedRevisionMarkdown(translation), resourcePaths
     ).replace(/\n+$/, "");
     var label = exportEquationLabel(block, documentValue);
-    var labelLine = label ? "Equation label: " + label : "";
+    var labelLine = label ?
+      "Equation label: " + displayEquationLabel(label) : "";
     if (labelLine && !markdown.endsWith(labelLine)) {
       markdown += "\n\n" + labelLine;
     }
@@ -7290,28 +10070,59 @@
     return lines.join("\n") + "\n";
   }
 
-  function exportSourceTableMarkdown(payload, resourcePaths) {
+  function exportSourceTableMarkdown(
+    block, documentValue, payload, resourcePaths
+  ) {
     var headers = Array.isArray(payload.headers) ? payload.headers : [];
     var rows = Array.isArray(payload.rows) ? payload.rows : [];
     var width = headers.length || (rows[0] || []).length;
     var lines = [];
     if (width) {
       var normalizedHeaders = headers.length ? headers : Array(width).fill("");
-      lines.push("| " + normalizedHeaders.map(function (value) {
-        return exportTableCell(value, resourcePaths);
+      lines.push("| " + normalizedHeaders.map(function (value, columnIndex) {
+        var view = headers.length ? sourcePresentationField(
+          documentValue, block.block_id, "table_header", null, null,
+          columnIndex
+        ) : null;
+        return view ? exportPresentationTableCell(view, resourcePaths) :
+          exportTableCell(value, resourcePaths);
       }).join(" | ") + " |");
       lines.push("| " + Array(width).fill("---").join(" | ") + " |");
-      rows.forEach(function (row) {
-        lines.push("| " + row.map(function (value) {
-          return exportTableCell(value, resourcePaths);
+      rows.forEach(function (row, rowIndex) {
+        lines.push("| " + row.map(function (value, columnIndex) {
+          var view = sourcePresentationField(
+            documentValue, block.block_id, "table_cell", null, rowIndex,
+            columnIndex
+          );
+          return view ? exportPresentationTableCell(view, resourcePaths) :
+            exportTableCell(value, resourcePaths);
         }).join(" | ") + " |");
       });
     }
-    var caption = rewriteMarkdownResourceTargets(
-      String(payload.caption || "").trim(), resourcePaths
+    var captionView = sourcePresentationField(
+      documentValue, block.block_id, "caption", null, null, null
     );
-    if (caption) lines.push("", "Table: " + caption);
+    var caption = captionView ?
+      exportPresentationFieldMarkdown(captionView, resourcePaths) :
+      rewriteMarkdownResourceTargets(
+        String(payload.caption || "").trim(), resourcePaths
+      );
+    var captionPresentation = sourceCaptionPresentation(
+      documentValue, block.block_id
+    );
+    if (caption && captionPresentation &&
+      captionPresentation.placement === "before_content") {
+      lines.unshift("", "Table: " + caption, "");
+    } else if (caption) {
+      lines.push("", "Table: " + caption);
+    }
     return (lines.join("\n") || "[Empty table]") + "\n";
+  }
+
+  function exportPresentationTableCell(view, resourcePaths) {
+    return exportPresentationFieldMarkdown(view, resourcePaths)
+      .replace(/\|/g, "\\|")
+      .replace(/\r?\n/g, "<br>");
   }
 
   function exportTableCell(value, resourcePaths) {
@@ -7323,22 +10134,48 @@
 
   function exportFigureMarkdown(block, translation, resourcePaths) {
     var payload = block.payload || {};
-    var resourcePath = portableResourceTarget(
-      String(payload.asset_digest || ""), resourcePaths
-    );
-    var alt = escapeMarkdownLinkLabel(String(payload.alt_text || ""));
     var parts = [];
-    if (resourcePath && resourcePath !== String(payload.asset_digest || "")) {
-      parts.push("![" + alt + "](" + markdownLinkDestination(resourcePath) + ")");
+    var panels = sourceFigurePanels(block);
+    if (panels.length) {
+      panels.filter(function (panel) {
+        return panel.status === "available";
+      }).forEach(function (panel) {
+        var panelDigest = String(panel.asset_digest || "");
+        var panelPath = portableResourceTarget(panelDigest, resourcePaths);
+        var panelAlt = escapeMarkdownLinkLabel(String(
+          panel.alt_text || payload.alt_text || panel.logical_name || ""
+        ));
+        if (panelPath && panelPath !== panelDigest) {
+          parts.push(
+            "![" + panelAlt + "](" + markdownLinkDestination(panelPath) + ")"
+          );
+        }
+      });
     } else {
-      var description = String(
-        payload.alt_text || payload.caption || payload.logical_name || ""
-      ).trim();
-      if (description) parts.push("[Figure: " + description + "]");
+      var resourcePath = portableResourceTarget(
+        String(payload.asset_digest || ""), resourcePaths
+      );
+      var alt = escapeMarkdownLinkLabel(String(payload.alt_text || ""));
+      if (resourcePath && resourcePath !== String(payload.asset_digest || "")) {
+        parts.push(
+          "![" + alt + "](" + markdownLinkDestination(resourcePath) + ")"
+        );
+      } else {
+        var description = String(
+          payload.alt_text || payload.caption || payload.logical_name || ""
+        ).trim();
+        if (description) parts.push("[Figure: " + description + "]");
+      }
     }
+    var captionView = !translation ? sourcePresentationField(
+      state.payload.publication.source_document,
+      block.block_id, "caption", null, null, null
+    ) : null;
     var caption = translation ?
       projectedRevisionMarkdown(translation).replace(/\n+$/, "") :
-      String(payload.caption || "").trim();
+      captionView ? exportPresentationFieldMarkdown(
+        captionView, resourcePaths
+      ) : String(payload.caption || "").trim();
     caption = rewriteMarkdownResourceTargets(caption, resourcePaths);
     if (caption) parts.push(caption);
     return parts.join("\n\n") + "\n";
@@ -7788,12 +10625,22 @@
     return lines;
   }
 
+  function degradeLegacyInternalMarkdownLinks(markdown) {
+    return degradeLegacyMarkdownLinks(markdown, legacyInternalMarkdownTarget);
+  }
+
   function degradeLegacyBibliographyMarkdownLinks(markdown) {
+    return degradeLegacyMarkdownLinks(markdown, legacyBibliographyTarget);
+  }
+
+  function degradeLegacyMarkdownLinks(markdown, targetTest) {
     var normalized = normalizeMarkdown(String(markdown || ""));
     var tokens = state.md.parse(normalized, {});
     var codeLines = markdownCodeLineIndexes(normalized, tokens);
     var lines = normalized.split("\n");
-    var references = legacyBibliographyMarkdownReferences(lines, codeLines);
+    var references = legacyInternalMarkdownReferences(
+      lines, codeLines, targetTest
+    );
     lines = lines.map(function (line, lineNumber) {
       if (references.definitionLines.has(lineNumber)) {
         var quote = /^((?: {0,3}> ?)*)/.exec(line);
@@ -7807,8 +10654,9 @@
       if (lineNumber < range.start) {
         output.push(lines.slice(lineNumber, range.start).join("\n"));
       }
-      output.push(degradeLegacyBibliographyMarkdownChunk(
-        lines.slice(range.start, range.end).join("\n"), references.aliases
+      output.push(degradeLegacyInternalMarkdownChunk(
+        lines.slice(range.start, range.end).join("\n"), references.aliases,
+        targetTest
       ));
       lineNumber = range.end;
     });
@@ -7839,7 +10687,10 @@
     }, []);
   }
 
-  function degradeLegacyBibliographyMarkdownChunk(value, referenceAliases) {
+  function degradeLegacyInternalMarkdownChunk(
+    value, referenceAliases, targetTest
+  ) {
+    targetTest = targetTest || legacyInternalMarkdownTarget;
     var output = "";
     var position = 0;
     while (position < value.length) {
@@ -7867,7 +10718,7 @@
           var linkEnd = markdownInlineLinkEnd(value, labelEnd + 1);
           if (destination && linkEnd >= 0) {
             var target = value.slice(destination.start, destination.end);
-            if (legacyBibliographyTarget(target)) {
+            if (targetTest(target)) {
               output += label;
               position = linkEnd + 1;
               continue;
@@ -7898,7 +10749,8 @@
     return output;
   }
 
-  function legacyBibliographyMarkdownReferences(lines, codeLines) {
+  function legacyInternalMarkdownReferences(lines, codeLines, targetTest) {
+    targetTest = targetTest || legacyInternalMarkdownTarget;
     var aliases = new Set();
     var definitionLines = new Set();
     var seen = new Set();
@@ -7909,7 +10761,7 @@
       var key = markdownReferenceKey(definition.label);
       if (seen.has(key)) return;
       seen.add(key);
-      if (!legacyBibliographyTarget(definition.target)) return;
+      if (!targetTest(definition.target)) return;
       aliases.add(key);
       definitionLines.add(lineNumber);
     });
@@ -7918,6 +10770,10 @@
 
   function legacyBibliographyTarget(target) {
     return /^#bib[.]bib[1-9][0-9]*$/.test(String(target || ""));
+  }
+
+  function legacyInternalMarkdownTarget(target) {
+    return legacyBibliographyTarget(target) || legacyStructuralTarget(target);
   }
 
   function markdownReferencedResourcePaths(markdown, resourcePaths) {
@@ -9896,6 +12752,11 @@
       '.alc-fragment[data-fragment-id="' + cssString(fragmentId) + '"]'
     );
     var row = card && card.closest ? card.closest(".alc-source-row") : null;
+    var rowChunk = row ? chunkForTargetId(row.id) : null;
+    if (rowChunk && state.renderedChunkIds.has(rowChunk.chunk_id)) {
+      rerenderChunk(rowChunk);
+      return;
+    }
     if (!fragmentIsVisible(current) && card && typeof card.remove === "function") {
       card.remove();
     } else if (current && card && typeof card.replaceWith === "function") {
