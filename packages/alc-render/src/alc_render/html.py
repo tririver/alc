@@ -17,7 +17,9 @@ import re
 import tempfile
 from typing import Any
 import unicodedata
+from urllib.parse import unquote_to_bytes
 
+import ac_document
 from ac_document import RichBlockKind, RichDocument
 
 from .contracts import (
@@ -79,6 +81,17 @@ _LEGACY_BIBLIOGRAPHY_TARGET_PATTERN = re.compile(
 _LEGACY_BIBLIOGRAPHY_SECTION_TITLES = frozenset(
     {"bibliography", "references"}
 )
+_LEGACY_STRUCTURAL_ALIAS_PATTERN = re.compile(
+    r"S[0-9]+(?:[.][A-Za-z][A-Za-z0-9_-]*)*"
+)
+_source_target_manifest = getattr(ac_document, "source_target_manifest", None)
+_source_notes = getattr(ac_document, "source_notes", None)
+_source_presentation = getattr(ac_document, "source_presentation", None)
+_SOURCE_TARGET_MANIFEST_METADATA_KEY = "source_target_manifest"
+_SOURCE_NOTES_METADATA_KEY = "source_notes"
+_SOURCE_PRESENTATION_METADATA_KEY = "source_presentation"
+_SOURCE_NOTE_TRANSLATION_PROVENANCE_KEY = "source_note_translation"
+_SOURCE_NOTE_TRANSLATION_SCHEMA = "alc.render.source_note_translation.v1"
 
 
 class HTMLRenderError(RuntimeError):
@@ -375,10 +388,23 @@ def validate_standalone_html(
         raise HTMLRenderError(
             "standalone HTML legacy bibliography targets are inconsistent"
         )
+    if (
+        "legacy_structural_targets" in payload and
+        payload["legacy_structural_targets"] != list(
+            _legacy_structural_targets(embedded_publication.source_document)
+        )
+    ):
+        raise HTMLRenderError(
+            "standalone HTML legacy structural targets are inconsistent"
+        )
     _validate_reader_resources(publication, payload)
     fragment_revisions: list[FragmentRevision] = []
     selected = _validate_reader_revisions(
         publication, payload, all_revisions=fragment_revisions
+    )
+    _validate_source_note_translations(
+        embedded_publication.source_document,
+        fragment_revisions,
     )
     _validate_reader_glossary_revisions(
         publication,
@@ -1194,6 +1220,87 @@ def _resource_declarations(
     return tuple(values)
 
 
+def _source_note_records(document: RichDocument) -> Mapping[str, Mapping[str, Any]]:
+    raw = document.metadata.get(_SOURCE_NOTES_METADATA_KEY)
+    if raw is None:
+        return {}
+    if _source_notes is None:
+        raise HTMLRenderError(
+            "source note metadata requires AC Document source-note support"
+        )
+    try:
+        validated = _source_notes(document)
+    except ValueError as exc:
+        raise HTMLRenderError("source note metadata is invalid") from exc
+    if not isinstance(validated, Mapping):
+        raise HTMLRenderError("source note metadata is invalid")
+    notes = validated.get("notes")
+    if not isinstance(notes, Sequence):
+        raise HTMLRenderError("source note metadata is invalid")
+    records: dict[str, Mapping[str, Any]] = {}
+    for note in notes:
+        if not isinstance(note, Mapping):
+            raise HTMLRenderError("source note metadata is invalid")
+        note_id = note.get("note_id")
+        if not isinstance(note_id, str) or not note_id or note_id in records:
+            raise HTMLRenderError("source note metadata identity is invalid")
+        records[note_id] = note
+    return records
+
+
+def _source_note_translation_id(
+    document: RichDocument,
+    revision: FragmentRevision,
+) -> str | None:
+    raw = revision.provenance.get(_SOURCE_NOTE_TRANSLATION_PROVENANCE_KEY)
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping) or set(raw) != {"schema_version", "note_id"}:
+        raise HTMLRenderError("source note translation provenance is invalid")
+    if raw.get("schema_version") != _SOURCE_NOTE_TRANSLATION_SCHEMA:
+        raise HTMLRenderError("source note translation schema is unsupported")
+    note_id = raw.get("note_id")
+    if not isinstance(note_id, str) or not note_id:
+        raise HTMLRenderError("source note translation identity is invalid")
+    note = _source_note_records(document).get(note_id)
+    if note is None:
+        raise HTMLRenderError("source note translation refers to an unknown source note")
+    if revision.role != "translation":
+        raise HTMLRenderError("source note translation must use the translation role")
+    owner_block_id = note.get("owner_block_id")
+    related = revision.anchor.related_blocks
+    if (
+        revision.anchor.kind.value != "block"
+        or revision.anchor.target_id != owner_block_id
+        or len(related) != 1
+        or related[0].block_id != owner_block_id
+    ):
+        raise HTMLRenderError("source note translation anchor differs from its owner")
+    return note_id
+
+
+def _validate_source_note_translations(
+    document: RichDocument,
+    revisions: Sequence[FragmentRevision],
+) -> None:
+    claimed_by_note: dict[str, str] = {}
+    note_by_fragment: dict[str, str] = {}
+    for revision in revisions:
+        note_id = _source_note_translation_id(document, revision)
+        if note_id is None:
+            continue
+        previous_note = note_by_fragment.setdefault(revision.fragment_id, note_id)
+        if previous_note != note_id:
+            raise HTMLRenderError(
+                "source note translation history changes its source note"
+            )
+        previous_fragment = claimed_by_note.setdefault(note_id, revision.fragment_id)
+        if previous_fragment != revision.fragment_id:
+            raise HTMLRenderError(
+                "source note translation has multiple fragments"
+            )
+
+
 def _reader_payload(
     publication: Publication,
     *,
@@ -1204,6 +1311,7 @@ def _reader_payload(
     resources: Sequence[Mapping[str, Any]],
     diagnostics: Sequence[RevisionDiagnostic],
 ) -> dict[str, Any]:
+    _validate_source_note_translations(publication.source_document, revisions)
     entry_counts: dict[str, int] = defaultdict(int)
     for entry in publication.glossary:
         entry_id = entry.get("entry_id")
@@ -1229,6 +1337,9 @@ def _reader_payload(
         },
         "legacy_bibliography_targets": list(
             _legacy_bibliography_targets(publication.source_document)
+        ),
+        "legacy_structural_targets": list(
+            _legacy_structural_targets(publication.source_document)
         ),
         "revisions": [
             {
@@ -1262,6 +1373,10 @@ def _legacy_bibliography_targets(
 ) -> tuple[dict[str, Any], ...]:
     """Return only an unambiguous ordinal mapping for legacy BIB anchors."""
 
+    manifest = _authoritative_source_target_manifest(document)
+    if manifest is not None:
+        return _authoritative_bibliography_targets(document, manifest)
+
     maximum_list_items = max(
         (
             len(block.payload.get("items", ()))
@@ -1271,42 +1386,31 @@ def _legacy_bibliography_targets(
         default=0,
     )
     labels_by_number: dict[int, list[str]] = defaultdict(list)
-    for block in document.blocks:
-        if block.kind is RichBlockKind.PARAGRAPH:
-            span_groups = (block.payload.get("inline_spans", ()),)
-        elif block.kind is RichBlockKind.LIST:
-            span_groups = tuple(
-                item.get("inline_spans", ())
-                for item in block.payload.get("items", ())
-                if isinstance(item, Mapping)
-            )
-        else:
+    for spans in _source_inline_span_groups(document):
+        if not isinstance(spans, Sequence):
             continue
-        for spans in span_groups:
-            if not isinstance(spans, Sequence):
+        for span in spans:
+            if not isinstance(span, Mapping) or span.get("kind") != "link":
                 continue
-            for span in spans:
-                if not isinstance(span, Mapping) or span.get("kind") != "link":
-                    continue
-                target = span.get("target")
-                if not isinstance(target, str):
-                    continue
-                match = _LEGACY_BIBLIOGRAPHY_TARGET_PATTERN.fullmatch(target)
-                if match is None:
-                    continue
-                number_text = match.group("number")
-                if (
-                    not maximum_list_items
-                    or len(number_text) > len(str(maximum_list_items))
-                ):
-                    return ()
-                number = int(number_text)
-                if number > maximum_list_items:
-                    return ()
-                text = span.get("text")
-                if not isinstance(text, str) or not text.strip():
-                    return ()
-                labels_by_number[number].append(text)
+            target = span.get("target")
+            if not isinstance(target, str):
+                continue
+            match = _LEGACY_BIBLIOGRAPHY_TARGET_PATTERN.fullmatch(target)
+            if match is None:
+                continue
+            number_text = match.group("number")
+            if (
+                not maximum_list_items
+                or len(number_text) > len(str(maximum_list_items))
+            ):
+                return ()
+            number = int(number_text)
+            if number > maximum_list_items:
+                return ()
+            text = span.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return ()
+            labels_by_number[number].append(text)
 
     if not labels_by_number:
         return ()
@@ -1345,6 +1449,227 @@ def _legacy_bibliography_targets(
         }
         for number in sorted(labels_by_number)
     )
+
+
+def _authoritative_bibliography_targets(
+    document: RichDocument,
+    manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    referenced: set[int] = set()
+    for spans in _source_inline_span_groups(document):
+        if not isinstance(spans, Sequence):
+            continue
+        for span in spans:
+            if not isinstance(span, Mapping) or span.get("kind") != "link":
+                continue
+            target = span.get("target")
+            if not isinstance(target, str):
+                continue
+            match = _LEGACY_BIBLIOGRAPHY_TARGET_PATTERN.fullmatch(target)
+            if match is None:
+                continue
+            number_text = match.group("number")
+            text = span.get("text")
+            if (
+                len(number_text) > 9
+                or not isinstance(text, str)
+                or not text.strip()
+            ):
+                return ()
+            referenced.add(int(number_text))
+
+    if not referenced:
+        return ()
+    targets_by_alias = {
+        str(target["alias"]): target for target in manifest["targets"]
+    }
+    blocks_by_id = {block.block_id: block for block in document.blocks}
+    resolved = []
+    for number in sorted(referenced):
+        alias = f"bib.bib{number}"
+        target = targets_by_alias.get(alias)
+        if target is None:
+            continue
+        block = blocks_by_id.get(str(target["block_id"]))
+        if block is None or block.kind is not RichBlockKind.LIST:
+            continue
+        items = block.payload.get("items", ())
+        if not isinstance(items, Sequence) or len(items) != 1:
+            continue
+        if alias not in {
+            block.locator.source_id,
+            block.locator.selector.removeprefix("#"),
+        }:
+            continue
+        resolved.append(
+            {"alias": alias, "block_id": block.block_id, "item_index": 0}
+        )
+    return tuple(resolved)
+
+
+def _source_inline_span_groups(
+    document: RichDocument,
+) -> tuple[Sequence[Any], ...]:
+    note_values = _source_note_inline_span_groups(document)
+    if _SOURCE_PRESENTATION_METADATA_KEY in document.metadata:
+        if not callable(_source_presentation):
+            raise HTMLRenderError("ac-document lacks source presentation support")
+        presentation = _source_presentation(document)
+        if presentation is None:
+            raise HTMLRenderError("source presentation metadata is unavailable")
+        return tuple(
+            field["inline_spans"]
+            for entry in presentation["blocks"]
+            for field in entry["fields"]
+        ) + note_values
+
+    values: list[Sequence[Any]] = []
+    for block in document.blocks:
+        if block.kind is RichBlockKind.PARAGRAPH:
+            values.append(block.payload.get("inline_spans", ()))
+        elif block.kind is RichBlockKind.LIST:
+            values.extend(
+                item.get("inline_spans", ())
+                for item in block.payload.get("items", ())
+                if isinstance(item, Mapping)
+            )
+    return tuple(values) + note_values
+
+
+def _source_note_inline_span_groups(
+    document: RichDocument,
+) -> tuple[Sequence[Any], ...]:
+    if _SOURCE_NOTES_METADATA_KEY not in document.metadata:
+        return ()
+    if not callable(_source_notes):
+        raise HTMLRenderError("ac-document lacks source note support")
+    notes = _source_notes(document)
+    if notes is None:
+        raise HTMLRenderError("source note metadata is unavailable")
+    return tuple(note["inline_spans"] for note in notes["notes"])
+
+
+def _authoritative_source_target_manifest(
+    document: RichDocument,
+) -> Mapping[str, Any] | None:
+    if _SOURCE_TARGET_MANIFEST_METADATA_KEY not in document.metadata:
+        return None
+    if not callable(_source_target_manifest):
+        raise HTMLRenderError("ac-document lacks source target manifest support")
+    manifest = _source_target_manifest(document)
+    if manifest is None:
+        raise HTMLRenderError("source target manifest is unavailable")
+    return manifest
+
+
+def _legacy_structural_targets(
+    document: RichDocument,
+) -> tuple[dict[str, str], ...]:
+    """Map referenced aliases through authoritative metadata or exact locators."""
+
+    manifest = _authoritative_source_target_manifest(document)
+    referenced: set[str] = set()
+    if manifest is not None:
+        for spans in _source_inline_span_groups(document):
+            _collect_internal_anchor_aliases(spans, referenced)
+    else:
+        for spans in _source_inline_span_groups(document):
+            _collect_legacy_structural_aliases(spans, referenced)
+    if not referenced:
+        return ()
+
+    if manifest is not None:
+        authoritative = {
+            str(target["alias"]): str(target["block_id"])
+            for target in manifest["targets"]
+        }
+        return tuple(
+            {"alias": alias, "block_id": authoritative[alias]}
+            for alias in sorted(referenced)
+            if alias in authoritative
+        )
+
+    blocks_by_alias: dict[str, set[str]] = defaultdict(set)
+    for block in document.blocks:
+        for locator_value in (
+            block.locator.source_id,
+            block.locator.selector,
+        ):
+            alias = _legacy_structural_locator_alias(locator_value)
+            if alias in referenced:
+                blocks_by_alias[alias].add(block.block_id)
+
+    return tuple(
+        {"alias": alias, "block_id": next(iter(blocks_by_alias[alias]))}
+        for alias in sorted(referenced)
+        if len(blocks_by_alias[alias]) == 1
+    )
+
+
+def _collect_legacy_structural_aliases(
+    value: Any, aliases: set[str]
+) -> None:
+    if isinstance(value, Mapping):
+        if value.get("kind") == "link":
+            alias = _legacy_structural_alias(value.get("target"))
+            if alias is not None:
+                aliases.add(alias)
+        for child in value.values():
+            _collect_legacy_structural_aliases(child, aliases)
+        return
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        for child in value:
+            _collect_legacy_structural_aliases(child, aliases)
+
+
+def _collect_internal_anchor_aliases(value: Any, aliases: set[str]) -> None:
+    if isinstance(value, Mapping):
+        if value.get("kind") == "link":
+            alias = _internal_anchor_alias(value.get("target"))
+            if (
+                alias is not None
+                and _LEGACY_BIBLIOGRAPHY_TARGET_PATTERN.fullmatch(
+                    f"#{alias}"
+                )
+                is None
+            ):
+                aliases.add(alias)
+        for child in value.values():
+            _collect_internal_anchor_aliases(child, aliases)
+        return
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        for child in value:
+            _collect_internal_anchor_aliases(child, aliases)
+
+
+def _internal_anchor_alias(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.startswith("#"):
+        return None
+    try:
+        alias = unquote_to_bytes(value[1:]).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return alias if alias and "\x00" not in alias else None
+
+
+def _legacy_structural_alias(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.startswith("#"):
+        return None
+    try:
+        alias = unquote_to_bytes(value[1:]).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return alias if _LEGACY_STRUCTURAL_ALIAS_PATTERN.fullmatch(alias) else None
+
+
+def _legacy_structural_locator_alias(value: str) -> str | None:
+    if value.startswith("#"):
+        return _legacy_structural_alias(value)
+    return value if _LEGACY_STRUCTURAL_ALIAS_PATTERN.fullmatch(value) else None
 
 
 def _legacy_bibliography_section(

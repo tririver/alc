@@ -194,7 +194,10 @@ class _CdpSocket:
             message = json.loads(payload)
             if message.get("method") == "Runtime.exceptionThrown":
                 details = message.get("params", {}).get("exceptionDetails", {})
-                text = details.get("text") or details.get("exception", {}).get("description")
+                text = (
+                    details.get("exception", {}).get("description")
+                    or details.get("text")
+                )
                 self.exceptions.append(str(text or "runtime exception"))
             if message.get("id") == identifier:
                 return message
@@ -309,6 +312,19 @@ def _raise_for_report(
     failed_images = report.get("failedImages")
     missing_fragments = report.get("missingFragments")
     legacy_bibliography_links = report.get("legacyBibliographyLinks")
+    legacy_structural_links = report.get("legacyStructuralLinks")
+    invalid_table_regions = report.get("invalidTableRegions")
+    invalid_list_path_cards = report.get("invalidListPathCards")
+    missing_reference_targets = report.get("missingReferenceTargets")
+    invalid_figure_panels = report.get("invalidFigurePanels")
+    invalid_parallel_table_alignment = report.get(
+        "invalidParallelTableAlignment"
+    )
+    invalid_front_matter = report.get("invalidFrontMatterEntries")
+    invalid_source_notes = report.get("invalidSourceNotes")
+    leaked_source_note_translations = report.get(
+        "leakedSourceNoteTranslations"
+    )
     if ready != "true":
         raise HTMLRenderError(f"browser reader initialization did not complete: {ready}")
     if exceptions:
@@ -321,6 +337,18 @@ def _raise_for_report(
         (failed_images, "failed reader images"),
         (missing_fragments, "missing selected fragments"),
         (legacy_bibliography_links, "unresolved legacy bibliography links"),
+        (legacy_structural_links, "unresolved legacy structural links"),
+        (invalid_table_regions, "invalid responsive table regions"),
+        (invalid_list_path_cards, "invalid list-path cards"),
+        (missing_reference_targets, "missing bibliography targets"),
+        (invalid_figure_panels, "invalid Figure panel groups"),
+        (invalid_parallel_table_alignment, "misaligned parallel Tables"),
+        (invalid_front_matter, "invalid source front-matter entries"),
+        (invalid_source_notes, "invalid source notes"),
+        (
+            leaked_source_note_translations,
+            "source-note translations in ordinary lanes",
+        ),
     ):
         if not isinstance(count, int):
             raise HTMLRenderError("browser validation report is malformed")
@@ -383,7 +411,315 @@ _READER_REPORT_EXPRESSION: Final = """(async () => {
       link => /^#bib[.]bib[1-9][0-9]*$/.test(
         link.getAttribute("href") || ""
       )
-    ).length
+    ).length,
+    legacyStructuralLinks: Array.from(document.querySelectorAll(
+      'a[href^="#"]'
+    )).filter(link => {
+      const href = link.getAttribute("href") || "";
+      try {
+        return /^S[0-9]+(?:[.][A-Za-z][A-Za-z0-9_-]*)*$/.test(
+          decodeURIComponent(href.slice(1))
+        );
+      } catch (_error) {
+        return false;
+      }
+    }).length,
+    invalidTableRegions: Array.from(document.querySelectorAll("table")).filter(
+      table => {
+        const region = table.parentElement;
+        if (!region || !region.classList.contains("alc-table-scroll")) {
+          return true;
+        }
+        const overflowing = region.scrollWidth > region.clientWidth + 1;
+        if (overflowing) {
+          return region.getAttribute("tabindex") !== "0" ||
+            region.getAttribute("role") !== "region" ||
+            !(region.getAttribute("aria-label") || "").trim();
+        }
+        return region.hasAttribute("tabindex") ||
+          region.hasAttribute("role") || region.hasAttribute("aria-label");
+      }
+    ).length,
+    invalidParallelTableAlignment: Array.from(document.querySelectorAll(
+      '.alc-source-row[data-block-kind="table"]'
+    )).filter(row => {
+      const source = row.querySelector(
+        ":scope > .alc-lanes > .alc-source-card"
+      );
+      const target = row.querySelector(
+        ':scope > .alc-lanes > .alc-fragment[data-role="translation"]'
+      );
+      const sourceCaption = source && source.querySelector(
+        '.alc-table-caption[data-caption-placement="before_content"]'
+      );
+      const targetCaption = target && target.querySelector(
+        '.alc-table-caption[data-caption-placement="before_content"]'
+      );
+      const sourceTable = source && source.querySelector(".alc-table-scroll");
+      const targetTable = target && target.querySelector(".alc-table-scroll");
+      if (!sourceCaption || !targetCaption || !sourceTable || !targetTable) {
+        return false;
+      }
+      const sourceCardRect = source.getBoundingClientRect();
+      const targetCardRect = target.getBoundingClientRect();
+      if (Math.abs(sourceCardRect.top - targetCardRect.top) > 1) return false;
+      const sourceTableRect = sourceTable.getBoundingClientRect();
+      const targetTableRect = targetTable.getBoundingClientRect();
+      return Math.abs(sourceTableRect.top - targetTableRect.top) > 1 ||
+        Math.abs(sourceTableRect.height - targetTableRect.height) > 1;
+    }).length,
+    invalidListPathCards: Array.from(document.querySelectorAll(
+      ".alc-source-card.alc-list-owned-card"
+    )).filter(card => {
+      const rail = card.querySelector(":scope > .alc-list-marker-rail");
+      const markers = rail ? Array.from(rail.children) : [];
+      const depth = Number(card.style.getPropertyValue("--alc-list-depth"));
+      const continuation = card.dataset.listContinuation === "true";
+      const deepest = markers[markers.length - 1];
+      return !Number.isInteger(depth) || depth < 1 || markers.length !== depth ||
+        !deepest || (continuation ?
+          !deepest.classList.contains("is-continuation") ||
+            Boolean((deepest.textContent || "").trim()) :
+          deepest.classList.contains("is-continuation") ||
+            !(deepest.textContent || "").trim());
+    }).length,
+    missingReferenceTargets: (() => {
+      try {
+        const payload = JSON.parse(
+          document.getElementById("alc-render-payload").textContent || "{}"
+        );
+        return (payload.legacy_bibliography_targets || []).filter(item =>
+          !document.getElementById(
+            "source-reference-" + String(item.block_id).replace(
+              /[^A-Za-z0-9_-]+/g, "-"
+            ) + "-" + String(Number(item.item_index) + 1)
+          )
+        ).length;
+      } catch (_error) {
+        return -1;
+      }
+    })(),
+    invalidFigurePanels: (() => {
+      try {
+        const payload = JSON.parse(
+          document.getElementById("alc-render-payload").textContent || "{}"
+        );
+        const metadata = payload.publication.source_document.metadata || {};
+        const manifest = metadata.source_target_manifest || {};
+        const presentation = metadata.source_presentation || {};
+        const figurePresentations = new Map(
+          Array.isArray(presentation.figures) ? presentation.figures.map(
+            item => [item.block_id, item]
+          ) : []
+        );
+        if (!Array.isArray(manifest.targets)) return 0;
+        return manifest.targets.filter(target =>
+          target && target.kind === "figure" &&
+          Array.isArray(target.panels) && target.panels.length
+        ).filter(target => {
+          const row = document.getElementById(
+            "block-" + String(target.block_id).replace(/[^A-Za-z0-9_-]+/g, "-")
+          );
+          const expected = target.panels.filter(
+            panel => panel.status === "available"
+          );
+          const figurePresentation = figurePresentations.get(target.block_id);
+          const authoredLayout = figurePresentation &&
+            figurePresentation.layout &&
+            figurePresentation.layout.kind !== "neutral";
+          const renderedGroups = row ? Array.from(row.querySelectorAll(
+            ":scope > .alc-lanes > * .alc-figure-panels"
+          )) : [];
+          if (authoredLayout) {
+            const layout = figurePresentation.layout;
+            if (renderedGroups.some(group => {
+              const panelRows = Array.from(group.querySelectorAll(
+                ":scope > .alc-figure-panel-row"
+              ));
+              return group.dataset.layoutKind !== layout.kind ||
+                group.dataset.layoutColumns !== String(layout.column_count) ||
+                group.dataset.layoutRows !== String(layout.row_count) ||
+                group.dataset.columnSource !== (layout.column_source || "") ||
+                panelRows.length !== layout.rows.length ||
+                panelRows.some((panelRow, index) => {
+                  const rowSource = layout.row_sources[index];
+                  const responsiveWrapProfile = rowSource ===
+                    "class:ltx_flex_size_2" ?
+                    "latexml_ar5iv_flex_size_2" : "";
+                  return panelRow.dataset.authoredColumnCount !== String(
+                    layout.rows[index].length
+                  ) || panelRow.dataset.columnSource !== rowSource ||
+                    (panelRow.dataset.responsiveWrapProfile || "") !==
+                      responsiveWrapProfile;
+                });
+            })) return true;
+          }
+          const images = row ? Array.from(row.querySelectorAll(
+            ".alc-source-card .alc-figure-panel"
+          )) : [];
+          return images.length !== expected.length || images.some(
+            (image, index) =>
+              image.dataset.panelIndex !== String(expected[index].panel_index) ||
+              image.dataset.artifactDigest !== expected[index].asset_digest
+          );
+        }).length;
+      } catch (_error) {
+        return -1;
+      }
+    })(),
+    invalidFrontMatterEntries: (() => {
+      try {
+        const payload = JSON.parse(
+          document.getElementById("alc-render-payload").textContent || "{}"
+        );
+        const metadata = payload.publication.source_document.metadata || {};
+        const front = metadata.source_front_matter;
+        if (!front) return 0;
+        if (!Array.isArray(front.entries)) return -1;
+        const rendered = Array.from(document.querySelectorAll(
+          ".alc-source-front-matter"
+        ));
+        return front.entries.filter(entry => {
+          const node = rendered.find(item =>
+            item.dataset.frontMatterId === entry.front_matter_id
+          );
+          if (!node) return true;
+          if (entry.creator_flow) {
+            const authorsById = new Map((entry.authors || []).map(
+              author => [author.author_id, author]
+            ));
+            const affiliationsById = new Map((entry.affiliations || []).map(
+              affiliation => [affiliation.affiliation_id, affiliation]
+            ));
+            const expectedCreators = entry.creator_flow.creators || [];
+            const creators = Array.from(node.querySelectorAll(
+              ".alc-source-creator"
+            ));
+            if (creators.length !== expectedCreators.length) return true;
+            return creators.some((creator, index) => {
+              const expectedCreator = expectedCreators[index] || {};
+              const expectedAuthor = authorsById.get(
+                expectedCreator.author_id
+              ) || {};
+              const expectedSlots = expectedCreator.slots || [];
+              const expectedAffiliations = expectedSlots.filter(
+                slot => slot.kind === "affiliation"
+              ).map(slot => affiliationsById.get(slot.affiliation_id) || {});
+              const actualAffiliations = Array.from(creator.querySelectorAll(
+                ".alc-source-creator-slot-affiliation"
+              ));
+              const expectedContacts = expectedSlots.filter(
+                slot => slot.kind === "contact"
+              ).map(slot => (expectedAuthor.contacts || [])[slot.contact_index]);
+              const actualContacts = Array.from(creator.querySelectorAll(
+                ".alc-source-author-contact"
+              ));
+              const markers = Array.from(creator.querySelectorAll(
+                ".alc-source-author-marker"
+              )).map(item => item.textContent);
+              return creator.dataset.creatorId !== expectedCreator.creator_id ||
+                markers.join("\u0000") !==
+                  (expectedAuthor.markers || []).join("\u0000") ||
+                actualContacts.length !== expectedContacts.length ||
+                actualContacts.some((item, contactIndex) =>
+                  item.textContent !== expectedContacts[contactIndex]?.value
+                ) ||
+                actualAffiliations.length !== expectedAffiliations.length ||
+                actualAffiliations.some((item, affiliationIndex) => {
+                  const expected = expectedAffiliations[affiliationIndex];
+                  return item.querySelector(".alc-source-affiliation-marker")
+                      ?.textContent !== expected.marker ||
+                    item.querySelector(".alc-source-affiliation")
+                      ?.textContent !== expected.text;
+                });
+            });
+          }
+          const authors = Array.from(node.querySelectorAll(
+            ".alc-source-author"
+          ));
+          const affiliations = Array.from(node.querySelectorAll(
+            ".alc-source-affiliation-item"
+          ));
+          return authors.length !== (entry.authors || []).length ||
+            authors.some((author, index) => {
+              const expected = entry.authors[index] || {};
+              const markers = Array.from(author.querySelectorAll(
+                ".alc-source-author-marker"
+              )).map(item => item.textContent);
+              return markers.join("\u0000") !==
+                (expected.markers || []).join("\u0000");
+            }) || affiliations.length !== (entry.affiliations || []).length ||
+            affiliations.some((item, index) => {
+              const expected = entry.affiliations[index] || {};
+              return item.querySelector(".alc-source-affiliation-marker")
+                  ?.textContent !== expected.marker ||
+                item.querySelector(".alc-source-affiliation")
+                  ?.textContent !== expected.text;
+            });
+        }).length;
+      } catch (_error) {
+        return -1;
+      }
+    })(),
+    invalidSourceNotes: (() => {
+      try {
+        const payload = JSON.parse(
+          document.getElementById("alc-render-payload").textContent || "{}"
+        );
+        const metadata = payload.publication.source_document.metadata || {};
+        const sourceNotes = metadata.source_notes;
+        if (!sourceNotes) return 0;
+        if (!Array.isArray(sourceNotes.notes)) return -1;
+        return sourceNotes.notes.filter(note => {
+          const row = Array.from(document.querySelectorAll(
+            ".alc-source-note-row"
+          )).find(candidate => candidate.dataset.sourceNoteId === note.note_id);
+          const referenceLink = row ? Array.from(document.querySelectorAll(
+            ".alc-source-note-ref:not(.alc-translation-note-ref) > a"
+          )).find(candidate =>
+            candidate.getAttribute("href") === "#" + row.id
+          ) : null;
+          const reference = referenceLink ?
+            referenceLink.closest(".alc-source-note-ref") : null;
+          return !row || !reference ||
+            !(row.querySelector(".alc-source-note-content") || {}).textContent ||
+            (reference.textContent || "").trim() !== String(note.marker);
+        }).length;
+      } catch (_error) {
+        return -1;
+      }
+    })(),
+    leakedSourceNoteTranslations: (() => {
+      try {
+        const fragmentIds = new Set();
+        Array.from(document.querySelectorAll(
+          'script[id^="alc-render-payload-chunk-"]'
+        )).forEach(script => {
+          const chunk = JSON.parse(script.textContent || "{}");
+          (chunk.revisions || []).forEach(raw => {
+            const revision = raw.metadata || raw;
+            const provenance = revision.provenance || {};
+            const contract = provenance.source_note_translation;
+            if (
+              contract &&
+              contract.schema_version ===
+                "alc.render.source_note_translation.v1" &&
+              typeof contract.note_id === "string" &&
+              contract.note_id.trim() &&
+              typeof revision.fragment_id === "string"
+            ) fragmentIds.add(revision.fragment_id);
+          });
+        });
+        return Array.from(document.querySelectorAll(
+          ".alc-fragment[data-fragment-id]"
+        )).filter(fragment =>
+          fragmentIds.has(fragment.dataset.fragmentId || "") &&
+          !fragment.classList.contains("alc-source-note-translation")
+        ).length;
+      } catch (_error) {
+        return -1;
+      }
+    })()
   };
 })()"""
 

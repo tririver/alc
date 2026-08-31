@@ -9,6 +9,7 @@ import shutil
 import subprocess
 
 import pytest
+import alc_render.html as html_module
 from ac_document import (
     RichAsset,
     RichBlock,
@@ -20,6 +21,9 @@ from ac_document import (
     SourceLocator,
     SourceOrigin,
     SourceOriginKind,
+    SOURCE_TARGET_MANIFEST_SCHEMA,
+    SOURCE_NOTES_METADATA_KEY,
+    SOURCE_NOTES_SCHEMA,
 )
 
 from alc_render import (
@@ -47,8 +51,11 @@ from alc_render.html import (
     _extract_json_script,
     _extract_reader_payload,
     _legacy_bibliography_targets,
+    _legacy_structural_targets,
     _reader_payload,
     _reader_icon_link,
+    _source_note_translation_id,
+    _validate_source_note_translations,
     _validate_fragment_glossary_mentions,
     render_publication_html,
     validate_standalone_html,
@@ -136,6 +143,92 @@ def _rich_document(asset_payload: bytes | None = None) -> RichDocument:
             ),
         ),
         assets,
+    )
+
+
+def _source_note_document() -> RichDocument:
+    document = _rich_document()
+    owner = document.blocks[1]
+    locator = {
+        "source_format": owner.locator.source_format.value,
+        "line_start": owner.locator.line_start,
+        "column_start": owner.locator.column_start,
+        "line_end": owner.locator.line_end,
+        "column_end": owner.locator.column_end,
+        "selector": owner.locator.selector,
+        "source_id": owner.locator.source_id,
+    }
+    note_locator = {
+        **locator,
+        "selector": "",
+        "source_id": "",
+    }
+    return RichDocument(
+        document.source,
+        document.blocks,
+        document.sections,
+        document.assets,
+        document.page_map,
+        {
+            SOURCE_NOTES_METADATA_KEY: {
+                "schema_version": SOURCE_NOTES_SCHEMA,
+                "notes": [
+                    {
+                        "note_id": "note-1",
+                        "ordinal": 0,
+                        "marker": ".",
+                        "body": "Authored note.",
+                        "inline_spans": [
+                            {
+                                "kind": "text",
+                                "start": 0,
+                                "end": 14,
+                                "text": "Authored note.",
+                            }
+                        ],
+                        "locator": note_locator,
+                        "owner_block_id": owner.block_id,
+                        "owner_locator": locator,
+                        "anchor": {
+                            "field": "text",
+                            "item_index": None,
+                            "row_index": None,
+                            "column_index": None,
+                            "start": 16,
+                            "end": 17,
+                        },
+                    }
+                ],
+            }
+        },
+    )
+
+
+def _source_note_translation(document: RichDocument) -> FragmentRevision:
+    owner = document.blocks[1]
+    return FragmentRevision(
+        source=source_identity_from_rich_document(document),
+        fragment_id="translation-source-note-note-1",
+        revision=1,
+        parent_semantic_digest=None,
+        anchor=FragmentAnchor(
+            "block",
+            owner.block_id,
+            (anchor_block_from_rich_block(owner),),
+        ),
+        priority=20,
+        role="translation",
+        language="zh-CN",
+        title=None,
+        citation_ids=(),
+        provenance={
+            "producer": "alc-translate",
+            "source_note_translation": {
+                "schema_version": "alc.render.source_note_translation.v1",
+                "note_id": "note-1",
+            },
+        },
+        markdown_body="作者脚注。",
     )
 
 
@@ -299,6 +392,161 @@ def test_legacy_bibliography_targets_require_one_exact_ordinal_mapping() -> None
     assert _legacy_bibliography_targets(
         _bibliography_document(duplicate_list=True)
     ) == ()
+
+
+def test_bibliography_targets_use_authoritative_split_list_blocks() -> None:
+    document = _bibliography_document()
+    citations = document.blocks[0]
+    authored_citation_spans = [
+        dict(span) for span in citations.payload["inline_spans"]
+    ]
+    plain_citation_spans = [dict(span) for span in authored_citation_spans]
+    plain_citation_spans[-1] = {
+        "kind": "text",
+        "start": plain_citation_spans[-1]["start"],
+        "end": plain_citation_spans[-1]["end"],
+        "text": plain_citation_spans[-1]["text"],
+    }
+    citations = replace(
+        citations,
+        payload={
+            **citations.payload,
+            "inline_spans": plain_citation_spans,
+        },
+    )
+    references = document.blocks[1]
+    blocks = [citations]
+    targets = []
+    for index, item in enumerate(references.payload["items"], start=1):
+        alias = f"bib.bib{index}"
+        block_id = f"block-reference-{index}"
+        blocks.append(
+            RichBlock(
+                block_id,
+                index,
+                RichBlockKind.LIST,
+                ("section-references",),
+                SourceLocator(
+                    SourceFormat.MARKDOWN,
+                    index + 2,
+                    1,
+                    index + 2,
+                    40,
+                    selector=f"#{alias}",
+                    source_id=alias,
+                ),
+                {"ordered": False, "items": [item]},
+            )
+        )
+        targets.append(
+            {
+                "alias": alias,
+                "selector": f"#{alias}",
+                "kind": "list",
+                "block_id": block_id,
+                "block_start": index,
+                "block_end": index + 1,
+                "section_id": "",
+                "panels": [],
+            }
+        )
+    split = RichDocument(
+        document.source,
+        tuple(blocks),
+        (
+            RichSection(
+                "section-reader",
+                "Reader",
+                1,
+                0,
+                ("section-reader",),
+                0,
+                1,
+            ),
+            RichSection(
+                "section-references",
+                "References",
+                1,
+                1,
+                ("section-references",),
+                1,
+                len(blocks),
+            ),
+        ),
+        metadata={
+            "source_target_manifest": {
+                "schema_version": SOURCE_TARGET_MANIFEST_SCHEMA,
+                "targets": targets,
+            },
+            "source_presentation": {
+                "schema_version": "ac.document.source_presentation.v1",
+                "blocks": [
+                    {
+                        "block_id": citations.block_id,
+                        "roles": [],
+                        "fields": [
+                            {
+                                "field": "text",
+                                "item_index": None,
+                                "row_index": None,
+                                "column_index": None,
+                                "text": citations.payload["text"],
+                                "inline_spans": authored_citation_spans,
+                                "marks": [],
+                            }
+                        ],
+                    },
+                    *[
+                        {
+                            "block_id": block.block_id,
+                            "roles": [],
+                            "fields": [
+                                {
+                                    "field": "list_item",
+                                    "item_index": 0,
+                                    "row_index": None,
+                                    "column_index": None,
+                                    "text": block.payload["items"][0]["text"],
+                                    "inline_spans": block.payload["items"][0][
+                                        "inline_spans"
+                                    ],
+                                    "marks": [],
+                                }
+                            ],
+                        }
+                        for block in blocks[1:]
+                    ],
+                    ],
+                    "classifications": [],
+                    "captions": [],
+                    "figures": [],
+                    "tables": [],
+                },
+        },
+    )
+
+    assert _legacy_bibliography_targets(split) == (
+        {"alias": "bib.bib1", "block_id": "block-reference-1", "item_index": 0},
+        {"alias": "bib.bib2", "block_id": "block-reference-2", "item_index": 0},
+    )
+
+
+def test_bibliography_targets_do_not_fallback_when_manifest_has_no_bib_aliases(
+) -> None:
+    document = _bibliography_document()
+    with_unrelated_manifest = RichDocument(
+        document.source,
+        document.blocks,
+        document.sections,
+        metadata={
+            "source_target_manifest": {
+                "schema_version": SOURCE_TARGET_MANIFEST_SCHEMA,
+                "targets": [],
+            }
+        },
+    )
+
+    assert _legacy_bibliography_targets(with_unrelated_manifest) == ()
     assert _legacy_bibliography_targets(
         _bibliography_document(second_label="Different 2021")
     ) == ()
@@ -351,6 +599,364 @@ def test_reader_v2_boot_preserves_legacy_bibliography_targets() -> None:
     ]
 
 
+def _structural_document(
+    *,
+    duplicate_locator: bool = False,
+    manifest_targets: tuple[dict[str, object], ...] | None = None,
+    nested_target: bool = False,
+) -> RichDocument:
+    document = _rich_document()
+    link_text = "Equation 6; Figure 2; Figure 3; Section 2"
+    inline_spans = [
+        {
+            "kind": "link",
+            "start": 0,
+            "end": 10,
+            "text": "Equation 6",
+            "target": "#S2.E6",
+        },
+        {
+            "kind": "text",
+            "start": 10,
+            "end": 12,
+            "text": "; ",
+        },
+        {
+            "kind": "link",
+            "start": 12,
+            "end": 20,
+            "text": "Figure 2",
+            "target": "#S4%2EF2",
+        },
+        {
+            "kind": "text",
+            "start": 20,
+            "end": 22,
+            "text": "; ",
+        },
+        {
+            "kind": "link",
+            "start": 22,
+            "end": 30,
+            "text": "Figure 3",
+            "target": "#S4.F3",
+        },
+        {
+            "kind": "text",
+            "start": 30,
+            "end": 32,
+            "text": "; ",
+        },
+        {
+            "kind": "link",
+            "start": 32,
+            "end": len(link_text),
+            "text": "Section 2",
+            "target": "#s2",
+        },
+    ]
+    if nested_target:
+        start = len(link_text)
+        link_text += "; Table note"
+        inline_spans.extend(
+            (
+                {"kind": "text", "start": start, "end": start + 2, "text": "; "},
+                {
+                    "kind": "link",
+                    "start": start + 2,
+                    "end": len(link_text),
+                    "text": "Table note",
+                    "target": "#S4.T8.3.2",
+                },
+            )
+        )
+    blocks = [
+        RichBlock(
+            "block-structural-links",
+            0,
+            RichBlockKind.PARAGRAPH,
+            ("section-reader",),
+            SourceLocator(SourceFormat.MARKDOWN, 1, 1, 1, len(link_text)),
+            {
+                "text": link_text,
+                "inline_spans": inline_spans,
+            },
+        ),
+        RichBlock(
+            "block-equation-6",
+            1,
+            RichBlockKind.PARAGRAPH,
+            ("section-reader",),
+            SourceLocator(
+                SourceFormat.MARKDOWN,
+                2,
+                1,
+                2,
+                8,
+                selector="#S2.E6",
+                source_id="S2.E6",
+            ),
+            {
+                "text": "Equation 6",
+                "inline_spans": [
+                    {
+                        "kind": "text",
+                        "start": 0,
+                        "end": 10,
+                        "text": "Equation 6",
+                    }
+                ],
+            },
+        ),
+        RichBlock(
+            "block-figure-2",
+            2,
+            RichBlockKind.PARAGRAPH,
+            ("section-reader",),
+            SourceLocator(
+                SourceFormat.MARKDOWN,
+                3,
+                1,
+                3,
+                8,
+                selector="#S4.F2",
+            ),
+            {
+                "text": "Figure 2",
+                "inline_spans": [
+                    {
+                        "kind": "text",
+                        "start": 0,
+                        "end": 8,
+                        "text": "Figure 2",
+                    }
+                ],
+            },
+        ),
+        RichBlock(
+            "block-figure-3-a",
+            3,
+            RichBlockKind.PARAGRAPH,
+            ("section-reader",),
+            SourceLocator(
+                SourceFormat.MARKDOWN,
+                4,
+                1,
+                4,
+                8,
+                source_id="S4.F3",
+            ),
+            {
+                "text": "Figure 3",
+                "inline_spans": [
+                    {
+                        "kind": "text",
+                        "start": 0,
+                        "end": 8,
+                        "text": "Figure 3",
+                    }
+                ],
+            },
+        ),
+    ]
+    if duplicate_locator:
+        blocks.append(
+            RichBlock(
+                "block-figure-3-b",
+                4,
+                RichBlockKind.PARAGRAPH,
+                ("section-reader",),
+                SourceLocator(
+                    SourceFormat.MARKDOWN,
+                    5,
+                    1,
+                    5,
+                    8,
+                    selector="#S4.F3",
+                ),
+                {
+                    "text": "Duplicate Figure 3",
+                    "inline_spans": [
+                        {
+                            "kind": "text",
+                            "start": 0,
+                            "end": 18,
+                            "text": "Duplicate Figure 3",
+                        }
+                    ],
+                },
+            )
+        )
+    metadata = (
+        {}
+        if manifest_targets is None
+        else {
+            "source_target_manifest": {
+                "schema_version": SOURCE_TARGET_MANIFEST_SCHEMA,
+                "targets": list(manifest_targets),
+            }
+        }
+    )
+    return RichDocument(
+        document.source,
+        tuple(blocks),
+        (
+            RichSection(
+                "section-reader",
+                "Reader",
+                1,
+                0,
+                ("section-reader",),
+                0,
+                len(blocks),
+            ),
+        ),
+        metadata=metadata,
+    )
+
+
+def _manifest_target(
+    alias: str,
+    block_id: str,
+    ordinal: int,
+) -> dict[str, object]:
+    return {
+        "alias": alias,
+        "selector": f"#{alias}",
+        "kind": "paragraph",
+        "block_id": block_id,
+        "block_start": ordinal,
+        "block_end": ordinal + 1,
+        "section_id": "",
+        "panels": [],
+    }
+
+
+def test_legacy_structural_targets_require_one_unique_exact_locator() -> None:
+    assert _legacy_structural_targets(_structural_document()) == (
+        {"alias": "S2.E6", "block_id": "block-equation-6"},
+        {"alias": "S4.F2", "block_id": "block-figure-2"},
+        {"alias": "S4.F3", "block_id": "block-figure-3-a"},
+    )
+
+
+def test_structural_targets_prefer_present_authoritative_manifest() -> None:
+    document = _structural_document(
+        manifest_targets=(
+            _manifest_target("S2.E6", "block-figure-2", 2),
+            _manifest_target("S4.F2", "block-equation-6", 1),
+            _manifest_target("S9.F9", "block-figure-3-a", 3),
+        )
+    )
+
+    assert _legacy_structural_targets(document) == (
+        {"alias": "S2.E6", "block_id": "block-figure-2"},
+        {"alias": "S4.F2", "block_id": "block-equation-6"},
+    )
+
+
+def test_structural_targets_accept_exact_nested_alias_from_manifest() -> None:
+    document = _structural_document(
+        nested_target=True,
+        manifest_targets=(
+            _manifest_target("S4.T8.3.2", "block-figure-2", 2),
+        ),
+    )
+
+    assert _legacy_structural_targets(document) == (
+        {"alias": "S4.T8.3.2", "block_id": "block-figure-2"},
+    )
+
+
+def test_present_manifest_requires_foundation_accessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _structural_document(
+        manifest_targets=(
+            _manifest_target("S2.E6", "block-figure-2", 2),
+        )
+    )
+    monkeypatch.setattr(html_module, "_source_target_manifest", None)
+
+    with pytest.raises(
+        HTMLRenderError,
+        match="source target manifest support",
+    ):
+        _legacy_structural_targets(document)
+
+    assert _legacy_structural_targets(_structural_document()) == (
+        {"alias": "S2.E6", "block_id": "block-equation-6"},
+        {"alias": "S4.F2", "block_id": "block-figure-2"},
+        {"alias": "S4.F3", "block_id": "block-figure-3-a"},
+    )
+    assert _legacy_structural_targets(
+        _structural_document(duplicate_locator=True)
+    ) == (
+        {"alias": "S2.E6", "block_id": "block-equation-6"},
+        {"alias": "S4.F2", "block_id": "block-figure-2"},
+    )
+
+
+def test_reader_v2_boot_preserves_legacy_structural_targets() -> None:
+    publication = Publication(
+        source_document=_structural_document(),
+        layers=(),
+        glossary=(),
+        bibliography=(),
+        labels={},
+        resources=(),
+        reader_profile={},
+    )
+    payload = _reader_payload(
+        publication,
+        revisions=(),
+        selected=(),
+        glossary_revisions=(),
+        selected_glossary_revision_digests=(),
+        resources=(),
+        diagnostics=(),
+    )
+    html = (
+        '<script id="alc-render-payload" type="application/json">'
+        + json.dumps(payload)
+        + "</script>"
+    )
+
+    boot = _boot_payload(_split_reader_payload(html))
+
+    assert boot["legacy_structural_targets"] == [
+        {"alias": "S2.E6", "block_id": "block-equation-6"},
+        {"alias": "S4.F2", "block_id": "block-figure-2"},
+        {"alias": "S4.F3", "block_id": "block-figure-3-a"},
+    ]
+
+
+def test_standalone_validation_rejects_changed_structural_descriptors(
+    tmp_path: Path,
+) -> None:
+    publication = Publication(
+        source_document=_structural_document(),
+        labels={"document_title": "Structural links"},
+        reader_profile={"title": "Structural links", "source_language": "en"},
+    )
+    publication_path = tmp_path / "publication.json"
+    output = tmp_path / "reader.html"
+    write_publication(publication_path, publication)
+    render_publication_html(publication_path, output)
+    html = output.read_text(encoding="utf-8")
+    assert '"alias":"S2.E6"' in html
+    output.write_text(
+        html.replace('"alias":"S2.E6"', '"alias":"S9.E9"', 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        HTMLRenderError,
+        match="legacy structural targets are inconsistent",
+    ):
+        validate_standalone_html(publication, output)
+
+
 def _revision(
     document: RichDocument,
     *,
@@ -377,6 +983,40 @@ def _revision(
         provenance={"producer": "alc-translate"},
         markdown_body=body,
     )
+
+
+def test_source_note_translation_binds_exact_note_owner() -> None:
+    document = _source_note_document()
+    revision = _source_note_translation(document)
+
+    _validate_source_note_translations(document, (revision,))
+
+    assert _source_note_translation_id(document, revision) == "note-1"
+
+    wrong_note = replace(
+        revision,
+        provenance={
+            **dict(revision.provenance),
+            "source_note_translation": {
+                "schema_version": "alc.render.source_note_translation.v1",
+                "note_id": "missing-note",
+            },
+        },
+    )
+    with pytest.raises(HTMLRenderError, match="unknown source note"):
+        _validate_source_note_translations(document, (wrong_note,))
+
+    regular = _revision(document)
+    assert _source_note_translation_id(document, regular) is None
+
+
+def test_source_note_translation_rejects_duplicate_fragment_identity() -> None:
+    document = _source_note_document()
+    first = _source_note_translation(document)
+    duplicate = replace(first, fragment_id="translation-source-note-duplicate")
+
+    with pytest.raises(HTMLRenderError, match="multiple fragments"):
+        _validate_source_note_translations(document, (first, duplicate))
 
 
 def _workspace(
@@ -1831,6 +2471,629 @@ assert(!second.includes('data-reader-snapshot="first"'), "stale snapshot survive
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_reader_structural_alias_registry_and_markdown_degradation() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = (
+        Path(__file__).parents[1]
+        / "src"
+        / "alc_render"
+        / "web_assets"
+        / "reader.js"
+    ).read_text(encoding="utf-8")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        "globalThis.window = globalThis;\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcReaderTest = {
+    labels: labels,
+    buildSourceBibliographyIndex: buildSourceBibliographyIndex,
+    buildSourceNoteIndex: buildSourceNoteIndex,
+    buildSourceStructuralIndex: buildSourceStructuralIndex,
+    buildSourceInternalLinkIndex: buildSourceInternalLinkIndex,
+    degradeLegacyInternalMarkdownChunk: degradeLegacyInternalMarkdownChunk,
+    displayEquationLabel: displayEquationLabel,
+    legacyStructuralTarget: legacyStructuralTarget,
+    listPathMarkers: listPathMarkers,
+    exportListOwnedMarkdown: exportListOwnedMarkdown,
+    exportSourceFrontMatterMarkdown: exportSourceFrontMatterMarkdown,
+    exportSourceNoteMarkdown: exportSourceNoteMarkdown,
+    sourceFrontMatterEntries: sourceFrontMatterEntries,
+    sourceFigurePanels: sourceFigurePanels,
+    sourceNotes: sourceNotes,
+    sourceNoteTranslations: sourceNoteTranslations,
+    sourcePresentationBlock: sourcePresentationBlock,
+    sourcePresentationField: sourcePresentationField,
+    sourceClassificationForHeading: sourceClassificationForHeading,
+    sourceClassificationForValue: sourceClassificationForValue,
+    sourceCaptionPresentation: sourceCaptionPresentation,
+    sourceFigurePresentation: sourceFigurePresentation,
+    sourceTablePresentation: sourceTablePresentation,
+    state: state,
+    updateFragmentGroup: updateFragmentGroup,
+    replaceLegacyStructuralLinkWithText: replaceLegacyStructuralLinkWithText,
+    scrollTableWithKeyboard: scrollTableWithKeyboard,
+    syncScrollableTableRegion: syncScrollableTableRegion
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcReaderTest;
+assert(helpers.displayEquationLabel("4") === "(4)", "equation label parentheses");
+assert(helpers.displayEquationLabel("(4)") === "(4)", "equation label no double wrap");
+assert(helpers.displayEquationLabel("") === "", "empty equation label");
+var blocks = [
+  {block_id: "block-equation", kind: "equation"},
+  {block_id: "block-figure", kind: "figure"}
+];
+var structural = helpers.buildSourceStructuralIndex([
+  {alias: "S2.E6", block_id: "block-equation"},
+  {alias: "S4.F2", block_id: "block-figure"},
+  {alias: "S4.T8.3.2", block_id: "block-figure"}
+], blocks);
+assert(structural.aliases.get("S2.E6") === "block-block-equation", "equation alias");
+assert(structural.aliases.get("S4.F2") === "block-block-figure", "figure alias");
+assert(structural.aliases.get("S4.T8.3.2") === "block-block-figure", "nested alias");
+assert(structural.blockIds.has("block-equation"), "structural target block");
+helpers.state.sourceStructuralIndex = structural;
+helpers.state.sourceNoteIndex = helpers.buildSourceNoteIndex({metadata: {
+  source_notes: {schema_version: "ac.document.source_notes.v1", notes: [
+    {note_id: "footnote5", owner_block_id: "block-equation"}
+  ]}
+}});
+helpers.state.sourceInternalLinkIndex = helpers.buildSourceInternalLinkIndex(
+  {aliases: new Map(), blockIds: new Set(), itemIndexes: new Set(),
+   itemIndexesByBlockId: new Map()}, structural, helpers.state.sourceNoteIndex
+);
+assert(helpers.legacyStructuralTarget("#S4%2EF2"), "encoded alias");
+assert(helpers.legacyStructuralTarget("#S4.T8.3.2"), "nested alias target");
+assert(helpers.legacyStructuralTarget("#footnote5"), "source note alias target");
+assert(!helpers.legacyStructuralTarget("#s4.F2"), "case sensitivity");
+var bibliography = {
+  blockId: "block-references",
+  aliases: new Map([["bib.bib1", "source-reference-block-references-1"]]),
+  itemIndexes: new Set([0])
+};
+var internal = helpers.buildSourceInternalLinkIndex(
+  bibliography, structural, helpers.state.sourceNoteIndex
+);
+assert(internal.aliases.size === 5, "unified aliases");
+assert(internal.targetIds.has("block-block-equation"), "unified targets");
+assert(internal.aliases.get("footnote5") === "source-note-footnote5", "note target");
+helpers.state.payload = {publication: {reader_profile: {}}};
+helpers.state.selected = new Map([["translation-zh", {
+  fragment_id: "translation-zh", role: "translation", language: "zh-CN",
+  deleted: false
+}]]);
+assert(helpers.labels().save === "保存", "unique translation language locale");
+var splitBibliography = helpers.buildSourceBibliographyIndex([
+  {alias: "bib.bib1", block_id: "ref-1", item_index: 0},
+  {alias: "bib.bib2", block_id: "ref-2", item_index: 0}
+], [
+  {
+    block_id: "ref-1", kind: "list",
+    locator: {source_id: "bib.bib1", selector: "#bib.bib1"},
+    payload: {items: [{text: "First"}]}
+  },
+  {
+    block_id: "ref-2", kind: "list",
+    locator: {source_id: "bib.bib2", selector: "#bib.bib2"},
+    payload: {items: [{text: "Second"}]}
+  }
+]);
+assert(splitBibliography.blockId === "", "split references have no shared block");
+assert(splitBibliography.blockIds.size === 2, "split reference blocks");
+assert(
+  splitBibliography.aliases.get("bib.bib2") === "source-reference-ref-2-1",
+  "split reference alias"
+);
+assert(
+  splitBibliography.itemIndexesByBlockId.get("ref-1").has(0),
+  "split reference item index"
+);
+var markdown = "[Eq. 6](#S2.E6) [Fig. 2](#S4%2EF2) " +
+  "[lower](#s4.F2) [external](https://example.test/) " +
+  "`[code](#S2.E6)` [ref][eq-ref]";
+var degraded = helpers.degradeLegacyInternalMarkdownChunk(
+  markdown, new Set(["eq-ref"])
+);
+assert(degraded === "Eq. 6 Fig. 2 [lower](#s4.F2) " +
+  "[external](https://example.test/) `[code](#S2.E6)` ref", "Markdown degradation");
+var replaced = null;
+globalThis.document = {
+  createTextNode: function (value) {
+    return {nodeType: 3, textContent: value};
+  }
+};
+helpers.replaceLegacyStructuralLinkWithText({
+  textContent: "Fig. 1",
+  replaceWith: function (node) { replaced = node; }
+}, "S4.F1");
+assert(replaced && replaced.nodeType === 3, "structural fallback must be text");
+assert(replaced.textContent === "Fig. 1", "structural label fidelity");
+helpers.replaceLegacyStructuralLinkWithText({
+  textContent: "",
+  replaceWith: function (node) { replaced = node; }
+}, "S4.F1");
+assert(replaced.textContent === "S4.F1", "structural alias fallback");
+function tableRegion(width, viewport) {
+  var attributes = {};
+  var classes = new Set();
+  return {
+    scrollWidth: width,
+    clientWidth: viewport,
+    dataset: {tableLabel: "Table 3"},
+    attributes: attributes,
+    classes: classes,
+    classList: {
+      toggle: function (value, active) {
+        if (active) classes.add(value); else classes.delete(value);
+      }
+    },
+    setAttribute: function (key, value) { attributes[key] = String(value); },
+    removeAttribute: function (key) { delete attributes[key]; }
+  };
+}
+var wide = tableRegion(900, 400);
+helpers.syncScrollableTableRegion(wide);
+assert(wide.classes.has("is-overflowing"), "wide table state");
+assert(wide.attributes.tabindex === "0", "wide table keyboard access");
+assert(wide.attributes.role === "region", "wide table region role");
+assert(wide.attributes["aria-label"] === "Table 3", "wide table name");
+var compact = tableRegion(400, 400);
+helpers.syncScrollableTableRegion(compact);
+assert(!compact.classes.has("is-overflowing"), "compact table state");
+assert(!("tabindex" in compact.attributes), "compact table tab order");
+assert(!("role" in compact.attributes), "compact table landmark noise");
+var prevented = false;
+wide.scrollLeft = 0;
+assert(helpers.scrollTableWithKeyboard(wide, {
+  key: "ArrowRight",
+  preventDefault: function () { prevented = true; }
+}), "wide table keyboard handling");
+assert(prevented && wide.scrollLeft > 0, "wide table keyboard movement");
+helpers.scrollTableWithKeyboard(wide, {
+  key: "End", preventDefault: function () {}
+});
+assert(wide.scrollLeft === 500, "wide table keyboard end");
+helpers.scrollTableWithKeyboard(wide, {
+  key: "Home", preventDefault: function () {}
+});
+assert(wide.scrollLeft === 0, "wide table keyboard home");
+var outerStart = {
+  kind: "list",
+  list_path: [{
+    depth: 0, ordered: false, item_index: 0, item_count: 4,
+    segment_index: 0, continuation: false
+  }]
+};
+var outerContinuation = {
+  list_path: [{
+    depth: 0, ordered: false, item_index: 0, item_count: 4,
+    segment_index: 1, continuation: true
+  }]
+};
+var nestedStart = {
+  list_path: [
+    {
+      depth: 0, ordered: false, item_index: 0, item_count: 4,
+      segment_index: 2, continuation: true
+    },
+    {
+      depth: 1, ordered: true, item_index: 1, item_count: 3,
+      segment_index: 0, continuation: false
+    }
+  ]
+};
+assert(
+  JSON.stringify(helpers.listPathMarkers(outerStart)) ===
+    JSON.stringify([{depth: 0, text: "•", continuation: false}]),
+  "unordered list marker"
+);
+assert(
+  JSON.stringify(helpers.listPathMarkers(outerContinuation)) ===
+    JSON.stringify([{depth: 0, text: "", continuation: true}]),
+  "continuation marker suppression"
+);
+assert(
+  JSON.stringify(helpers.listPathMarkers(nestedStart)) === JSON.stringify([
+    {depth: 0, text: "", continuation: true},
+    {depth: 1, text: "2.", continuation: false}
+  ]),
+  "nested marker columns"
+);
+assert(
+  helpers.exportListOwnedMarkdown(outerStart, "First item") === "- First item",
+  "initial list Markdown"
+);
+assert(
+  helpers.exportListOwnedMarkdown(outerStart, "- 译文") === "- 译文",
+  "list-owned translation received a duplicate marker"
+);
+assert(
+  helpers.exportListOwnedMarkdown(
+    outerContinuation, "$$\nx\n$$\nEquation label: 13"
+  ) === "    $$\n    x\n    $$\n    Equation label: 13",
+  "continuation block Markdown"
+);
+assert(
+  helpers.exportListOwnedMarkdown(nestedStart, "Nested item") ===
+    "    2. Nested item",
+  "nested list Markdown"
+);
+var fidelityDocument = {
+  blocks: [{block_id: "owner-1"}],
+  metadata: {
+    source_front_matter: {
+      schema_version: "ac.document.source_front_matter.v1",
+      entries: [{
+        front_matter_id: "authors-1", kind: "authors", block_index: 1,
+        locator: {},
+        authors: [{
+          author_id: "author-1", name: "Ada Author", markers: ["1"],
+          orcid: "0000-0000-0000-0001",
+          orcid_url: "https://orcid.org/0000-0000-0000-0001",
+          contacts: [{kind: "email", label: "Email", value: "ada@example.test", target: "mailto:ada@example.test"}]
+        }],
+        affiliations: [{affiliation_id: "aff-1", marker: "1", text: "Institute One"}]
+      }]
+    },
+    source_notes: {
+      schema_version: "ac.document.source_notes.v1",
+      notes: [{
+        note_id: "note-1", ordinal: 0, marker: "1", body: "Source note.",
+        inline_spans: [{kind: "text", start: 0, end: 12, text: "Source note."}],
+        owner_block_id: "owner-1", anchor: {field: "text", start: 3, end: 4}
+      }]
+    }
+  }
+};
+assert(helpers.sourceFrontMatterEntries(fidelityDocument).length === 1,
+  "front matter entries");
+assert(helpers.sourceNotes(fidelityDocument).length === 1, "source notes");
+helpers.state.selected = new Map([["note-translation", {
+  fragment_id: "note-translation", role: "translation", markdown_body: "译注。",
+  anchor: {kind: "block", target_id: "owner-1", related_blocks: [{block_id: "owner-1"}]},
+  provenance: {source_note_translation: {
+    schema_version: "alc.render.source_note_translation.v1", note_id: "note-1"
+  }}
+}]]);
+helpers.state.payload = {
+  resources: [],
+  publication: {source_document: fidelityDocument, labels: {}, reader_profile: {}}
+};
+assert(helpers.sourceNoteTranslations(fidelityDocument).get("note-1").markdown_body === "译注。",
+  "source note translation selection");
+var selectedNoteTranslation = helpers.state.selected.get("note-translation");
+helpers.state.selected.set("note-translation", Object.assign(
+  {}, selectedNoteTranslation, {deleted: true}
+));
+assert(
+  helpers.sourceNoteTranslations(fidelityDocument).size === 0,
+  "deleted source note translation remained selected"
+);
+helpers.state.selected.set("note-translation", selectedNoteTranslation);
+helpers.state.fragmentGroups = new Map();
+helpers.updateFragmentGroup("note-translation", {
+  kind: "block", target_id: "owner-1", related_blocks: [{block_id: "owner-1"}]
+});
+assert(
+  !helpers.state.fragmentGroups.has("owner-1"),
+  "source note translation leaked into the ordinary block lane"
+);
+assert(helpers.exportSourceFrontMatterMarkdown(
+  helpers.sourceFrontMatterEntries(fidelityDocument)[0]
+).includes("Ada Author"), "front matter Markdown");
+assert(helpers.exportSourceNoteMarkdown(
+  helpers.sourceNotes(fidelityDocument)[0], null, new Map()
+).includes("Source note."), "source note Markdown");
+var presentationDocument = {
+  source: {source_format: "html"},
+  blocks: [
+    {block_id: "heading-1", kind: "heading", payload: {
+      text: "Curvature-Lambda", level: 3
+    }},
+    {block_id: "heading-abstract", kind: "heading", payload: {
+      text: "Abstract", level: 2
+    }},
+    {block_id: "classification-heading", kind: "heading", payload: {
+      text: "pacs", level: 5
+    }},
+    {block_id: "classification-value", kind: "paragraph", payload: {
+      text: "Dark energy"
+    }},
+    {block_id: "table-1", kind: "table", payload: {
+      caption: "Caption", headers: ["H", ""], rows: [["x", ""]]
+    }},
+        {block_id: "figure-1", kind: "figure", payload: {
+          caption: "Figure Theta", alt_text: "Figure Theta"
+    }}
+  ],
+  metadata: {
+    source_target_manifest: {
+      schema_version: "ac.document.source_target_manifest.v1",
+      targets: [{
+        alias: "S1.F1", kind: "figure", block_id: "figure-1",
+        panels: [
+          {panel_index: 0, source_id: "S1.F1.g1", status: "available",
+            asset_digest: "a"},
+          {panel_index: 1, source_id: "S1.F1.g2", status: "available",
+            asset_digest: "b"},
+          {panel_index: 2, source_id: "S1.F1.g3", status: "available",
+            asset_digest: "c"}
+        ]
+      }]
+    },
+    source_presentation: {
+    schema_version: "ac.document.source_presentation.v1",
+    blocks: [
+      {block_id: "heading-1", roles: ["acknowledgements"], fields: [{
+        field: "text", item_index: null, row_index: null, column_index: null,
+        text: "Curvature-Lambda",
+        inline_spans: [
+          {kind: "text", start: 0, end: 10, text: "Curvature-"},
+          {kind: "math", start: 10, end: 16, text: "Lambda", tex: "\\Lambda", source: "Lambda"}
+        ], marks: []
+      }]},
+      {block_id: "heading-abstract", roles: ["abstract"], fields: [{
+        field: "text", item_index: null, row_index: null, column_index: null,
+        text: "Abstract",
+        inline_spans: [
+          {kind: "text", start: 0, end: 8, text: "Abstract"}
+        ], marks: []
+      }]},
+      {block_id: "classification-heading", roles: ["classification"], fields: [{
+        field: "text", item_index: null, row_index: null, column_index: null,
+        text: "pacs", inline_spans: [{kind: "text", start: 0, end: 4, text: "pacs"}],
+        marks: []
+      }]},
+      {block_id: "classification-value", roles: [], fields: [{
+        field: "text", item_index: null, row_index: null, column_index: null,
+        text: "Dark energy",
+        inline_spans: [{kind: "text", start: 0, end: 11, text: "Dark energy"}],
+        marks: []
+      }]},
+      {block_id: "table-1", roles: [], fields: [
+        {field: "caption", item_index: null, row_index: null, column_index: null,
+          text: "Caption", inline_spans: [{kind: "text", start: 0, end: 7, text: "Caption"}], marks: []},
+        {field: "table_header", item_index: null, row_index: null, column_index: 0,
+          text: "H", inline_spans: [{kind: "text", start: 0, end: 1, text: "H"}], marks: [{kind: "strong", start: 0, end: 1}]},
+        {field: "table_header", item_index: null, row_index: null, column_index: 1,
+          text: "", inline_spans: [], marks: []},
+        {field: "table_cell", item_index: null, row_index: 0, column_index: 0,
+          text: "x", inline_spans: [{kind: "math", start: 0, end: 1, text: "x", tex: "x", source: "x"}], marks: []},
+        {field: "table_cell", item_index: null, row_index: 0, column_index: 1,
+          text: "", inline_spans: [], marks: []}
+      ]},
+      {block_id: "figure-1", roles: [], fields: [{
+        field: "caption", item_index: null, row_index: null,
+            column_index: null, text: "Figure Theta",
+            inline_spans: [
+              {kind: "text", start: 0, end: 7, text: "Figure "},
+              {kind: "math", start: 7, end: 12, text: "Theta",
+                tex: "\\Theta", source: "Theta"}
+            ], marks: []
+      }]}
+    ],
+    classifications: [{
+      classification_id: "classification-0123456789abcdef01234567",
+      locator: {source_format: "html", line_start: 1, column_start: 0,
+        line_end: 1, column_end: 0, selector: "#classification", source_id: "classification"},
+      heading_block_id: "classification-heading",
+      value_block_ids: ["classification-value"], composition: "inline",
+      separator: ": ", separator_source: "latexml_ar5iv_classification_after"
+    }],
+    captions: [
+      {block_id: "table-1", kind: "table", placement: "after_content",
+        alignment: "center", alignment_sources: ["class:ltx_centering"]},
+      {block_id: "figure-1", kind: "figure", placement: "after_content",
+        alignment: "center", alignment_sources: ["class:ltx_centering"]}
+    ],
+    figures: [{
+      block_id: "figure-1",
+      layout: {kind: "flex", column_count: 2, row_count: 2,
+        rows: [[0, 1], [2]], column_source: null,
+        row_sources: ["class:ltx_flex_size_2", "class:ltx_flex_size_1"],
+        break_after_panel_indexes: [1],
+        break_source: "class:ltx_flex_break"},
+      panels: [
+        {panel_index: 0, source_id: "S1.F1.g1", row_index: 0,
+          column_index: 0, display_width: 200, display_height: 150,
+          dimension_source: "attributes:width,height", aspect_ratio: [4, 3],
+          aspect_ratio_source: "style:aspect-ratio"},
+        {panel_index: 1, source_id: "S1.F1.g2", row_index: 0,
+          column_index: 1, display_width: 200, display_height: 150,
+          dimension_source: "attributes:width,height", aspect_ratio: [4, 3],
+          aspect_ratio_source: "style:aspect-ratio"},
+        {panel_index: 2, source_id: "S1.F1.g3", row_index: 1,
+          column_index: 0, display_width: 200, display_height: 150,
+          dimension_source: "attributes:width,height", aspect_ratio: [4, 3],
+          aspect_ratio_source: "style:aspect-ratio"}
+      ]
+    }],
+    tables: [{block_id: "table-1", cells: [
+      {row_index: 0, column_index: 0, row_span: 1, column_span: 2,
+        kind: "header", locator: {}, horizontal_alignment: "center",
+        horizontal_alignment_sources: ["class:ltx_align_center"],
+        rule_edges: [{edge: "top", source: "class:ltx_border_t"}]},
+      {row_index: 1, column_index: 0, row_span: 1, column_span: 1,
+        kind: "data", locator: {}, horizontal_alignment: "left",
+        horizontal_alignment_sources: ["class:ltx_align_left"],
+        rule_edges: [{edge: "bottom", source: "class:ltx_border_b"}]}
+    ]}]
+  }}
+};
+assert(
+  helpers.sourcePresentationBlock(presentationDocument, "heading-1").roles[0] ===
+    "acknowledgements",
+  "source presentation role"
+);
+assert(
+  helpers.sourcePresentationBlock(
+    presentationDocument, "heading-abstract"
+  ).roles[0] === "abstract",
+  "source abstract presentation role"
+);
+assert(
+  helpers.sourcePresentationField(
+    presentationDocument, "heading-1", "text", null, null, null
+  ).inline_spans[1].tex === "\\Lambda",
+  "source presentation typed math"
+);
+assert(
+  helpers.sourceCaptionPresentation(presentationDocument, "table-1")
+    .placement === "after_content",
+  "source Table caption placement"
+);
+assert(
+  helpers.sourceCaptionPresentation(presentationDocument, "table-1")
+    .alignment === "center",
+  "source caption alignment"
+);
+assert(
+  helpers.sourceClassificationForHeading(
+    presentationDocument, "classification-heading"
+  ).separator === ": ",
+  "source classification separator"
+);
+assert(
+  helpers.sourceClassificationForValue(
+    presentationDocument, "classification-value"
+  ).heading_block_id === "classification-heading",
+  "source classification value binding"
+);
+assert(
+  helpers.sourceTablePresentation(presentationDocument, "table-1")
+    .cells[0].column_span === 2,
+  "source Table geometry"
+);
+assert(
+  helpers.sourceFigurePresentation(presentationDocument, "figure-1")
+    .layout.column_count === 2 &&
+  helpers.sourceFigurePresentation(presentationDocument, "figure-1")
+    .layout.row_sources.join(",") ===
+      "class:ltx_flex_size_2,class:ltx_flex_size_1" &&
+  helpers.sourceFigurePresentation(presentationDocument, "figure-1")
+    .panels[2].row_index === 1,
+  "source Figure layout"
+);
+var invalidFigurePresentation = JSON.parse(JSON.stringify(presentationDocument));
+invalidFigurePresentation.metadata.source_presentation.figures[0]
+  .layout.rows = [[1, 0]];
+var invalidFigureRejected = false;
+try {
+  helpers.sourceFigurePresentation(invalidFigurePresentation, "figure-1");
+} catch (_error) {
+  invalidFigureRejected = true;
+}
+assert(invalidFigureRejected, "invalid source Figure layout was accepted");
+helpers.state.payload = {
+  publication: {
+    source_document: {
+      metadata: {
+        source_target_manifest: {
+          schema_version: "ac.document.source_target_manifest.v1",
+          targets: [{
+            alias: "S4.F4", kind: "figure", block_id: "figure-parent",
+            panels: [
+              {panel_index: 0, status: "available", asset_digest: "a"},
+              {panel_index: 1, status: "available", asset_digest: "b"}
+            ]
+          }]
+        }
+      }
+    }
+  }
+};
+assert(
+  helpers.sourceFigurePanels({block_id: "figure-parent", kind: "figure"})
+    .map(function (panel) { return panel.asset_digest; }).join(",") === "a,b",
+  "compound Figure panel order"
+);
+var rejected = false;
+try {
+  helpers.buildSourceStructuralIndex([
+    {alias: "S2.E6", block_id: "block-equation"},
+    {alias: "S2.E6", block_id: "block-figure"}
+  ], blocks);
+} catch (_error) {
+  rejected = true;
+}
+assert(rejected, "duplicate alias rejection");
+'''
+    )
+    completed = subprocess.run(
+        [node, "-"],
+        input=instrumented,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_reader_css_contains_shared_scrollable_table_contract() -> None:
+    css = (
+        Path(__file__).parents[1]
+        / "src"
+        / "alc_render"
+        / "web_assets"
+        / "reader.css"
+    ).read_text(encoding="utf-8")
+
+    assert ".alc-table-scroll" in css
+    assert "overflow-x: auto" in css
+    assert ".alc-table-scroll:focus-visible" in css
+    assert ".alc-table-scroll > table" in css
+    table_scroll = css[
+        css.index(".alc-table-scroll {") :
+        css.index("caption {", css.index(".alc-table-scroll {"))
+    ]
+    assert "scrollbar-width: thin" in table_scroll
+    assert ".alc-table-scroll::-webkit-scrollbar { height: 6px; }" in table_scroll
+    assert ".alc-table-scroll:hover::-webkit-scrollbar-thumb" in table_scroll
+    assert ".alc-table-scroll:focus-within::-webkit-scrollbar-thumb" in table_scroll
+
+
+def test_reader_css_distinguishes_content_links_from_glossary_terms() -> None:
+    css = (
+        Path(__file__).parents[1]
+        / "src"
+        / "alc_render"
+        / "web_assets"
+        / "reader.css"
+    ).read_text(encoding="utf-8")
+
+    assert "--alc-link:" in css
+    assert ".alc-source-card a" in css
+    assert ".alc-fragment-saved-content a" in css
+    assert ".glossary-term" in css
+    assert ".glossary-term {\n  color: inherit;" in css
+
+
+def test_reader_css_contains_authoritative_list_path_layout() -> None:
+    css = (
+        Path(__file__).parents[1]
+        / "src"
+        / "alc_render"
+        / "web_assets"
+        / "reader.css"
+    ).read_text(encoding="utf-8")
+
+    assert ".alc-list-owned-card" in css
+    assert ".alc-list-marker-rail" in css
+    assert "var(--alc-list-depth)" in css
+    assert ".alc-list-marker.is-continuation" in css
+    assert ".alc-figure-panels" in css
+    assert ".alc-source-front-matter" in css
+    assert ".alc-source-author-list" in css
+    assert ".alc-source-note-row" in css
+    assert ".alc-source-note-ref" in css
 
 
 def test_renderer_groups_revision_by_front_matter_not_parent_directory(

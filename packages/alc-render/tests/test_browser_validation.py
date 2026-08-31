@@ -24,6 +24,15 @@ def _report(**overrides: object) -> dict[str, object]:
         "missingFragments": 0,
         "failedImages": 0,
         "legacyBibliographyLinks": 0,
+        "legacyStructuralLinks": 0,
+        "invalidTableRegions": 0,
+        "invalidListPathCards": 0,
+        "missingReferenceTargets": 0,
+        "invalidFigurePanels": 0,
+        "invalidParallelTableAlignment": 0,
+        "invalidFrontMatterEntries": 0,
+        "invalidSourceNotes": 0,
+        "leakedSourceNoteTranslations": 0,
     }
     values.update(overrides)
     return values
@@ -61,6 +70,27 @@ def test_browser_validation_discovers_system_browser_and_forces_reader_checks(
     assert 'image.loading = "eager"' in browser_validation._READER_REPORT_EXPRESSION
     assert "alc-render-chunk:not(.is-rendered)" in browser_validation._READER_REPORT_EXPRESSION
     assert "legacyBibliographyLinks" in browser_validation._READER_REPORT_EXPRESSION
+    assert "legacyStructuralLinks" in browser_validation._READER_REPORT_EXPRESSION
+    assert "invalidTableRegions" in browser_validation._READER_REPORT_EXPRESSION
+    assert "invalidListPathCards" in browser_validation._READER_REPORT_EXPRESSION
+    assert "missingReferenceTargets" in browser_validation._READER_REPORT_EXPRESSION
+    assert "invalidFigurePanels" in browser_validation._READER_REPORT_EXPRESSION
+    assert "renderedGroups.length !== 2" not in browser_validation._READER_REPORT_EXPRESSION
+    assert "figurePresentations" in browser_validation._READER_REPORT_EXPRESSION
+    assert "panelRow.dataset.authoredColumnCount" in browser_validation._READER_REPORT_EXPRESSION
+    assert "layout.row_sources[index]" in browser_validation._READER_REPORT_EXPRESSION
+    assert "responsiveWrapProfile" in browser_validation._READER_REPORT_EXPRESSION
+    assert "latexml_ar5iv_flex_size_2" in browser_validation._READER_REPORT_EXPRESSION
+    assert "invalidParallelTableAlignment" in browser_validation._READER_REPORT_EXPRESSION
+    assert "invalidFrontMatterEntries" in browser_validation._READER_REPORT_EXPRESSION
+    assert "invalidSourceNotes" in browser_validation._READER_REPORT_EXPRESSION
+    assert "candidate.getAttribute(\"href\") === \"#\" + row.id" in (
+        browser_validation._READER_REPORT_EXPRESSION
+    )
+    assert "const token = String(note.note_id).replace" not in (
+        browser_validation._READER_REPORT_EXPRESSION
+    )
+    assert "leakedSourceNoteTranslations" in browser_validation._READER_REPORT_EXPRESSION
     assert "^#bib[.]bib[1-9][0-9]*$" in browser_validation._READER_REPORT_EXPRESSION
     assert "Date.now() + 120000" in browser_validation._reader_report_expression(120)
     assert "55000" not in browser_validation._reader_report_expression(120)
@@ -78,6 +108,42 @@ def test_browser_validation_discovers_system_browser_and_forces_reader_checks(
         (
             _report(legacyBibliographyLinks=2),
             "2 unresolved legacy bibliography links",
+        ),
+        (
+            _report(legacyStructuralLinks=3),
+            "3 unresolved legacy structural links",
+        ),
+        (
+            _report(invalidTableRegions=2),
+            "2 invalid responsive table regions",
+        ),
+        (
+            _report(invalidListPathCards=2),
+            "2 invalid list-path cards",
+        ),
+        (
+            _report(missingReferenceTargets=2),
+            "2 missing bibliography targets",
+        ),
+        (
+            _report(invalidFigurePanels=2),
+            "2 invalid Figure panel groups",
+        ),
+        (
+            _report(invalidParallelTableAlignment=2),
+            "2 misaligned parallel Tables",
+        ),
+        (
+            _report(invalidFrontMatterEntries=2),
+            "2 invalid source front-matter entries",
+        ),
+        (
+            _report(invalidSourceNotes=2),
+            "2 invalid source notes",
+        ),
+        (
+            _report(leakedSourceNoteTranslations=2),
+            "2 source-note translations in ordinary lanes",
         ),
     ),
 )
