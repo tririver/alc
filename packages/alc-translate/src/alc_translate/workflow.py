@@ -59,6 +59,7 @@ from alc_render import (
     layer_from_document,
     layer_to_document,
     source_identity_from_rich_document,
+    normalize_markdown,
 )
 
 from .contracts import (
@@ -90,6 +91,8 @@ from .source import (
     prompt_block,
     same_primary_language,
     source_blocks,
+    source_note_blocks,
+    source_note_link_markdown,
     validate_translation_text,
 )
 
@@ -645,6 +648,7 @@ class TranslationWorkflowService:
             blocks = _select_blocks(all_blocks, block_ids)
         except TranslationWorkflowError as exc:
             return RunError(exc.code, str(exc))
+        units = _translation_units(source, blocks)
         coverage = "document" if block_ids is None else "selection"
         artifact_id = f"{artifact_prefix}/result"
         existing = context.artifacts.find(artifact_id)
@@ -658,7 +662,7 @@ class TranslationWorkflowService:
                 source,
                 language,
                 target_language,
-                blocks,
+                units,
                 expected_coverage=coverage,
             )
             return result
@@ -679,7 +683,7 @@ class TranslationWorkflowService:
             return result
         try:
             windows = _translation_windows(
-                _model_translation_blocks(blocks),
+                _model_translation_blocks(units),
                 glossary=glossary.entries,
                 target_language=target_language,
                 language=language,
@@ -916,13 +920,14 @@ class TranslationWorkflowService:
             context.artifacts.publish_json(accepted_id, accepted_doc)
             translations.extend(reviewed)
         merged_translations = _merge_programmatic_translations(
-            blocks,
+            units,
             translations,
         )
         result = _publish_translation_result(
             context,
             source,
             translations=merged_translations,
+            units=units,
             source_language=language.language_tag,
             target_language=target_language,
             artifact_prefix=artifact_prefix,
@@ -934,7 +939,7 @@ class TranslationWorkflowService:
             source,
             language,
             target_language,
-            blocks,
+            units,
             expected_coverage=coverage,
         )
         context.artifacts.publish_json(artifact_id, result.to_document())
@@ -1557,6 +1562,29 @@ def _select_blocks(
     return tuple(item for item in blocks if str(item["block_id"]) in requested)
 
 
+def _translation_units(
+    source: TranslationSource,
+    blocks: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    selected_owner_ids = {str(block["block_id"]) for block in blocks}
+    notes = source_note_blocks(source, owner_block_ids=selected_owner_ids)
+    notes_by_owner: dict[str, list[Mapping[str, Any]]] = {}
+    for note in notes:
+        binding = note.get("source_note")
+        if not isinstance(binding, Mapping):
+            raise TranslationWorkflowError(
+                "source_notes_invalid", "source note translation binding is invalid"
+            )
+        notes_by_owner.setdefault(
+            str(binding.get("owner_block_id", "")), []
+        ).append(note)
+    units: list[Mapping[str, Any]] = []
+    for block in blocks:
+        units.append(block)
+        units.extend(notes_by_owner.get(str(block["block_id"]), ()))
+    return tuple(units)
+
+
 def _model_translation_blocks(
     blocks: Sequence[Mapping[str, Any]],
 ) -> tuple[Mapping[str, Any], ...]:
@@ -1565,6 +1593,7 @@ def _model_translation_blocks(
         for block in blocks
         if not _is_structural_figure(block)
         and str(block.get("kind")) != "equation"
+        and source_note_link_markdown(block) is None
     )
 
 
@@ -1616,6 +1645,10 @@ def _merge_programmatic_translations(
     merged: list[Mapping[str, str]] = []
     for block in blocks:
         block_id = str(block["block_id"])
+        link_markdown = source_note_link_markdown(block)
+        if link_markdown is not None:
+            merged.append({"block_id": block_id, "text": link_markdown})
+            continue
         if _is_structural_figure(block):
             merged.append(
                 {
@@ -2037,6 +2070,9 @@ def _validate_translation_result(
     source_blocks_by_id = {
         block.block_id: block for block in source.rich.blocks
     }
+    projected_source_blocks_by_id = {
+        str(block["block_id"]): block for block in blocks
+    }
     for item in result.revision_artifacts:
         try:
             payload = context.artifacts.read_bytes(item.artifact).decode(
@@ -2064,21 +2100,72 @@ def _validate_translation_result(
                 "translation_revision_binding_mismatch",
                 "translation revision does not match its result manifest",
             )
-        block_id = revision.anchor.target_id
-        rich_block = source_blocks_by_id.get(block_id)
-        if (
-            rich_block is None
-            or revision.anchor.related_block_ids != (block_id,)
-            or revision.anchor.related_blocks[0]
-            != anchor_block_from_rich_block(rich_block)
-        ):
-            raise TranslationWorkflowError(
-                "translation_revision_binding_mismatch",
-                "translation revision anchor does not match its RichDocument block",
+        note_contract = revision.provenance.get("source_note_translation")
+        if note_contract is not None:
+            if (
+                not isinstance(note_contract, Mapping)
+                or set(note_contract) != {"schema_version", "note_id"}
+                or note_contract.get("schema_version")
+                != "alc.render.source_note_translation.v1"
+                or not isinstance(note_contract.get("note_id"), str)
+                or not str(note_contract["note_id"])
+            ):
+                raise TranslationWorkflowError(
+                    "translation_revision_binding_mismatch",
+                    "source note translation provenance is invalid",
+                )
+            unit_id = f"source-note:{note_contract['note_id']}"
+            source_unit = projected_source_blocks_by_id.get(unit_id)
+            binding = source_unit.get("source_note") if source_unit else None
+            owner_block_id = (
+                str(binding.get("owner_block_id", ""))
+                if isinstance(binding, Mapping)
+                else ""
             )
-        rich_block_document = rich_block_to_document(rich_block)
+            rich_block = source_blocks_by_id.get(owner_block_id)
+            if (
+                source_unit is None
+                or not isinstance(binding, Mapping)
+                or binding.get("note_id") != note_contract["note_id"]
+                or rich_block is None
+                or revision.anchor.target_id != owner_block_id
+                or revision.anchor.related_block_ids != (owner_block_id,)
+                or revision.anchor.related_blocks[0]
+                != anchor_block_from_rich_block(rich_block)
+            ):
+                raise TranslationWorkflowError(
+                    "translation_revision_binding_mismatch",
+                    "source note translation does not match its exact owner",
+                )
+            rich_block_document = source_unit
+            actual_id = unit_id
+        else:
+            block_id = revision.anchor.target_id
+            rich_block = source_blocks_by_id.get(block_id)
+            if (
+                rich_block is None
+                or revision.anchor.related_block_ids != (block_id,)
+                or revision.anchor.related_blocks[0]
+                != anchor_block_from_rich_block(rich_block)
+            ):
+                raise TranslationWorkflowError(
+                    "translation_revision_binding_mismatch",
+                    "translation revision anchor does not match its RichDocument block",
+                )
+            rich_block_document = projected_source_blocks_by_id.get(block_id)
+            if rich_block_document is None:
+                raise TranslationWorkflowError(
+                    "translation_revision_binding_mismatch",
+                    "translation revision refers to an unselected source block",
+                )
+            actual_id = block_id
         try:
-            if rich_block.kind is RichBlockKind.CODE:
+            if note_contract is not None:
+                validate_translation_text(
+                    revision.markdown_body,
+                    rich_block_document,
+                )
+            elif rich_block.kind is RichBlockKind.CODE:
                 expected_code = block_text_to_markdown(
                     rich_block,
                     str(rich_block.payload["text"]),
@@ -2107,7 +2194,7 @@ def _validate_translation_result(
             raise TranslationWorkflowError(
                 exc.code, str(exc), exc.details
             ) from exc
-        actual.append(block_id)
+        actual.append(actual_id)
     if actual != expected:
         raise TranslationWorkflowError(
             "translation_coverage_invalid",
@@ -2120,32 +2207,61 @@ def _publish_translation_result(
     source: TranslationSource,
     *,
     translations: Sequence[Mapping[str, str]],
+    units: Sequence[Mapping[str, Any]],
     source_language: str,
     target_language: str,
     artifact_prefix: str,
     coverage: str,
 ) -> TranslationResult:
     rich_blocks = {item.block_id: item for item in source.rich.blocks}
+    units_by_id = {str(item["block_id"]): item for item in units}
     source_identity = source_identity_from_rich_document(source.rich)
     revisions: list[FragmentRevisionRef] = []
     artifacts: list[TranslationRevisionArtifact] = []
     for translated in translations:
         block_id = str(translated["block_id"])
-        block = rich_blocks.get(block_id)
-        if block is None:
+        unit = units_by_id.get(block_id)
+        if unit is None:
             raise TranslationWorkflowError(
                 "translation_coverage_invalid",
-                f"translation refers to unknown source block {block_id}",
+                f"translation refers to unknown source unit {block_id}",
             )
-        block_document = rich_block_to_document(block)
-        if _is_nonlinguistic_media_translation(
-            block_document, str(translated["text"])
-        ):
-            continue
-        markdown_body = block_text_to_markdown(
-            block,
-            str(translated["text"]),
-        )
+        note_binding = unit.get("source_note")
+        if isinstance(note_binding, Mapping):
+            owner_block_id = str(note_binding.get("owner_block_id", ""))
+            note_id = str(note_binding.get("note_id", ""))
+            block = rich_blocks.get(owner_block_id)
+            if block is None or not note_id:
+                raise TranslationWorkflowError(
+                    "source_notes_invalid",
+                    "source note translation owner is invalid",
+                )
+            markdown_body = normalize_markdown(
+                str(translated["text"])
+            ).rstrip("\n") + "\n"
+            note_provenance: dict[str, Any] = {
+                "source_note_translation": {
+                    "schema_version": "alc.render.source_note_translation.v1",
+                    "note_id": note_id,
+                }
+            }
+        else:
+            block = rich_blocks.get(block_id)
+            if block is None:
+                raise TranslationWorkflowError(
+                    "translation_coverage_invalid",
+                    f"translation refers to unknown source block {block_id}",
+                )
+            block_document = rich_block_to_document(block)
+            if _is_nonlinguistic_media_translation(
+                block_document, str(translated["text"])
+            ):
+                continue
+            markdown_body = block_text_to_markdown(
+                block,
+                str(translated["text"]),
+            )
+            note_provenance = {}
         fragment_material = {
             "producer": "alc-translate",
             "source": source_identity.rich_document_digest,
@@ -2163,7 +2279,7 @@ def _publish_translation_result(
             parent_semantic_digest=None,
             anchor=FragmentAnchor(
                 AnchorKind.BLOCK,
-                block_id,
+                block.block_id,
                 (anchor_block_from_rich_block(block),),
             ),
             priority=10,
@@ -2175,6 +2291,7 @@ def _publish_translation_result(
                 "producer": "alc-translate",
                 "source_language": source_language,
                 "translation_mode": "enabled",
+                **note_provenance,
             },
             markdown_body=markdown_body,
         )

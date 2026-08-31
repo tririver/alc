@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import ac_document as _ac_document
 from ac_jobs import canonical_json_bytes
 from ac_document import (
     AcDocumentService,
@@ -26,8 +27,10 @@ from .contracts import TranslationSource
 
 STRUCTURAL_FIGURE_PLACEHOLDER = "\ufffc"
 _MARKDOWN_LINK = re.compile(
-    r"(?<!!)\[[^\]]+\]\(([^)\s]+)(?:\s+[^)]*)?\)"
+    r"(?<!!)\[(?!\[)((?:[^\[\]]|\[[^\[\]]+\])+)\]"
+    r"\(([^)\s]+)(?:\s+[^)]*)?\)"
 )
+_INTERNAL_BIBLIOGRAPHY_TARGET = re.compile(r"#bib\.bib[1-9][0-9]*")
 _LINK_TOKEN_CHARACTER = r"A-Za-z0-9._~:/?#@!$&'*+,;=%-"
 
 
@@ -74,9 +77,118 @@ def resolve_translation_source(
 
 
 def source_blocks(source: TranslationSource) -> tuple[dict[str, Any], ...]:
-    """Return exact blocks from the source RichDocument."""
+    """Return source blocks projected for lossless translation prompts."""
 
-    return tuple(rich_block_to_document(item) for item in source.rich.blocks)
+    presentation = _source_presentation_or_none(source.rich)
+    views_by_block_id = {
+        str(entry["block_id"]): entry
+        for entry in (presentation or {}).get("blocks", ())
+    }
+    return tuple(
+        _project_translation_surface(
+            _project_source_presentation(
+                rich_block_to_document(item),
+                views_by_block_id.get(item.block_id),
+            )
+        )
+        for item in source.rich.blocks
+    )
+
+
+def source_note_blocks(
+    source: TranslationSource,
+    *,
+    owner_block_ids: set[str] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Return provenance-bound source-note units for translation."""
+
+    notes = _source_notes_or_none(source.rich)
+    if notes is None:
+        return ()
+    blocks_by_id = {block.block_id: block for block in source.rich.blocks}
+    output: list[dict[str, Any]] = []
+    for note in notes.get("notes", ()):
+        if not isinstance(note, Mapping):
+            raise TranslationSourceError(
+                "source_notes_invalid", "source note entry must be an object"
+            )
+        note_id = str(note.get("note_id", ""))
+        owner_block_id = str(note.get("owner_block_id", ""))
+        owner = blocks_by_id.get(owner_block_id)
+        if not note_id or owner is None:
+            raise TranslationSourceError(
+                "source_notes_invalid", "source note identity is invalid"
+            )
+        if owner_block_ids is not None and owner_block_id not in owner_block_ids:
+            continue
+        payload = {
+            "text": str(note.get("body", "")),
+            "inline_spans": list(note.get("inline_spans", ())),
+        }
+        unit = {
+            "block_id": f"source-note:{note_id}",
+            "ordinal": int(note.get("ordinal", len(output))),
+            "kind": "source_note",
+            "section_path": list(owner.section_path),
+            "payload": payload,
+            "source_note": {
+                "note_id": note_id,
+                "owner_block_id": owner_block_id,
+            },
+        }
+        output.append({**unit, "source_identity": source_identity(unit)})
+    return tuple(output)
+
+
+def source_note_link_markdown(block: Mapping[str, Any]) -> str | None:
+    """Return exact Markdown for one link-only source-note body."""
+
+    if str(block.get("kind")) != "source_note":
+        return None
+    payload = block.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TranslationSourceError(
+            "source_block_invalid", "source block payload must be an object"
+        )
+    spans = _mapping_items(payload.get("inline_spans"))
+    if len(spans) != 1 or str(spans[0].get("kind")) != "link":
+        return None
+    label = str(spans[0].get("text", ""))
+    target = str(spans[0].get("target", ""))
+    if not label or not target or label != str(payload.get("text", "")):
+        return None
+    if label == target and re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*:[^\s<>]+", target):
+        return f"<{target}>"
+    return f"[{label}]({target})"
+
+
+def _source_presentation_or_none(document: Any) -> Mapping[str, Any] | None:
+    metadata = getattr(document, "metadata", {})
+    present = isinstance(metadata, Mapping) and "source_presentation" in metadata
+    accessor = getattr(_ac_document, "source_presentation", None)
+    if not callable(accessor):
+        if present:
+            raise TranslationSourceError(
+                "source_presentation_unsupported",
+                "source presentation metadata requires AC Document "
+                "source-presentation support",
+            )
+        return None
+    return accessor(document)
+
+
+def _source_notes_or_none(document: Any) -> Mapping[str, Any] | None:
+    metadata = getattr(document, "metadata", {})
+    present = isinstance(metadata, Mapping) and "source_notes" in metadata
+    accessor = getattr(_ac_document, "source_notes", None)
+    if not callable(accessor):
+        if present:
+            raise TranslationSourceError(
+                "source_notes_unsupported",
+                "source note metadata requires AC Document source-note support",
+            )
+        return None
+    return accessor(document)
 
 
 def deterministic_language_samples(
@@ -122,7 +234,7 @@ def source_identity(block: Mapping[str, Any]) -> dict[str, Any]:
     links: list[str] = []
     if kind == "equation":
         equations.append(str(payload.get("tex", "")))
-    elif kind == "paragraph":
+    elif kind in {"paragraph", "source_note"}:
         _extend_inline_identity(
             payload.get("inline_spans"),
             equations=equations,
@@ -178,7 +290,10 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
                 "translation_source_identity_invalid",
                 f"translation changed equation text for {block['block_id']}",
             )
-    elif _formula_occurrences(text, expected_equations) != expected_equations:
+    elif (
+        str(block.get("kind")) == "figure"
+        and Counter(_markdown_math_occurrences(text)) != expected_equations
+    ) or _formula_occurrences(text, expected_equations) != expected_equations:
         raise TranslationSourceError(
             "translation_source_identity_invalid",
             "translation changed formula occurrences for "
@@ -199,6 +314,34 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
                 "translation_source_identity_invalid",
                 f"translation changed link occurrences for {block['block_id']}",
             )
+        expected_citations = Counter(_internal_bibliography_links(block))
+        if (
+            _translated_internal_bibliography_links(text)
+            != expected_citations
+        ):
+            raise TranslationSourceError(
+                "translation_source_identity_invalid",
+                "translation changed internal bibliography link labels for "
+                f"{block['block_id']}",
+            )
+        expected_groups = Counter(_internal_bibliography_citation_groups(block))
+        if (
+            Counter(_markdown_internal_bibliography_citation_groups(text))
+            != expected_groups
+        ):
+            raise TranslationSourceError(
+                "translation_source_identity_invalid",
+                "translation changed internal bibliography citation groups for "
+                f"{block['block_id']}",
+            )
+        bibliography_label = _bibliography_entry_label(block)
+        if bibliography_label and not _translation_has_bibliography_label(
+            text, bibliography_label
+        ):
+            raise TranslationSourceError(
+                "translation_source_identity_invalid",
+                f"translation changed bibliography entry label for {block['block_id']}",
+            )
     if identity["asset_digest"] is not None and not str(
         identity["asset_digest"]
     ).strip():
@@ -210,7 +353,7 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
 
 def prompt_block(block: Mapping[str, Any]) -> dict[str, Any]:
     kind = str(block.get("kind"))
-    if kind == "paragraph":
+    if kind in {"paragraph", "source_note"}:
         payload = block.get("payload")
         if not isinstance(payload, Mapping):
             raise TranslationSourceError(
@@ -219,7 +362,7 @@ def prompt_block(block: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "block_id": block.get("block_id"),
             "ordinal": block.get("ordinal"),
-            "kind": "paragraph",
+            "kind": kind,
             "section_path": block.get("section_path"),
             "payload": {"text": _compact_inline_text(payload)},
             "source_identity": source_identity(block),
@@ -292,6 +435,74 @@ def _compact_inline_text(value: Mapping[str, Any]) -> str:
     return "".join(rendered)
 
 
+def _project_source_presentation(
+    block: dict[str, Any], entry: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    if entry is None:
+        return block
+    payload = block.get("payload")
+    fields = entry.get("fields")
+    if not isinstance(payload, dict) or not isinstance(fields, Sequence):
+        raise TranslationSourceError(
+            "source_block_invalid", "source presentation projection is invalid"
+        )
+    kind = str(block.get("kind"))
+    projected = dict(payload)
+    for raw_view in fields:
+        if not isinstance(raw_view, Mapping):
+            raise TranslationSourceError(
+                "source_block_invalid", "source presentation field is invalid"
+            )
+        rendered = _compact_inline_text(raw_view)
+        field = str(raw_view.get("field"))
+        if kind == "heading" and field == "text":
+            projected["text"] = rendered
+        elif kind in {"figure", "table"} and field == "caption":
+            projected["caption"] = rendered
+        elif kind == "table" and field == "table_header":
+            column = raw_view.get("column_index")
+            if not isinstance(column, int) or isinstance(column, bool):
+                raise TranslationSourceError(
+                    "source_block_invalid", "Table header projection is invalid"
+                )
+            headers = list(projected.get("headers", ()))
+            if not 0 <= column < len(headers):
+                raise TranslationSourceError(
+                    "source_block_invalid", "Table header projection is out of bounds"
+                )
+            headers[column] = rendered
+            projected["headers"] = headers
+        elif kind == "table" and field == "table_cell":
+            row_index = raw_view.get("row_index")
+            column = raw_view.get("column_index")
+            rows = [list(row) for row in projected.get("rows", ())]
+            if (
+                not isinstance(row_index, int)
+                or isinstance(row_index, bool)
+                or not isinstance(column, int)
+                or isinstance(column, bool)
+                or not 0 <= row_index < len(rows)
+                or not 0 <= column < len(rows[row_index])
+            ):
+                raise TranslationSourceError(
+                    "source_block_invalid", "Table cell projection is out of bounds"
+                )
+            rows[row_index][column] = rendered
+            projected["rows"] = rows
+    return {**block, "payload": projected}
+
+
+def _project_translation_surface(block: dict[str, Any]) -> dict[str, Any]:
+    if str(block.get("kind")) != "table":
+        return block
+    payload = block.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TranslationSourceError(
+            "source_block_invalid", "source block payload must be an object"
+        )
+    return {**block, "payload": {"caption": str(payload.get("caption", ""))}}
+
+
 def block_text(block: Mapping[str, Any]) -> str:
     """Return only human-visible source text used for literal term matching."""
 
@@ -301,7 +512,7 @@ def block_text(block: Mapping[str, Any]) -> str:
         raise TranslationSourceError(
             "source_block_invalid", "source block payload must be an object"
         )
-    if kind in {"heading", "paragraph", "code"}:
+    if kind in {"heading", "paragraph", "source_note", "code"}:
         return str(payload.get("text", ""))
     if kind == "equation":
         return str(payload.get("tex", ""))
@@ -311,11 +522,13 @@ def block_text(block: Mapping[str, Any]) -> str:
         )
     if kind == "table":
         rows = [payload.get("headers", []), *payload.get("rows", [])]
-        return "\n".join(
+        rendered_rows = [
             " | ".join(str(cell) for cell in row)
             for row in rows
             if isinstance(row, Sequence) and not isinstance(row, (str, bytes))
-        )
+        ]
+        caption = str(payload.get("caption", "")).strip()
+        return "\n".join(([caption] if caption else []) + rendered_rows)
     if kind == "figure":
         caption = str(payload.get("caption", "")).strip()
         return caption or str(payload.get("alt_text", ""))
@@ -384,7 +597,7 @@ def _extend_markdown_identity(
 ) -> None:
     equations.extend(_markdown_math_occurrences(text))
     links.extend(
-        match.group(1)
+        match.group(2)
         for match in _MARKDOWN_LINK.finditer(_without_markdown_math(text))
     )
 
@@ -418,7 +631,6 @@ def _markdown_math_spans(text: str) -> tuple[tuple[int, int, str], ...]:
             text[index] == "$"
             and not _is_escaped(text, index)
             and not text.startswith("$$", index)
-            and (index == 0 or text[index - 1] != "$")
         ):
             delimiter, closing, content_start = "$", "$", index + 1
         if delimiter is None or closing is None:
@@ -665,7 +877,7 @@ def _link_occurrences(
 ) -> Counter[str]:
     text = _without_markdown_math(text)
     markdown_targets = Counter(
-        match.group(1) for match in _MARKDOWN_LINK.finditer(text)
+        match.group(2) for match in _MARKDOWN_LINK.finditer(text)
     )
     if any(
         target not in expected or count > expected[target]
@@ -685,6 +897,191 @@ def _link_occurrences(
             )
         }
     )
+
+
+def _internal_bibliography_links(
+    block: Mapping[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    kind = str(block.get("kind"))
+    payload = block.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TranslationSourceError(
+            "source_block_invalid", "source block payload must be an object"
+        )
+    values: list[tuple[str, str]] = []
+    if kind in {"paragraph", "source_note"}:
+        _extend_internal_bibliography_inline(payload.get("inline_spans"), values)
+    elif kind == "list":
+        for item in _mapping_items(payload.get("items")):
+            _extend_internal_bibliography_inline(item.get("inline_spans"), values)
+    else:
+        texts: list[str] = []
+        if kind == "heading":
+            texts.append(str(payload.get("text", "")))
+        elif kind == "figure":
+            texts.append(str(payload.get("caption", "")))
+        elif kind == "table":
+            texts.append(str(payload.get("caption", "")))
+            texts.extend(str(item) for item in payload.get("headers", ()))
+            texts.extend(
+                str(item)
+                for row in payload.get("rows", ())
+                for item in row
+            )
+        for value in texts:
+            values.extend(_markdown_internal_bibliography_links(value))
+    return tuple(values)
+
+
+def _internal_bibliography_citation_groups(
+    block: Mapping[str, Any],
+) -> tuple[str, ...]:
+    return tuple(
+        group
+        for text in _block_markdown_values(block)
+        for group in _markdown_internal_bibliography_citation_groups(text)
+    )
+
+
+def _block_markdown_values(block: Mapping[str, Any]) -> tuple[str, ...]:
+    kind = str(block.get("kind"))
+    payload = block.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TranslationSourceError(
+            "source_block_invalid", "source block payload must be an object"
+        )
+    if kind in {"paragraph", "source_note"}:
+        return (_compact_inline_text(payload),)
+    if kind == "list":
+        return tuple(
+            _compact_inline_text(item)
+            for item in _mapping_items(payload.get("items"))
+        )
+    if kind == "heading":
+        return (str(payload.get("text", "")),)
+    if kind == "figure":
+        return (str(payload.get("caption", "")),)
+    if kind == "table":
+        return (
+            str(payload.get("caption", "")),
+            *(str(item) for item in payload.get("headers", ())),
+            *(
+                str(item)
+                for row in payload.get("rows", ())
+                for item in row
+            ),
+        )
+    return ()
+
+
+def _extend_internal_bibliography_inline(
+    raw_spans: Any, values: list[tuple[str, str]]
+) -> None:
+    for span in _mapping_items(raw_spans):
+        target = str(span.get("target", ""))
+        if (
+            str(span.get("kind")) == "link"
+            and _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(target)
+        ):
+            values.append((target, str(span.get("text", ""))))
+
+
+def _markdown_internal_bibliography_links(
+    text: str,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (match.group(2), match.group(1))
+        for match in _MARKDOWN_LINK.finditer(_without_markdown_math(text))
+        if _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(match.group(2))
+    )
+
+
+def _markdown_internal_bibliography_citation_groups(
+    text: str,
+) -> tuple[str, ...]:
+    value = _without_markdown_math(text)
+    matches = tuple(
+        match
+        for match in _MARKDOWN_LINK.finditer(value)
+        if _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(match.group(2))
+    )
+    groups: list[str] = []
+    index = 0
+    separators = {" ", "\t", "\n", ",", ";", "；"}
+    while index < len(matches):
+        first = matches[index]
+        last = first
+        next_index = index + 1
+        while next_index < len(matches):
+            candidate = matches[next_index]
+            between = value[last.end() : candidate.start()]
+            if not between or any(character not in separators for character in between):
+                break
+            last = candidate
+            next_index += 1
+        start = first.start()
+        end = last.end()
+        bracketed = (
+            start > 0
+            and value[start - 1] == "["
+            and not _is_escaped(value, start - 1)
+            and end < len(value)
+            and value[end] == "]"
+            and not _is_escaped(value, end)
+        )
+        if bracketed:
+            groups.append(text[start - 1 : end + 1])
+        elif last is not first and all(
+            match.group(1).strip().isdigit()
+            for match in matches[index:next_index]
+        ):
+            groups.append(text[start:end])
+        index = next_index
+    return tuple(groups)
+
+
+def _bibliography_entry_label(block: Mapping[str, Any]) -> str | None:
+    if str(block.get("kind")) != "list":
+        return None
+    locator = block.get("locator")
+    if not isinstance(locator, Mapping):
+        return None
+    source_id = str(locator.get("source_id", ""))
+    if re.fullmatch(r"bib\.bib[1-9][0-9]*", source_id) is None:
+        return None
+    items = _mapping_items(
+        block.get("payload", {}).get("items")
+        if isinstance(block.get("payload"), Mapping)
+        else None
+    )
+    if len(items) != 1:
+        raise TranslationSourceError(
+            "source_block_invalid", "bibliography block must contain one item"
+        )
+    label_match = re.match(
+        r"\[([1-9][0-9]*)\]",
+        str(items[0].get("text", "")).lstrip(),
+    )
+    if label_match is None:
+        raise TranslationSourceError(
+            "source_block_invalid",
+            "bibliography block is missing its authored numeric label",
+        )
+    return label_match.group(0)
+
+
+def _translation_has_bibliography_label(text: str, label: str) -> bool:
+    value = str(text).lstrip()
+    marker = re.match(r"(?:[-+*]|[1-9][0-9]*[.)])\s+", value)
+    if marker is not None:
+        value = value[marker.end() :]
+    return value == label or value.startswith(label + " ")
+
+
+def _translated_internal_bibliography_links(
+    text: str,
+) -> Counter[tuple[str, str]]:
+    return Counter(_markdown_internal_bibliography_links(text))
 
 
 def _without_markdown_math(text: str) -> str:
@@ -733,6 +1130,8 @@ __all__ = [
     "resolve_translation_source",
     "same_primary_language",
     "source_blocks",
+    "source_note_blocks",
+    "source_note_link_markdown",
     "source_identity",
     "validate_translation_text",
 ]

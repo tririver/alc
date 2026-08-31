@@ -780,6 +780,130 @@ def test_invalid_language_output_gets_one_fresh_retry(tmp_path):
     assert len(set(tasks.task_ids)) == 2
 
 
+def test_full_translation_publishes_source_note_revision_and_caption_only_table(
+    tmp_path: Path,
+) -> None:
+    html = tmp_path / "source.html"
+    html.write_text(
+        """
+        <article>
+          <p id="P1">Alpha<span class="ltx_note ltx_role_footnote" id="footnote1">
+            <sup class="ltx_note_mark">1</sup><span class="ltx_note_outer">
+              <span class="ltx_note_content"><sup class="ltx_note_mark">1</sup>
+                Authored note body.
+              </span>
+            </span>
+          </span>.</p>
+          <p id="P2">Resource<span class="ltx_note ltx_role_footnote" id="footnote2">
+            <sup class="ltx_note_mark">2</sup><span class="ltx_note_outer">
+              <span class="ltx_note_content"><sup class="ltx_note_mark">2</sup>
+                <a href="https://example.test/original">https://example.test/original</a>
+              </span>
+            </span>
+          </span>.</p>
+          <table id="T1"><caption>Table 1: Measurements.</caption>
+            <tr><th>System</th><th>Meaning</th></tr>
+            <tr><td>A</td><td>Natural-language cell</td></tr>
+          </table>
+        </article>
+        """,
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "document-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(html)
+        )
+    )
+    tasks = FakeTasks(translation_prefix="译：")
+    context = _context(tmp_path, "source-note-and-table")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    table_prompt = next(
+        block
+        for window in tasks.translation_blocks
+        for block in window
+        if block["kind"] == "table"
+    )
+    assert table_prompt["payload"] == {"caption": "Table 1: Measurements."}
+    note_prompt = next(
+        block
+        for window in tasks.translation_blocks
+        for block in window
+        if block["kind"] == "source_note"
+    )
+    assert note_prompt["payload"] == {"text": "Authored note body."}
+    prompted_note_ids = {
+        block["block_id"]
+        for window in tasks.translation_blocks
+        for block in window
+        if block["kind"] == "source_note"
+    }
+    assert prompted_note_ids == {"source-note:footnote1"}
+
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    note_revision = next(
+        revision
+        for revision in revisions
+        if "source_note_translation" in revision.provenance
+    )
+    note_contract = note_revision.provenance["source_note_translation"]
+    assert note_contract == {
+        "schema_version": "alc.render.source_note_translation.v1",
+        "note_id": "footnote1",
+    }
+    owner = next(block for block in source.rich.blocks if block.kind.value == "paragraph")
+    assert note_revision.anchor.target_id == owner.block_id
+    link_note_revision = next(
+        revision
+        for revision in revisions
+        if revision.provenance.get("source_note_translation", {}).get("note_id")
+        == "footnote2"
+    )
+    assert link_note_revision.markdown_body == "<https://example.test/original>\n"
+    table_revision = next(
+        revision
+        for revision in revisions
+        if revision.anchor.target_id
+        == next(
+            block.block_id
+            for block in source.rich.blocks
+            if block.kind.value == "table"
+        )
+    )
+    assert table_revision.markdown_body == "译：Table 1: Measurements.\n"
+    assert "Natural-language cell" not in table_revision.markdown_body
+
+
 def test_language_second_invalid_output_pauses_and_resumes_without_third_call(
     tmp_path,
 ):
