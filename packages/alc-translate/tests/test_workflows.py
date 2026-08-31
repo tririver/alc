@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import alc_translate.source as source_module
 
 from ac_jobs import (
     ArtifactDigest,
@@ -783,6 +784,8 @@ def test_invalid_language_output_gets_one_fresh_retry(tmp_path):
 def test_full_translation_publishes_source_note_revision_and_caption_only_table(
     tmp_path: Path,
 ) -> None:
+    if not callable(getattr(source_module._ac_document, "source_notes", None)):
+        pytest.skip("requires AC Foundation source-note producer")
     html = tmp_path / "source.html"
     html.write_text(
         """

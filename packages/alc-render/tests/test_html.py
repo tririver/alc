@@ -21,9 +21,6 @@ from ac_document import (
     SourceLocator,
     SourceOrigin,
     SourceOriginKind,
-    SOURCE_TARGET_MANIFEST_SCHEMA,
-    SOURCE_NOTES_METADATA_KEY,
-    SOURCE_NOTES_SCHEMA,
 )
 
 from alc_render import (
@@ -67,6 +64,30 @@ from alc_render.workspace import (
     write_layer,
     write_publication,
 )
+
+
+SOURCE_TARGET_MANIFEST_SCHEMA = "ac.document.source_target_manifest.v1"
+SOURCE_NOTES_METADATA_KEY = "source_notes"
+SOURCE_NOTES_SCHEMA = "ac.document.source_notes.v1"
+
+
+def _test_metadata_accessor(key: str):
+    def accessor(document: RichDocument):
+        return document.metadata.get(key)
+
+    return accessor
+
+
+if html_module._source_target_manifest is None:
+    html_module._source_target_manifest = _test_metadata_accessor(
+        "source_target_manifest"
+    )
+if html_module._source_notes is None:
+    html_module._source_notes = _test_metadata_accessor("source_notes")
+if html_module._source_presentation is None:
+    html_module._source_presentation = _test_metadata_accessor(
+        "source_presentation"
+    )
 
 
 def _rich_document(asset_payload: bytes | None = None) -> RichDocument:

@@ -25,6 +25,7 @@ from alc_translate.source import (
     prompt_block,
     source_blocks,
     source_identity,
+    source_note_link_markdown,
     validate_translation_text,
 )
 
@@ -418,7 +419,9 @@ def test_table_identity_extracts_markdown_math_and_links() -> None:
 def test_source_presentation_accessor_is_optional_only_when_metadata_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delattr(source_module._ac_document, "source_presentation")
+    monkeypatch.delattr(
+        source_module._ac_document, "source_presentation", raising=False
+    )
 
     assert source_module._source_presentation_or_none(
         SimpleNamespace(metadata={})
@@ -459,6 +462,10 @@ def test_figure_identity_uses_caption_without_exposing_asset_target() -> None:
 
 
 def test_source_blocks_project_authoritative_figure_caption_math() -> None:
+    if not callable(
+        getattr(source_module._ac_document, "source_presentation", None)
+    ):
+        pytest.skip("requires AC Foundation source-presentation producer")
     source_bytes = b"<article><figure>Figure: Theta.</figure></article>"
     source = SourceArtifact(
         SourceFormat.HTML,
@@ -573,6 +580,29 @@ def test_source_blocks_project_authoritative_figure_caption_math() -> None:
         match="changed formula occurrences",
     ):
         validate_translation_text(r"图：\Theta。", projected)
+
+
+def test_link_only_source_note_preserves_visible_url_and_target() -> None:
+    url = "https://example.test/original"
+    block = {
+        "block_id": "source-note:note-1",
+        "kind": "source_note",
+        "payload": {
+            "text": url,
+            "inline_spans": [
+                {
+                    "kind": "link",
+                    "start": 0,
+                    "end": len(url),
+                    "text": url,
+                    "target": url,
+                }
+            ],
+        },
+    }
+
+    assert source_note_link_markdown(block) == f"<{url}>"
+    validate_translation_text(f"<{url}>", block)
 
 
 def test_internal_bibliography_link_labels_are_source_authoritative() -> None:
