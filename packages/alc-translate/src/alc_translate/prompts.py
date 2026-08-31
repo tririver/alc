@@ -9,8 +9,8 @@ from typing import Any
 
 LANGUAGE_PROMPT_VERSION = "alc.translate.language_prompt.v1"
 GLOSSARY_PROMPT_VERSION = "alc.translate.glossary_prompt.v4"
-TRANSLATION_PROMPT_VERSION = "alc.translate.blocks_prompt.v8"
-REVIEW_PROMPT_VERSION = "alc.translate.review_prompt.v7"
+TRANSLATION_PROMPT_VERSION = "alc.translate.blocks_prompt.v11"
+REVIEW_PROMPT_VERSION = "alc.translate.review_prompt.v9"
 
 
 def _closed(
@@ -151,12 +151,16 @@ def translation_prompt(
         """
 Translate every supplied source block into the target language. Return each
 block ID exactly once and in source order. Keep each block indivisible. Preserve
-formula occurrences, code text, and link targets exactly, and use the supplied
-preferred glossary translations consistently. A supplied figure contains only
-an authored visible caption; translate that caption without inventing an image
-description. Structural figures and all asset identity remain local and are
-not supplied for translation. Copy each block_id exactly; the caller attaches
-source identity locally. Return only the translation layer: do not add
+formulas, code, link targets, internal bibliography citation brackets and
+separators, and bibliography entry labels exactly; use the preferred glossary
+translations consistently. A supplied Figure or Table contains only its
+authored visible caption; translate that caption without inventing an image
+description or reproducing Table cells. Table geometry and data, structural
+Figures, and all asset identity remain local and are not supplied for
+translation. A source_note is an authored note body and must be translated in
+full. A note whose entire body is one link is preserved locally and is not
+supplied to the model. Copy each block_id exactly; the caller attaches source identity locally.
+Return only the translation layer: do not add
 explanations, guides, summaries, or learning material.
 Translate every language-bearing part of each block from beginning to end;
 never omit, summarize, or start partway through. A source block may begin or
@@ -185,8 +189,9 @@ def review_prompt(
         """
 Review only the supplied translation layer for scientific accuracy,
 terminology consistency, and fluency. Return text replacement patches only
-when needed. Patch block IDs must already exist. Do not change coverage,
-ordering, source identity, formulas, code, links, assets, or glossary entries.
+when needed. Patch block IDs must already exist. Do not change coverage, order,
+source identity, formulas, code, links, citation grouping or labels, assets, or
+glossary entries.
 Do not add commentary to translated text. An empty patch list is valid.
 Compare every source block with its translation from beginning to end. Patch
 any omission, summary, or truncation, including source fragments that begin or

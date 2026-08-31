@@ -84,6 +84,31 @@ mode is an orchestration result for callers such as Companion and cannot
 replace `translation.layer.json`.
 Source figures or media with no language-bearing caption or alt text do not
 produce visible translation fragments; their assets remain source-owned.
+When `ac-document` supplies authoritative `source_presentation` rich fields,
+translation prompts project heading text and Figure/Table captions from those
+typed spans so TeX and link identity are not flattened into plain Unicode.
+Table geometry and scientific cell data remain source-owned in the Reader;
+only the authored caption is translated, preventing a second untyped copy of
+the Table. Validated `source_notes` are scheduled as separate translation units
+and published with exact `source_note_translation = {schema_version,note_id}`
+provenance bound to the owner block. Present metadata is validated by
+`ac-document`; absent metadata keeps the legacy plain-block projection.
+When a source note consists of exactly one authored link, the translator
+bypasses the model and preserves its visible label and exact target; a URL
+label therefore remains the original URL instead of becoming a translated
+generic word such as `link`.
+Canonical translated heading Markdown
+uses the RichBlock semantic level, including exact abstract and acknowledgements
+normalization supplied by `ac-document`; raw source tag depth is not inferred in
+the translator. Internal bibliography links preserve their exact target,
+source-visible label, surrounding citation brackets/separators, and bibliography
+entry prefix (for example, `[8, 12]` remains one group and reference `[30]`
+retains its ordinal rather than expanding to an author-year title).
+LaTeXML `bib.bib*` IDs remain target identities and are not interpreted as the
+visible bibliography ordinal; the authored list prefix supplies that label.
+Comma-adjacent narrative author links retain their individual labels/targets
+without being frozen as a numeric citation group. Adjacent inline math spans
+are validated as separate formulas even when their Markdown delimiters touch.
 
 Generation and resume commands accept `--host-authority`. Set
 `<host-authority>` once per run: use `unrestricted` only when the host
@@ -100,13 +125,13 @@ without another provider call. Deleting an exhausted retry candidate does not
 grant a third automatic generation attempt.
 
 When a model response is structurally valid JSON but violates a
-machine-checkable language, term, block, formula, link, or review identity or
-coverage contract, ALC makes one fresh full-generation attempt with validation
-feedback. A second unusable response pauses with both attempts and an editable
-candidate preserved. Completed windows and a valid pre-review translation stay
-available. Provider, authority, binding, input-budget, and corrupt-artifact
-failures are not semantic-output retries. Translation quality and scientific
-judgment are reviewer concerns, not program-invalid output.
+machine-checkable language, term, block, formula, link target/label, or review
+identity or coverage contract, ALC makes one fresh full-generation attempt
+with validation feedback. A second unusable response pauses with both attempts
+and an editable candidate preserved. Completed windows and a valid pre-review
+translation stay available. Provider, authority, binding, input-budget, and
+corrupt-artifact failures are not semantic-output retries. Translation quality
+and scientific judgment are reviewer concerns, not program-invalid output.
 
 ## Tests
 
