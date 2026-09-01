@@ -23,7 +23,10 @@ HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16 = (
 HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16 = (
     "alc.companion.chapter-learning-review-prompt.v16"
 )
-AUTHOR_IDENTITY_PROMPT_VERSION = "alc.companion.author-identity-prompt.v3"
+AUTHOR_IDENTITY_PROMPT_VERSION = "alc.companion.author-identity-prompt.v4"
+HISTORICAL_AUTHOR_IDENTITY_PROMPT_VERSION_V3 = (
+    "alc.companion.author-identity-prompt.v3"
+)
 EDITORIAL_PROPOSER_PROMPT_VERSION = (
     "alc.companion.cross-chapter-editorial-proposer-prompt.v1"
 )
@@ -265,7 +268,9 @@ optional host-level workflow and is not performed by alc-companion itself.
 When `source_commands.availability` is `exact`, the source body is not embedded
 in the loop context: run the supplied commands for exact numbered parts,
 complete current sections, the complete current chapter, search, and
-source inspection. Read the complete original chapter once before drafting. When
+source inspection. For a host request, copy the selected command's `shell`
+value exactly into `host_request.instruction`, without commentary or another
+command. Read the complete original chapter once before drafting. When
 `source_commands.translation.availability` is `exact`, also run its
 `complete-current-chapter` command and read the complete frozen translation
 before drafting. For every local companion, confirm its placement and wording
@@ -391,7 +396,9 @@ allowed when the fact itself is negative.
 When `source_commands.availability` is `exact`, run the supplied original-source
 `complete-current-chapter` command before judging anything. When
 `source_commands.translation.availability` is `exact`, also run its
-`complete-current-chapter` command before judging anything. Then run both
+`complete-current-chapter` command before judging anything. For a host request,
+copy the selected command's `shell` value exactly into
+`host_request.instruction`, without commentary or another command. Then run both
 matching exact `part-N` commands for every local companion and both matching
 `section-N-complete` commands for every section guide. When source
 availability is `fallback_only`, inspect the corresponding complete chapter
@@ -531,10 +538,42 @@ def author_identity_prompt(
     title: str,
     auto_candidates: Sequence[Mapping[str, Any]],
     block_access: Sequence[Mapping[str, Any]] = (),
+    front_matter_evidence: Sequence[Mapping[str, Any]] = (),
+    version: str = AUTHOR_IDENTITY_PROMPT_VERSION,
 ) -> str:
-    return _prompt(
+    if version not in {
         AUTHOR_IDENTITY_PROMPT_VERSION,
+        HISTORICAL_AUTHOR_IDENTITY_PROMPT_VERSION_V3,
+    }:
+        raise ValueError("unsupported author identity prompt contract")
+    evidence_instruction = (
         """
+        All available author evidence is embedded in `front_matter_evidence`.
+        Do not request a host action or attempt to read another file. If the
+        embedded evidence is insufficient, return an empty, non-high-confidence
+        result.
+        """
+        if version == AUTHOR_IDENTITY_PROMPT_VERSION
+        else """
+        Prefer the bounded front-matter line ranges in `block_access`. If they
+        are insufficient, use a precise search or inspect a complete relevant
+        chapter. Avoid reading the whole book when narrower evidence resolves
+        the identity.
+        """
+    )
+    payload = {
+        "title": title,
+        "auto_candidates": list(auto_candidates),
+        "block_access": [dict(item) for item in block_access],
+        "source_inputs": _source_input_manifest(),
+    }
+    if version == AUTHOR_IDENTITY_PROMPT_VERSION:
+        payload["front_matter_evidence"] = [
+            dict(item) for item in front_matter_evidence
+        ]
+    return _prompt(
+        version,
+        f"""
         Verify publication authorship from the supplied title, verified source
         inputs, and automatically parsed candidates with their bases. Author names are
         publication identity, not a constraint on Companion interpretation or
@@ -545,19 +584,12 @@ def author_identity_prompt(
         at medium or low confidence, authors must be empty. Give the exact
         source anchors that support a high-confidence attribution. Explain the
         basis even when authors is empty. Never invent source block IDs.
-        Prefer the bounded front-matter line ranges in `block_access`. If they
-        are insufficient, use a precise search or inspect a complete relevant
-        chapter. Avoid reading the whole book when narrower evidence resolves
-        the identity. Every anchor must be a real source block ID. If the
+        {evidence_instruction}
+        Every anchor must be a real source block ID. If the
         inspected source does not establish authorship, return an empty,
         non-high-confidence result.
         """,
-        {
-            "title": title,
-            "auto_candidates": list(auto_candidates),
-            "block_access": [dict(item) for item in block_access],
-            "source_inputs": _source_input_manifest(),
-        },
+        payload,
     )
 
 
@@ -619,6 +651,7 @@ def _instruction_contract(version: str, instruction: str) -> str:
 
 __all__ = [
     "AUTHOR_IDENTITY_PROMPT_VERSION",
+    "HISTORICAL_AUTHOR_IDENTITY_PROMPT_VERSION_V3",
     "AUTHOR_IDENTITY_SCHEMA",
     "CHAPTER_GUIDE_PROMPT_VERSION",
     "CHAPTER_GUIDE_PROPOSAL_SCHEMA",

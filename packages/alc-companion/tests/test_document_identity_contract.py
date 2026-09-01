@@ -66,7 +66,7 @@ def test_current_request_and_recipe_round_trip_only(tmp_path: Path) -> None:
         "schema_version": "alc.companion.generation_recipe.v19",
         "model": {"provider": "auto", "model": None, "tier": "medium"},
         "approx_term_count": 50,
-        "author_identity_prompt": "alc.companion.author-identity-prompt.v3",
+        "author_identity_prompt": "alc.companion.author-identity-prompt.v4",
         "chapter_guide_prompt": "alc.companion.chapter-learning-prompt.v18",
         "chapter_guide_review_prompt": (
             "alc.companion.chapter-learning-review-prompt.v18"

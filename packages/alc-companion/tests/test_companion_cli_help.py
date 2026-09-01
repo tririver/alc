@@ -4,7 +4,54 @@ import json
 
 import pytest
 
+import alc_companion.request_contracts as request_contracts
+from ac_llm import ModelSelection
 from alc_companion.cli import main
+from alc_companion.request_contracts import (
+    CompanionGenerationRecipe,
+    freeze_generation_recipe,
+)
+
+
+def test_build_freezes_auto_provider_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AC_AGENT_HOST", "codex")
+    frozen = freeze_generation_recipe(
+        CompanionGenerationRecipe(model=ModelSelection())
+    )
+
+    assert frozen.model == ModelSelection(
+        provider="codex",
+        model="gpt-5.6-luna",
+        tier="medium",
+    )
+
+
+def test_build_freezes_missing_model_for_explicit_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        request_contracts,
+        "resolve_model_selection",
+        lambda selection: ModelSelection(
+            provider=selection.provider,
+            model="gpt-5.6-luna",
+            tier="medium",
+        ),
+    )
+
+    frozen = freeze_generation_recipe(
+        CompanionGenerationRecipe(
+            model=ModelSelection(provider="codex", model=None, tier="high")
+        )
+    )
+
+    assert frozen.model == ModelSelection(
+        provider="codex",
+        model="gpt-5.6-luna",
+        tier="medium",
+    )
 
 
 @pytest.mark.parametrize(
@@ -63,6 +110,13 @@ def test_build_exposes_optional_cross_chapter_editorial_review(
 ) -> None:
     assert main(["build", "--help"]) == 0
     assert "--cross-chapter-editorial-review" in capsys.readouterr().out
+
+
+def test_build_requires_explicit_new_lineage_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["build", "--help"]) == 0
+    assert "--new-lineage" in capsys.readouterr().out
 
 
 def test_usage_error_points_to_contextual_help(

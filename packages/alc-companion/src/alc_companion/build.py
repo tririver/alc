@@ -44,6 +44,8 @@ from ac_document import (
     DocumentStructureCache,
     EquationLabelReviewService,
     PdftoppmFullPageRenderer,
+    RichBlock,
+    RichBlockKind,
     RichDocument,
     SourceFormat,
     SourceOrigin,
@@ -68,18 +70,18 @@ from ac_proposer_reviewer import (
     WorkerSpec,
 )
 from ac_proposer_reviewer import BATCH_SCHEMA_VERSION, decode_batch_result
+from alc_render import (
+    HTMLRenderError,
+    Publication,
+    render_publication_html,
+    write_publication,
+)
 
 from ._build_support import (
     mapping,
     mapping_list,
     read_json,
     task_id,
-)
-from .generation_validation import (
-    CompanionContentError,
-    validate_author_identity,
-    validate_chapter_guide,
-    validate_chapter_guide_review_audit,
 )
 from .editorial_review import (
     EDITORIAL_PROPOSAL_SCHEMA,
@@ -89,6 +91,13 @@ from .editorial_review import (
     resolve_editorial_review,
     unavailable_editorial_review,
 )
+from .generation_validation import (
+    CompanionContentError,
+    validate_author_identity,
+    validate_chapter_guide,
+    validate_chapter_guide_review_audit,
+)
+from .host_broker import CompanionSourceHostBroker
 from .llm_runtime import (
     CompanionLLMError,
     SemanticTaskCompleted,
@@ -130,6 +139,7 @@ from .request_contracts import (
     CompanionExecutionOptions,
     CompanionGenerationRecipe,
     encode_handler_semantic_input,
+    freeze_generation_recipe,
     normalize_handler_semantic_input,
 )
 from .source_planning import (
@@ -157,6 +167,8 @@ _MODEL_SOURCE_INDEX_ARTIFACT = "source/model-index"
 _MODEL_TRANSLATION_ROOT = "translation/chapters"
 _ORIGINAL_SOURCE_ARTIFACT = "source/original"
 _AUTHOR_IDENTITY_ARTIFACT = "identity/authors"
+_PROGRESS_PLAN_ARTIFACT = "diagnostics/progress-plan"
+_GLOSSARY_READY_ARTIFACT = "diagnostics/glossary-ready"
 _RESULT_ARTIFACT = "result"
 _TRANSLATION_LANE_CONTRACT = "alc.companion.translation_lane.v1"
 _EDITORIAL_INDEX_ARTIFACT = "editorial/index"
@@ -184,6 +196,15 @@ class CompanionBuildHandler:
         self.recipe = recipe
         self.execution = execution
         self.llm_options = _companion_llm_options(execution)
+        self._source_host_broker: CompanionSourceHostBroker | None = None
+        if self.llm_options.host_broker is None:
+            self._source_host_broker = CompanionSourceHostBroker(
+                self.llm_options.runtime_environment
+            )
+            self.llm_options = replace(
+                self.llm_options,
+                host_broker=self._source_host_broker,
+            )
         self.task_service = task_service or LLMTaskService()
         self.translation_adapter = translation_adapter or AlcTranslateAdapter(
             self.task_service,
@@ -201,12 +222,19 @@ class CompanionBuildHandler:
         except (TypeError, ValueError):
             durable_semantic_input = None
         if durable_semantic_input != self.semantic_input():
-            return Failed(
-                RunError(
-                    "companion_build_binding_mismatch",
-                    "Handler bindings do not match the durable build request.",
-                )
+            frozen_recipe = freeze_generation_recipe(self.recipe)
+            frozen_semantic_input = encode_handler_semantic_input(
+                self.request,
+                frozen_recipe,
             )
+            if durable_semantic_input != frozen_semantic_input:
+                return Failed(
+                    RunError(
+                        "companion_build_binding_mismatch",
+                        "Handler bindings do not match the durable build request.",
+                    )
+                )
+            self.recipe = frozen_recipe
         existing = context.artifacts.find(_RESULT_ARTIFACT)
         if existing is not None:
             return Succeeded(existing)
@@ -246,6 +274,12 @@ class CompanionBuildHandler:
                 ) from exc
             identity = resolve_document_identity(source)
             title = identity.title or reader_labels["untitled_document"]
+            self._ensure_partial_reader(
+                context,
+                source,
+                title=title,
+                reader_labels=reader_labels,
+            )
             authors_outcome = self._authors(
                 context,
                 resume_input,
@@ -281,6 +315,11 @@ class CompanionBuildHandler:
                     "language_result_invalid",
                     "alc-translate language mode is invalid",
                 )
+            self._freeze_progress_plan(
+                context,
+                chapters,
+                translation_required=translation_required,
+            )
             document_inputs = model_inputs
 
             glossary: dict[str, Any]
@@ -312,6 +351,7 @@ class CompanionBuildHandler:
                 # Same-primary-language runs deliberately never invoke keyword,
                 # glossary, or translation work.
                 glossary = _empty_glossary(source)
+            self._freeze_glossary_ready(context, glossary)
 
             chapters_outcome = self._chapter_lanes(
                 context,
@@ -648,10 +688,31 @@ class CompanionBuildHandler:
                 block_access=model_block_access_index(
                     source, author_block_ids
                 ),
+                front_matter_evidence=_author_front_matter_evidence(
+                    source,
+                    block_ids=author_block_ids,
+                ),
+                version=getattr(
+                    self.recipe,
+                    "author_identity_prompt",
+                    AUTHOR_IDENTITY_PROMPT_VERSION,
+                ),
             ),
             JsonOutput(AUTHOR_IDENTITY_SCHEMA, repair="format"),
             self.recipe.model,
             inputs=inputs,
+        )
+        fallback_identity = validate_author_identity(
+            {
+                "authors": [],
+                "confidence": "low",
+                "basis": (
+                    "Publication authorship could not be verified from the "
+                    "bounded source evidence, so authors are omitted."
+                ),
+                "anchor_block_ids": [],
+            },
+            block_ids=[item.block_id for item in source.blocks],
         )
         outcome = execute_semantically_validated_task(
             self.task_service,
@@ -665,6 +726,7 @@ class CompanionBuildHandler:
             ),
             resume_input=resume_input,
             options=self.llm_options,
+            fallback=fallback_identity,
         )
         if isinstance(outcome, Paused):
             return outcome
@@ -693,6 +755,106 @@ class CompanionBuildHandler:
             if value["confidence"] == "high"
             else ()
         )
+
+    def _freeze_progress_plan(
+        self,
+        context: RunContext,
+        chapters: Sequence[SourceChapter],
+        *,
+        translation_required: bool,
+    ) -> None:
+        document = {
+            "schema_version": "alc.companion.progress_plan.v1",
+            "provider": self.recipe.model.provider,
+            "model": self.recipe.model.model,
+            "tier": self.recipe.model.tier,
+            "translation_required": translation_required,
+            "chapters": [
+                {
+                    "chapter_id": chapter.chapter_id,
+                    "guide_required": chapter.generate_guide,
+                }
+                for chapter in chapters
+            ],
+        }
+        existing = context.artifacts.find(_PROGRESS_PLAN_ARTIFACT)
+        if existing is None:
+            context.artifacts.publish_json(_PROGRESS_PLAN_ARTIFACT, document)
+            return
+        if read_json(context, existing, "progress plan") != document:
+            raise CompanionContentError(
+                "progress_plan_mismatch",
+                "Frozen Companion progress plan differs on replay.",
+            )
+
+    def _freeze_glossary_ready(
+        self,
+        context: RunContext,
+        glossary: Mapping[str, Any],
+    ) -> None:
+        document = {
+            "schema_version": "alc.companion.glossary_ready.v1",
+            "glossary_sha256": hashlib.sha256(
+                canonical_json_bytes(dict(glossary))
+            ).hexdigest(),
+        }
+        existing = context.artifacts.find(_GLOSSARY_READY_ARTIFACT)
+        if existing is None:
+            context.artifacts.publish_json(_GLOSSARY_READY_ARTIFACT, document)
+            return
+        if read_json(context, existing, "glossary readiness") != document:
+            raise CompanionContentError(
+                "glossary_ready_mismatch",
+                "Frozen glossary readiness differs on replay.",
+            )
+
+    def _ensure_partial_reader(
+        self,
+        context: RunContext,
+        source: RichDocument,
+        *,
+        title: str,
+        reader_labels: Mapping[str, str],
+    ) -> None:
+        root = context.run_directory / "partial-reader"
+        publication_path = root / "publication.json"
+        html_path = root / "companion.html"
+        if publication_path.is_file() and html_path.is_file():
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        publication = Publication(
+            source,
+            labels=dict(reader_labels),
+            reader_profile={
+                "title": title,
+                "authors": [],
+                "source_language": "unknown",
+                "target_language": self.request.target_language,
+                "translation_mode": "pending",
+                "build_state": "partial_source_only",
+            },
+        )
+        write_publication(publication_path, publication)
+        paper = AcDocumentService(
+            cache_root=self.execution.document_cache_root
+        )
+
+        def load_asset(digest: str) -> bytes | None:
+            try:
+                return paper.repository.read_asset_bytes(
+                    paper.repository.get_asset(digest)
+                )
+            except (OSError, SourceRepositoryError):
+                return None
+
+        try:
+            render_publication_html(
+                publication_path,
+                html_path,
+                asset_loader=load_asset,
+            )
+        except (HTMLRenderError, OSError):
+            html_path.unlink(missing_ok=True)
 
     def _prepare_source(
         self,
@@ -1486,6 +1648,8 @@ class CompanionBuildHandler:
             translation_index,
             cache_root=self.execution.document_cache_root,
         )
+        if self._source_host_broker is not None:
+            self._source_host_broker.register_commands(source_commands)
         return {
             "target_language": self.request.target_language,
             "language_result": dict(language_identity),
@@ -2355,6 +2519,79 @@ def _companion_llm_options(
         execution.llm,
         runtime_environment=AcRuntimeEnvironment(values),
     )
+
+
+def _author_front_matter_evidence(
+    source: RichDocument,
+    *,
+    block_ids: Sequence[str],
+    max_bytes: int = 12_000,
+) -> tuple[dict[str, str], ...]:
+    """Embed bounded visible front matter so authorship needs no host read."""
+
+    selected = set(block_ids)
+    evidence: list[dict[str, str]] = []
+    for block in source.blocks:
+        if block.block_id not in selected:
+            continue
+        text = _author_evidence_text(block).strip()
+        if not text:
+            continue
+        entry = {"block_id": block.block_id, "text": text}
+        if len(canonical_json_bytes([*evidence, entry])) <= max_bytes:
+            evidence.append(entry)
+            continue
+        available = _bounded_evidence_text(
+            evidence,
+            block_id=block.block_id,
+            text=text,
+            max_bytes=max_bytes,
+        )
+        if available:
+            evidence.append(
+                {"block_id": block.block_id, "text": available}
+            )
+        break
+    return tuple(evidence)
+
+
+def _bounded_evidence_text(
+    evidence: Sequence[Mapping[str, str]],
+    *,
+    block_id: str,
+    text: str,
+    max_bytes: int,
+) -> str:
+    low = 0
+    high = len(text)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        candidate = text[:midpoint].rstrip()
+        entry = {"block_id": block_id, "text": candidate}
+        if len(canonical_json_bytes([*evidence, entry])) <= max_bytes:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return text[:low].rstrip()
+
+
+def _author_evidence_text(block: RichBlock) -> str:
+    payload = block.payload
+    if block.kind in {
+        RichBlockKind.HEADING,
+        RichBlockKind.PARAGRAPH,
+        RichBlockKind.CODE,
+    }:
+        return str(payload["text"])
+    if block.kind is RichBlockKind.LIST:
+        return "\n".join(str(item["text"]) for item in payload["items"])
+    if block.kind is RichBlockKind.TABLE:
+        caption = str(payload["caption"])
+        headers = " | ".join(str(item) for item in payload["headers"])
+        return "\n".join(item for item in (caption, headers) if item)
+    if block.kind is RichBlockKind.FIGURE:
+        return str(payload["caption"])
+    return ""
 
 
 def validate_build_diagnostics(value: Mapping[str, Any]) -> None:

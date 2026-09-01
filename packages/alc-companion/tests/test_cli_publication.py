@@ -6,11 +6,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from ac_jobs import CommandResult, CommandStatus, RunStatus
+from ac_jobs import (
+    Awaiting,
+    CommandResult,
+    CommandStatus,
+    ResumeReason,
+    RunSnapshot,
+    RunStatus,
+)
 from alc_render import BrowserValidation, HTMLRenderError
 
 from alc_companion import cli
 from alc_companion.project import CompanionProjectPaths
+from alc_companion.project import CompanionProjectError
+from alc_companion.service import _next_action, _translation_fallback_summary
 
 
 class _Service:
@@ -23,6 +32,9 @@ class _Service:
 
     def build_diagnostics(self, _run_id: str) -> None:
         return None
+
+    def progress(self, _run_id: str) -> dict[str, object]:
+        return {"phase": "completed"}
 
     def publication(self, _run_id: str) -> object:
         return self._publication
@@ -87,6 +99,106 @@ def test_status_does_not_advertise_stale_html(
         item.code == "standalone_html_stale"
         for item in result.warnings
     )
+
+
+def test_build_refuses_implicit_selected_lineage_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = CompanionProjectPaths.open(tmp_path / "project")
+    paths.select_run("existing-run")
+    monkeypatch.setattr(cli, "require_translation_runtime", lambda: None)
+    monkeypatch.setattr(
+        cli.CompanionProjectPaths, "open", lambda _value: paths
+    )
+    monkeypatch.setattr(cli, "AcDocumentService", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "_resolve_source",
+        lambda *_args, **_kwargs: (object(), (), ()),
+    )
+    monkeypatch.setattr(cli, "CompanionBuildRequest", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        cli, "CompanionGenerationRecipe", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(cli, "freeze_generation_recipe", lambda value: value)
+    monkeypatch.setattr(cli, "companion_run_id", lambda *_args: "new-run")
+    monkeypatch.setattr(cli, "CompanionService", lambda _root: object())
+    args = SimpleNamespace(
+        workers=1,
+        target_language="zh-CN",
+        provider="codex",
+        model=None,
+        approx_term_count=50,
+        author=[],
+        reader_labels=None,
+        pdf=None,
+        project_dir=str(paths.root),
+        document_cache_root=None,
+        source="source.html",
+        refresh=False,
+        user_intent="",
+        cross_chapter_editorial_review=False,
+        host_authority="unknown",
+        new_lineage=False,
+    )
+
+    with pytest.raises(CompanionProjectError) as error:
+        cli._build(args)
+
+    assert error.value.code == "selected_run_conflict"
+
+
+def test_progress_summarizes_translation_fallback_events(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "translation_fallback",
+                "data": {
+                    "source_text_block_count": 2,
+                    "review_skipped_block_count": 1,
+                    "reason_codes": ["translation_source_identity_invalid"],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert _translation_fallback_summary(run) == {
+        "source_text_units": 2,
+        "review_skipped_units": 1,
+        "reason_codes": ["translation_source_identity_invalid"],
+    }
+
+
+def test_paused_semantic_candidate_is_reported_as_repair_action() -> None:
+    candidate = "/tmp/chapter.semantic-retry.json"
+    snapshot = RunSnapshot(
+        "paused-run",
+        2,
+        RunStatus.PAUSED,
+        1,
+        "2026-09-01T00:00:00Z",
+        "2026-09-01T00:01:00Z",
+        awaiting=Awaiting(
+            ResumeReason.SUPERVISION_REQUIRED,
+            "semantic-retry",
+            False,
+            details={"active_candidate_path": candidate},
+        ),
+    )
+
+    assert _next_action(snapshot) == {
+        "kind": "repair_candidate_and_resume",
+        "command": "alc-companion resume",
+        "input_required": False,
+        "request_artifact": None,
+        "candidate_path": candidate,
+    }
 
 
 def test_status_never_advertises_html_when_workspace_state_is_invalid(

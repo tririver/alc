@@ -9,6 +9,7 @@ from threading import Event, Lock
 import pytest
 
 import alc_companion.build as companion_build
+import alc_companion.request_contracts as request_contracts
 import alc_companion.service as companion_service
 
 from ac_jobs import (
@@ -20,7 +21,7 @@ from ac_jobs import (
     RunStatus,
     semantic_key,
 )
-from ac_llm import LLMCompleted
+from ac_llm import LLMCompleted, ModelSelection
 from ac_document import (
     AcDocumentService,
     CachedDocumentRef,
@@ -67,10 +68,13 @@ from alc_companion.request_contracts import (
     CompanionBuildRequest,
     CompanionExecutionOptions,
     CompanionGenerationRecipe,
+    decode_handler_semantic_input,
+    encode_handler_semantic_input,
 )
 from alc_companion.service import (
     CompanionService,
     CompanionServiceError,
+    _completed_group_units,
     companion_run_id,
 )
 from alc_companion.source_planning import (
@@ -467,6 +471,75 @@ def test_companion_run_id_binds_handler_contract(
     assert companion_run_id(request, None) != first
 
 
+def test_prepare_resolves_model_once_and_binds_run_id_to_stored_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved_models = iter(("model-a", "model-b"))
+    calls: list[ModelSelection] = []
+
+    def resolve(selection: ModelSelection) -> ModelSelection:
+        calls.append(selection)
+        return ModelSelection(
+            provider="codex",
+            model=next(resolved_models),
+            tier="medium",
+        )
+
+    monkeypatch.setattr(
+        request_contracts, "resolve_model_selection", resolve
+    )
+    request = CompanionBuildRequest(
+        _document(tmp_path), target_language="zh-CN"
+    )
+    recipe = CompanionGenerationRecipe(model=ModelSelection())
+    service = CompanionService(RunRepository(tmp_path / "jobs"))
+
+    prepared = service.prepare(request, recipe=recipe)
+
+    spec = service.repository.read_spec(prepared.run_id)
+    _stored_request, stored_recipe = decode_handler_semantic_input(
+        spec.semantic_input
+    )
+    assert len(calls) == 1
+    assert stored_recipe.model == ModelSelection(
+        provider="codex",
+        model="model-a",
+        tier="medium",
+    )
+    assert prepared.run_id == companion_run_id(request, stored_recipe)
+
+
+def test_progress_treats_explicit_request_authors_as_ready(
+    tmp_path: Path,
+) -> None:
+    request = CompanionBuildRequest(
+        _document(tmp_path),
+        target_language="zh-CN",
+        authors=("Ada Author",),
+    )
+    recipe = CompanionGenerationRecipe(
+        model=ModelSelection(
+            provider="codex", model="fixed-model", tier="medium"
+        )
+    )
+    repository = RunRepository(tmp_path / "jobs")
+    run_id = companion_run_id(request, recipe)
+    repository.create(
+        RunSpec(
+            run_id,
+            COMPANION_BUILD_HANDLER,
+            encode_handler_semantic_input(request, recipe),
+        )
+    )
+    ImmutableArtifactStore(repository.run_directory(run_id)).publish_json(
+        "diagnostics/build", {}
+    )
+
+    progress = CompanionService(repository).progress(run_id)
+
+    assert progress["phase"] == "language_detection"
+
+
 class StrictLegacyTranslationAdapter(FakeTranslationAdapter):
     """Adapter using the pre-structure keyword-only signature."""
 
@@ -531,6 +604,22 @@ def _request_payload(prompt: str) -> tuple[str, dict]:
     return first.removeprefix("Contract: "), json.loads(payload)
 
 
+def test_progress_treats_group_without_published_state_as_not_started(
+    tmp_path: Path,
+) -> None:
+    repository = RunRepository(tmp_path / "jobs")
+    repository.create(RunSpec("pending-group", "test-handler", {}))
+
+    assert (
+        _completed_group_units(
+            repository,
+            "pending-group",
+            "chapter-translations-v3",
+        )
+        == 0
+    )
+
+
 def test_translation_precedes_reviewed_guides_and_uses_local_glossary(
     tmp_path: Path,
 ) -> None:
@@ -566,11 +655,25 @@ def test_translation_precedes_reviewed_guides_and_uses_local_glossary(
     assert completed.status is RunStatus.SUCCEEDED
     assert translation.calls[0:2] == ["language", "glossary"]
     assert translation.approx_counts == [73]
+    progress = service.progress(completed.run_id)
+    assert progress["partial_reader_available"] is True
+    assert Path(progress["partial_reader_path"]).is_file()
     assert tasks.counts[CHAPTER_GUIDE_PROMPT_VERSION] == 6
     assert tasks.counts[CHAPTER_GUIDE_REVIEW_PROMPT_VERSION] == 4
     assert all(
         "A quantum field appears here." not in prompt
-        for _contract, _task_id, prompt in tasks.requests
+        for contract, _task_id, prompt in tasks.requests
+        if contract != AUTHOR_IDENTITY_PROMPT_VERSION
+    )
+    author_payload = next(
+        _request_payload(prompt)[1]
+        for contract, _task_id, prompt in tasks.requests
+        if contract == AUTHOR_IDENTITY_PROMPT_VERSION
+    )
+    assert author_payload["front_matter_evidence"]
+    assert any(
+        "A quantum field appears here." in item["text"]
+        for item in author_payload["front_matter_evidence"]
     )
     for contract, input_ids in tasks.request_input_ids:
         assert input_ids[0] == "companion-source-index", contract
@@ -592,6 +695,8 @@ def test_translation_precedes_reviewed_guides_and_uses_local_glossary(
     ]
     assert guide_payloads
     assert all("source_commands" in item for item in guide_payloads)
+
+
     assert all("block_ids" not in item for item in guide_payloads)
     for payload in guide_payloads:
         commands = payload["source_commands"]
@@ -757,6 +862,43 @@ def test_translation_precedes_reviewed_guides_and_uses_local_glossary(
     assert [item.anchor.target_id for item in translations] == [
         item.block_id for item in document.blocks
     ]
+
+
+def test_historical_auto_recipe_executes_without_rebinding(
+    tmp_path: Path,
+) -> None:
+    request = CompanionBuildRequest(_document(tmp_path), target_language="en")
+    historical_recipe = CompanionGenerationRecipe(
+        model=ModelSelection(provider="auto", model=None, tier="medium")
+    )
+    repository = RunRepository(tmp_path / "jobs")
+    run_id = "historical-auto-recipe"
+    repository.create(
+        RunSpec(
+            run_id,
+            COMPANION_BUILD_HANDLER,
+            encode_handler_semantic_input(request, historical_recipe),
+        )
+    )
+    service = CompanionService(repository)
+
+    completed = service.execute(
+        run_id,
+        execution=CompanionExecutionOptions(
+            workers=1,
+            document_cache_root=tmp_path / "paper",
+        ),
+        task_service=FakeGuideTasks(),  # type: ignore[arg-type]
+        translation_adapter=FakeTranslationAdapter(mode="skipped"),
+    )
+
+    assert completed.status is RunStatus.SUCCEEDED
+    durable = service.repository.read_spec(run_id).semantic_input
+    assert durable["generation_recipe"]["model"] == {
+        "provider": "auto",
+        "model": None,
+        "tier": "medium",
+    }
 
 
 def test_translation_durable_units_freeze_the_lane_contract(
@@ -1291,6 +1433,38 @@ def test_schema_valid_semantic_error_gets_one_fresh_retry(
     assert "Validation code:" in retry_requests[0][1]
 
 
+def test_invalid_author_identity_falls_back_to_omitted_authors(
+    tmp_path: Path,
+) -> None:
+    tasks = FakeGuideTasks(
+        semantic_invalid_contract=AUTHOR_IDENTITY_PROMPT_VERSION,
+        semantic_invalid_calls=frozenset({1, 2}),
+    )
+    service = CompanionService(tmp_path / "jobs")
+
+    completed = service.build(
+        CompanionBuildRequest(_document(tmp_path), target_language="en"),
+        execution=CompanionExecutionOptions(workers=1),
+        task_service=tasks,  # type: ignore[arg-type]
+        translation_adapter=FakeTranslationAdapter(mode="skipped"),
+    )
+
+    assert completed.status is RunStatus.SUCCEEDED
+    publication = service.publication(completed.run_id)
+    assert publication.reader_profile["authors"] == ()
+    store = ImmutableArtifactStore(
+        service.repository.run_directory(completed.run_id),
+        repository_root=service.repository.root,
+    )
+    diagnostics_ref = store.find("diagnostics/author")
+    assert diagnostics_ref is not None
+    diagnostics = json.loads(
+        store.read_bytes(diagnostics_ref).decode("utf-8")
+    )
+    assert diagnostics["status"] == "unconfirmed"
+    assert "could not be verified" in diagnostics["basis"]
+
+
 def test_reviewer_can_accept_without_forcing_an_extra_revision(
     tmp_path: Path,
 ) -> None:
@@ -1354,6 +1528,15 @@ def test_invalid_terminal_revision_reports_program_owned_candidate(
     )
     assert failed.error.details["candidate_path"] == str(candidate_path)
     assert failed.error.details["chapter_id"] == chapters[1].chapter_id
+    progress = service.progress(failed.run_id)
+    assert progress["phase"] == "guides"
+    assert progress["next_action"] == {
+        "kind": "repair_candidate_and_resume",
+        "command": "alc-companion resume",
+        "input_required": False,
+        "request_artifact": None,
+        "candidate_path": str(candidate_path),
+    }
     candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
     assert candidate["companions"][0]["after_part"] == 9999
     store = ImmutableArtifactStore(
@@ -1394,6 +1577,11 @@ def test_invalid_terminal_revision_reports_program_owned_candidate(
     )
 
     assert recovered.status is RunStatus.SUCCEEDED
+    completed_progress = service.progress(recovered.run_id)
+    assert completed_progress["phase"] == "completed"
+    assert completed_progress["completed_units"] == completed_progress[
+        "total_units"
+    ]
     assert tasks.counts[CHAPTER_GUIDE_PROMPT_VERSION] == guide_calls
     recovered_store = ImmutableArtifactStore(
         service.repository.run_directory(recovered.run_id),
