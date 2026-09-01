@@ -23,7 +23,7 @@
     {
       "id": "product",
       "repository": "https://github.com/tririver/alc.git",
-      "commit": "fa0ec87f0c01892c108d567cb1cf0e5fc7ecc0d3",
+      "commit": "310c5e514b8c850bd5e1a99246cb03d5898dd858",
       "packages": [
         "alc-render",
         "alc-ocr-proofread",
