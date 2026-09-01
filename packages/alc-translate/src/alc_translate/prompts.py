@@ -9,8 +9,8 @@ from typing import Any
 
 LANGUAGE_PROMPT_VERSION = "alc.translate.language_prompt.v1"
 GLOSSARY_PROMPT_VERSION = "alc.translate.glossary_prompt.v4"
-TRANSLATION_PROMPT_VERSION = "alc.translate.blocks_prompt.v11"
-REVIEW_PROMPT_VERSION = "alc.translate.review_prompt.v9"
+TRANSLATION_PROMPT_VERSION = "alc.translate.blocks_prompt.v12"
+REVIEW_PROMPT_VERSION = "alc.translate.review_prompt.v10"
 
 
 def _closed(

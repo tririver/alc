@@ -247,7 +247,7 @@ def source_identity(block: Mapping[str, Any]) -> dict[str, Any]:
                 equations=equations,
                 links=links,
             )
-    elif kind in {"heading", "table", "figure"}:
+    elif kind in {"heading", "table", "figure", "translation_unit"}:
         _extend_markdown_identity(
             block_text(block),
             equations=equations,
@@ -349,6 +349,64 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
             "translation_source_identity_invalid",
             f"source asset identity is invalid for {block['block_id']}",
         )
+
+
+def restore_translation_identity(
+    text: str, block: Mapping[str, Any]
+) -> str:
+    """Restore one mechanically overescaped layer of source TeX identity.
+
+    Provider JSON output occasionally preserves a Markdown math span while
+    doubling every TeX command backslash.  Restore only when the decoded span
+    is an exact one-layer inflation of a source equation occurrence.  This is
+    deliberately source-relative: genuine authored ``\\`` commands are never
+    collapsed merely because they contain adjacent backslashes.
+    """
+
+    if not isinstance(text, str):
+        raise TranslationSourceError(
+            "translation_coverage_invalid", "translation text must be a string"
+        )
+    expected = Counter(source_identity(block)["equations"])
+    if not expected:
+        return text
+    spans = _markdown_math_spans(text)
+    if not spans:
+        return text
+    remaining = expected.copy()
+    replacements: list[tuple[int, int, str]] = []
+    for start, end, actual_tex in spans:
+        if remaining[actual_tex] > 0:
+            remaining[actual_tex] -= 1
+            continue
+        restored_tex = next(
+            (
+                source_tex
+                for source_tex, count in remaining.items()
+                if count > 0
+                and source_tex != actual_tex
+                and actual_tex.replace("\\\\", "\\") == source_tex
+            ),
+            None,
+        )
+        if restored_tex is None:
+            continue
+        remaining[restored_tex] -= 1
+        rendered = text[start:end]
+        relative = rendered.find(actual_tex)
+        if relative < 0:  # pragma: no cover - span parser owns this invariant
+            continue
+        replacements.append(
+            (
+                start + relative,
+                start + relative + len(actual_tex),
+                restored_tex,
+            )
+        )
+    restored = text
+    for start, end, replacement in reversed(replacements):
+        restored = restored[:start] + replacement + restored[end:]
+    return restored
 
 
 def prompt_block(block: Mapping[str, Any]) -> dict[str, Any]:
@@ -512,7 +570,13 @@ def block_text(block: Mapping[str, Any]) -> str:
         raise TranslationSourceError(
             "source_block_invalid", "source block payload must be an object"
         )
-    if kind in {"heading", "paragraph", "source_note", "code"}:
+    if kind in {
+        "heading",
+        "paragraph",
+        "source_note",
+        "code",
+        "translation_unit",
+    }:
         return str(payload.get("text", ""))
     if kind == "equation":
         return str(payload.get("tex", ""))
@@ -535,6 +599,93 @@ def block_text(block: Mapping[str, Any]) -> str:
     raise TranslationSourceError(
         "source_block_invalid", f"unsupported block kind: {kind}"
     )
+
+
+def translation_text_groups(
+    block: Mapping[str, Any], *, max_bytes: int
+) -> tuple[tuple[str, ...], ...]:
+    """Return bounded, source-ordered text groups for one internal translation.
+
+    The outer tuple preserves list-item boundaries.  Inner tuples contain
+    bounded segments that may be translated independently and joined with a
+    space.  Markdown math and links are indivisible while splitting.
+    """
+
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or max_bytes < 64
+    ):
+        raise TranslationSourceError(
+            "translation_unit_invalid", "translation max_bytes is too small"
+        )
+    kind = str(block.get("kind"))
+    payload = block.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TranslationSourceError(
+            "source_block_invalid", "source block payload must be an object"
+        )
+    if kind == "list":
+        values = tuple(
+            _compact_inline_text(item)
+            for item in _mapping_items(payload.get("items"))
+        )
+    elif kind in {"paragraph", "source_note"}:
+        values = (_compact_inline_text(payload),)
+    else:
+        values = (block_text(block),)
+    return tuple(
+        _split_translation_markdown(value, max_bytes=max_bytes)
+        for value in values
+    )
+
+
+def _split_translation_markdown(
+    value: str, *, max_bytes: int
+) -> tuple[str, ...]:
+    text = str(value).strip()
+    if not text or len(text.encode("utf-8")) <= max_bytes:
+        return (text,) if text else ()
+    protected = [
+        *(span[:2] for span in _markdown_math_spans(text)),
+        *(
+            match.span()
+            for match in _MARKDOWN_LINK.finditer(_without_markdown_math(text))
+        ),
+    ]
+    protected.sort()
+    atoms: dict[str, str] = {}
+    masked = text
+    for ordinal, (start, end) in reversed(tuple(enumerate(protected))):
+        token = f"ALC_TRANSLATION_ATOM_{ordinal:06d}"
+        atoms[token] = masked[start:end]
+        masked = masked[:start] + token + masked[end:]
+    pieces = re.findall(r"\S+(?:\s+|$)", masked)
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        candidate = current + piece
+        restored_candidate = _restore_split_atoms(candidate, atoms).strip()
+        if current and len(restored_candidate.encode("utf-8")) > max_bytes:
+            chunks.append(_restore_split_atoms(current, atoms).strip())
+            current = piece
+        else:
+            current = candidate
+    if current:
+        chunks.append(_restore_split_atoms(current, atoms).strip())
+    if any(len(chunk.encode("utf-8")) > max_bytes for chunk in chunks):
+        raise TranslationSourceError(
+            "translation_atom_exceeds_input_budget",
+            "one indivisible formula or link exceeds the translation unit budget",
+        )
+    return tuple(chunk for chunk in chunks if chunk)
+
+
+def _restore_split_atoms(value: str, atoms: Mapping[str, str]) -> str:
+    restored = value
+    for token, atom in atoms.items():
+        restored = restored.replace(token, atom)
+    return restored
 
 
 def block_digest(blocks: Sequence[Mapping[str, Any]]) -> str:
@@ -587,6 +738,12 @@ def _extend_inline_identity(
             equations.append(str(span["tex"]))
         elif kind == "link" and "target" in span:
             links.append(str(span["target"]))
+        elif kind == "text":
+            _extend_markdown_identity(
+                str(span.get("text", "")),
+                equations=equations,
+                links=links,
+            )
 
 
 def _extend_markdown_identity(
@@ -876,27 +1033,31 @@ def _link_occurrences(
     expected: Counter[str],
 ) -> Counter[str]:
     text = _without_markdown_math(text)
-    markdown_targets = Counter(
-        match.group(2) for match in _MARKDOWN_LINK.finditer(text)
-    )
-    if any(
-        target not in expected or count > expected[target]
-        for target, count in markdown_targets.items()
-    ):
-        return markdown_targets
-    return Counter(
+    matches = tuple(_MARKDOWN_LINK.finditer(text))
+    occurrences = Counter(match.group(2) for match in matches)
+    pieces: list[str] = []
+    previous = 0
+    for match in matches:
+        pieces.extend(
+            (text[previous : match.start()], " " * (match.end() - match.start()))
+        )
+        previous = match.end()
+    pieces.append(text[previous:])
+    unlinked_text = "".join(pieces)
+    occurrences.update(
         {
             target: count
             for target in expected
             if (
                 count := _literal_occurrence_count(
-                    text,
+                    unlinked_text,
                     target,
                     edge_characters=_LINK_TOKEN_CHARACTER,
                 )
             )
         }
     )
+    return occurrences
 
 
 def _internal_bibliography_links(
@@ -916,7 +1077,7 @@ def _internal_bibliography_links(
             _extend_internal_bibliography_inline(item.get("inline_spans"), values)
     else:
         texts: list[str] = []
-        if kind == "heading":
+        if kind in {"heading", "translation_unit"}:
             texts.append(str(payload.get("text", "")))
         elif kind == "figure":
             texts.append(str(payload.get("caption", "")))
@@ -957,7 +1118,7 @@ def _block_markdown_values(block: Mapping[str, Any]) -> tuple[str, ...]:
             _compact_inline_text(item)
             for item in _mapping_items(payload.get("items"))
         )
-    if kind == "heading":
+    if kind in {"heading", "translation_unit"}:
         return (str(payload.get("text", "")),)
     if kind == "figure":
         return (str(payload.get("caption", "")),)
@@ -978,12 +1139,19 @@ def _extend_internal_bibliography_inline(
     raw_spans: Any, values: list[tuple[str, str]]
 ) -> None:
     for span in _mapping_items(raw_spans):
+        kind = str(span.get("kind"))
         target = str(span.get("target", ""))
         if (
-            str(span.get("kind")) == "link"
+            kind == "link"
             and _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(target)
         ):
             values.append((target, str(span.get("text", ""))))
+        elif kind == "text":
+            values.extend(
+                _markdown_internal_bibliography_links(
+                    str(span.get("text", ""))
+                )
+            )
 
 
 def _markdown_internal_bibliography_links(
@@ -1133,5 +1301,7 @@ __all__ = [
     "source_note_blocks",
     "source_note_link_markdown",
     "source_identity",
+    "translation_text_groups",
+    "restore_translation_identity",
     "validate_translation_text",
 ]

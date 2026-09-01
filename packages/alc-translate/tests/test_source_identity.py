@@ -21,6 +21,7 @@ from alc_translate import TranslationSource
 
 from alc_translate.source import (
     TranslationSourceError,
+    block_text,
     formula_identity_diagnostics,
     prompt_block,
     source_blocks,
@@ -187,6 +188,20 @@ def test_changed_formula_multiset_is_rejected(text: str) -> None:
         validate_translation_text(text, _paragraph_block())
 
 
+def test_overescaped_formula_commands_are_restored_from_source_identity() -> None:
+    restored = source_module.restore_translation_identity(
+        r"先看 $\\Psi^\dagger$，再看 $a$；"
+        r"[注释](https://example.test/notes)。",
+        _paragraph_block(),
+    )
+
+    assert restored == (
+        r"先看 $\Psi^\dagger$，再看 $a$；"
+        r"[注释](https://example.test/notes)。"
+    )
+    validate_translation_text(restored, _paragraph_block())
+
+
 def test_formula_failure_exposes_missing_and_added_tex_diagnostics() -> None:
     with pytest.raises(TranslationSourceError) as raised:
         validate_translation_text(
@@ -287,6 +302,34 @@ def test_changed_link_multiset_is_rejected(text: str) -> None:
         match="changed link occurrences",
     ):
         validate_translation_text(text, _paragraph_block())
+
+
+def test_bare_url_markdown_label_counts_as_one_link_occurrence() -> None:
+    target = "https://example.test/source"
+    block = {
+        "block_id": "block-bare-url-link",
+        "kind": "paragraph",
+        "payload": {
+            "text": f"Source: {target}",
+            "inline_spans": [
+                {
+                    "kind": "text",
+                    "start": 0,
+                    "end": 8,
+                    "text": "Source: ",
+                },
+                {
+                    "kind": "link",
+                    "start": 8,
+                    "end": 8 + len(target),
+                    "target": target,
+                    "text": target,
+                },
+            ],
+        },
+    }
+
+    validate_translation_text(f"来源：[{target}]({target})。", block)
 
 
 def test_link_validation_ignores_markdown_shapes_inside_inline_math() -> None:
@@ -689,6 +732,70 @@ def test_internal_bibliography_link_labels_are_source_authoritative() -> None:
     validate_translation_text(
         r"[阅读来源](https://example.test/source)。", external
     )
+
+
+def test_translation_unit_preserves_internal_bibliography_identity() -> None:
+    block = {
+        "block_id": "block-list.translation-unit-000000",
+        "kind": "translation_unit",
+        "payload": {
+            "text": (
+                "Measurements from "
+                "[Moresco et al. 2012](#bib.bib18); "
+                "[Moresco 2015](#bib.bib19)."
+            )
+        },
+    }
+
+    validate_translation_text(
+        "测量来自 [Moresco et al. 2012](#bib.bib18); "
+        "[Moresco 2015](#bib.bib19)。",
+        block,
+    )
+    with pytest.raises(
+        TranslationSourceError,
+        match="changed internal bibliography link labels",
+    ):
+        validate_translation_text(
+            "测量来自 [Moresco 等 2012](#bib.bib18); "
+            "[Moresco 2015](#bib.bib19)。",
+            block,
+        )
+
+
+def test_large_bibliography_list_source_markdown_self_validates() -> None:
+    items = []
+    for ordinal in range(44):
+        doi = f"https://doi.org/10.1000/example-{ordinal}"
+        arxiv = f"http://arxiv.org/abs/2608.{ordinal:05d}"
+        spans = [
+            {"kind": "text", "text": f"Entry {ordinal}, "},
+            {"kind": "link", "text": "Journal", "target": doi},
+            {"kind": "link", "text": "42", "target": doi},
+            {"kind": "link", "text": ", 1 (2026)", "target": doi},
+        ]
+        if ordinal < 15:
+            spans.append(
+                {
+                    "kind": "text",
+                    "text": (
+                        f", [arXiv:2608.{ordinal:05d} "
+                        rf"[astro-ph.CO\]]({arxiv}) ."
+                    ),
+                }
+            )
+        items.append({"text": "", "inline_spans": spans})
+    block = {
+        "block_id": "block-large-bibliography-list",
+        "kind": "list",
+        "payload": {"ordered": False, "items": items},
+    }
+
+    identity = source_identity(block)
+    rendered_source = block_text(prompt_block(block))
+
+    assert len(identity["link_targets"]) == (44 * 3) + 15
+    validate_translation_text(rendered_source, block)
 
 
 def test_internal_bibliography_groups_and_entry_labels_are_authoritative() -> None:

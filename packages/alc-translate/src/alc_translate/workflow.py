@@ -93,6 +93,8 @@ from .source import (
     source_blocks,
     source_note_blocks,
     source_note_link_markdown,
+    restore_translation_identity,
+    translation_text_groups,
     validate_translation_text,
 )
 
@@ -681,9 +683,17 @@ class TranslationWorkflowService:
             )
             context.artifacts.publish_json(artifact_id, result.to_document())
             return result
+        model_blocks = _model_translation_blocks(units)
         try:
+            model_units, unit_plans = _bounded_model_translation_units(
+                model_blocks,
+                glossary=glossary.entries,
+                target_language=target_language,
+                language=language,
+                budget_bytes=input_budget_bytes,
+            )
             windows = _translation_windows(
-                _model_translation_blocks(units),
+                model_units,
                 glossary=glossary.entries,
                 target_language=target_language,
                 language=language,
@@ -692,18 +702,55 @@ class TranslationWorkflowService:
         except TranslationWorkflowError as exc:
             return RunError(exc.code, str(exc))
         translations: list[dict[str, str]] = []
+        fallback_units: dict[str, str] = {}
+        accepted_documents: dict[int, Mapping[str, Any]] = {}
+        for accepted_ordinal in range(len(model_units)):
+            accepted_id = (
+                f"{artifact_prefix}/windows/{accepted_ordinal:04d}/accepted"
+            )
+            accepted_ref = context.artifacts.find(accepted_id)
+            if accepted_ref is None:
+                break
+            accepted_documents[accepted_ordinal] = _read_json_artifact(
+                context, accepted_ref, "accepted translation window"
+            )
+        accepted_documents = _migrate_legacy_accepted_list_windows(
+            accepted_documents,
+            windows,
+            unit_plans,
+        )
         for ordinal, window in enumerate(windows):
             draft_id = f"{artifact_prefix}/windows/{ordinal:04d}/draft"
             accepted_id = f"{artifact_prefix}/windows/{ordinal:04d}/accepted"
-            accepted_ref = context.artifacts.find(accepted_id)
-            if accepted_ref is not None:
-                accepted_doc = _read_json_artifact(
-                    context, accepted_ref, "accepted translation window"
-                )
+            fallback_id = f"{artifact_prefix}/windows/{ordinal:04d}/fallback"
+            accepted_doc = accepted_documents.get(ordinal)
+            if accepted_doc is not None:
                 try:
                     accepted = _validate_accepted_window(accepted_doc, window)
                 except TranslationWorkflowError as exc:
-                    return RunError(exc.code, str(exc))
+                    if exc.code == "translation_coverage_invalid":
+                        return RunError(exc.code, str(exc))
+                    fallback, source_fallback_ids = (
+                        _salvaged_translation_fallback(
+                            window, candidate=accepted_doc
+                        )
+                    )
+                    _publish_translation_fallback(
+                        context,
+                        fallback_id,
+                        source_text_block_ids=source_fallback_ids,
+                        review_skipped_block_ids=[],
+                        reason_codes=[exc.code],
+                    )
+                    fallback_units.update(
+                        (block_id, "source_text")
+                        for block_id in source_fallback_ids
+                    )
+                    translations.extend(fallback)
+                    continue
+                _load_translation_fallback(
+                    context, fallback_id, fallback_units
+                )
                 translations.extend(accepted)
                 continue
             candidate_id = f"translation/{draft_id}.json"
@@ -751,25 +798,58 @@ class TranslationWorkflowService:
                     options=execution,
                     stopped_message="block translation stopped",
                 )
-                if isinstance(generated, (Paused, RunError)):
+                if isinstance(generated, Paused):
+                    return generated
+                if isinstance(generated, RunError):
                     return generated
                 if isinstance(generated, _InvalidGeneratedOutput):
-                    return _output_supervision(
-                        context,
-                        artifact_prefix=artifact_prefix,
-                        stage=f"draft-{ordinal:04d}",
-                        error=generated.error,
-                        candidate_path=generated.candidate_path,
+                    fallback, source_fallback_ids = (
+                        _salvaged_translation_fallback(
+                            window, candidate=generated.candidate
+                        )
                     )
+                    _publish_translation_fallback(
+                        context,
+                        fallback_id,
+                        source_text_block_ids=source_fallback_ids,
+                        review_skipped_block_ids=[],
+                        reason_codes=[generated.error.code],
+                    )
+                    fallback_units.update(
+                        (block_id, "source_text")
+                        for block_id in source_fallback_ids
+                    )
+                    context.artifacts.publish_json(
+                        accepted_id, {"translations": fallback}
+                    )
+                    translations.extend(fallback)
+                    continue
                 draft_doc = generated
                 context.artifacts.publish_json(draft_id, draft_doc)
             try:
                 draft = _validate_draft_window(draft_doc, window)
             except TranslationWorkflowError as exc:
-                error_path = candidate_path or (
-                    context.run_directory / draft_ref.relative_path
+                fallback, source_fallback_ids = (
+                    _salvaged_translation_fallback(
+                        window, candidate=draft_doc
+                    )
                 )
-                return _candidate_run_error(exc, error_path)
+                _publish_translation_fallback(
+                    context,
+                    fallback_id,
+                    source_text_block_ids=source_fallback_ids,
+                    review_skipped_block_ids=[],
+                    reason_codes=[exc.code],
+                )
+                fallback_units.update(
+                    (block_id, "source_text")
+                    for block_id in source_fallback_ids
+                )
+                context.artifacts.publish_json(
+                    accepted_id, {"translations": fallback}
+                )
+                translations.extend(fallback)
+                continue
             try:
                 review_windows = _translation_review_windows(
                     window,
@@ -783,6 +863,8 @@ class TranslationWorkflowService:
                 return RunError(exc.code, str(exc))
             else:
                 reviewed = []
+                review_skipped_ids: list[str] = []
+                review_reason_codes: list[str] = []
                 split_review = len(review_windows) > 1
                 for review_ordinal, (
                     review_blocks,
@@ -798,16 +880,30 @@ class TranslationWorkflowService:
                             review_accepted_id
                         )
                         if review_accepted_ref is not None:
-                            reviewed.extend(
-                                _validate_accepted_window(
-                                    _read_json_artifact(
-                                        context,
-                                        review_accepted_ref,
-                                        "accepted translation review subwindow",
-                                    ),
+                            review_accepted_doc = _read_json_artifact(
+                                context,
+                                review_accepted_ref,
+                                "accepted translation review subwindow",
+                            )
+                            try:
+                                accepted_review = _validate_accepted_window(
+                                    review_accepted_doc,
                                     review_blocks,
                                 )
-                            )
+                            except TranslationWorkflowError as exc:
+                                review_ids = [
+                                    str(item["block_id"])
+                                    for item in review_blocks
+                                ]
+                                reviewed.extend(review_draft)
+                                review_skipped_ids.extend(review_ids)
+                                review_reason_codes.append(exc.code)
+                                fallback_units.update(
+                                    (block_id, "review_skipped")
+                                    for block_id in review_ids
+                                )
+                            else:
+                                reviewed.extend(accepted_review)
                             continue
                     review_text = review_prompt(
                         blocks=[prompt_block(item) for item in review_blocks],
@@ -877,10 +973,7 @@ class TranslationWorkflowService:
                         if isinstance(review_generated, Paused):
                             return review_generated
                         if isinstance(review_generated, RunError):
-                            review_error = (
-                                review_generated.code,
-                                review_generated.message,
-                            )
+                            return review_generated
                         elif isinstance(
                             review_generated, _InvalidGeneratedOutput
                         ):
@@ -891,24 +984,16 @@ class TranslationWorkflowService:
                         else:
                             reviewed_window = review_generated
                     if review_error is not None:
-                        supervision = _review_supervision(
-                            context,
-                            artifact_prefix=(
-                                artifact_prefix
-                                if not split_review
-                                else (
-                                    f"{artifact_prefix}-review-"
-                                    f"{ordinal:04d}-{review_ordinal:04d}"
-                                )
-                            ),
-                            ordinal=ordinal,
-                            draft=review_draft,
-                            error_code=review_error[0],
-                            error_message=review_error[1],
+                        reviewed_window = list(review_draft)
+                        review_ids = [
+                            str(item["block_id"]) for item in review_blocks
+                        ]
+                        review_skipped_ids.extend(review_ids)
+                        review_reason_codes.append(review_error[0])
+                        fallback_units.update(
+                            (block_id, "review_skipped")
+                            for block_id in review_ids
                         )
-                        if isinstance(supervision, Paused):
-                            return supervision
-                        reviewed_window = supervision
                     assert reviewed_window is not None
                     if split_review:
                         context.artifacts.publish_json(
@@ -918,10 +1003,41 @@ class TranslationWorkflowService:
                     reviewed.extend(reviewed_window)
             accepted_doc = {"translations": reviewed}
             context.artifacts.publish_json(accepted_id, accepted_doc)
+            if review_skipped_ids:
+                _publish_translation_fallback(
+                    context,
+                    fallback_id,
+                    source_text_block_ids=[],
+                    review_skipped_block_ids=review_skipped_ids,
+                    reason_codes=review_reason_codes,
+                )
             translations.extend(reviewed)
+        (
+            collapsed_translations,
+            post_collapse_fallback_ids,
+        ) = _collapse_model_translation_units_with_fallback(
+            model_blocks,
+            unit_plans,
+            translations,
+        )
+        fallback_blocks = _collapse_translation_fallbacks(
+            unit_plans, fallback_units
+        )
+        if post_collapse_fallback_ids:
+            _publish_translation_fallback(
+                context,
+                f"{artifact_prefix}/post-collapse/fallback",
+                source_text_block_ids=post_collapse_fallback_ids,
+                review_skipped_block_ids=[],
+                reason_codes=["translation_source_identity_invalid"],
+            )
+            fallback_blocks.update(
+                (block_id, "source_text")
+                for block_id in post_collapse_fallback_ids
+            )
         merged_translations = _merge_programmatic_translations(
             units,
-            translations,
+            collapsed_translations,
         )
         result = _publish_translation_result(
             context,
@@ -932,6 +1048,7 @@ class TranslationWorkflowService:
             target_language=target_language,
             artifact_prefix=artifact_prefix,
             coverage=coverage,
+            fallback_kinds=fallback_blocks,
         )
         _validate_translation_result(
             context,
@@ -962,6 +1079,7 @@ class TranslationWorkflowError(RuntimeError):
 class _InvalidGeneratedOutput:
     error: TranslationWorkflowError
     candidate_path: Path
+    candidate: Mapping[str, Any]
 
 
 def _candidate_run_error(
@@ -993,7 +1111,7 @@ def _validated_generation(
         try:
             return validator(candidate)
         except TranslationWorkflowError as exc:
-            return _InvalidGeneratedOutput(exc, candidate_path)
+            return _InvalidGeneratedOutput(exc, candidate_path, candidate)
 
     first_candidate_id = _attempt_candidate_id(candidate_id)
     first_candidate_path = context.working.find_candidate(first_candidate_id)
@@ -1045,7 +1163,7 @@ def _validated_generation(
             path = context.working.write_candidate_json(
                 candidate_id, document
             )
-            return _InvalidGeneratedOutput(exc, path)
+            return _InvalidGeneratedOutput(exc, path, document)
         context.working.write_candidate_json(
             candidate_id, _generated_candidate_document(outcome.value)
         )
@@ -1597,6 +1715,442 @@ def _model_translation_blocks(
     )
 
 
+@dataclass(frozen=True)
+class _TranslationUnitPlan:
+    block_id: str
+    kind: str
+    unit_groups: tuple[tuple[str, ...], ...]
+    direct: bool
+
+
+def _bounded_model_translation_units(
+    blocks: Sequence[Mapping[str, Any]],
+    *,
+    glossary: Sequence[Mapping[str, Any]],
+    target_language: str,
+    language: LanguageResult,
+    budget_bytes: int,
+) -> tuple[
+    tuple[Mapping[str, Any], ...],
+    tuple[_TranslationUnitPlan, ...],
+]:
+    units: list[Mapping[str, Any]] = []
+    plans: list[_TranslationUnitPlan] = []
+    for block in blocks:
+        block_id = str(block["block_id"])
+        if (
+            str(block.get("kind")) != "list"
+            and _translation_prompt_size(
+                (block,),
+                glossary=glossary,
+                target_language=target_language,
+                language=language,
+                ordinal=0,
+            )
+            <= budget_bytes
+            and _translation_review_estimate_size(
+                (block,),
+                glossary=glossary,
+                target_language=target_language,
+                ordinal=0,
+            )
+            <= budget_bytes
+        ):
+            units.append(block)
+            plans.append(
+                _TranslationUnitPlan(
+                    block_id,
+                    str(block.get("kind")),
+                    ((block_id,),),
+                    True,
+                )
+            )
+            continue
+        text_budget = max(64, budget_bytes // 4)
+        while True:
+            try:
+                text_groups = translation_text_groups(
+                    block, max_bytes=text_budget
+                )
+            except TranslationSourceError as exc:
+                raise TranslationWorkflowError(
+                    exc.code, str(exc), exc.details
+                ) from exc
+            candidate_units: list[Mapping[str, Any]] = []
+            unit_groups: list[tuple[str, ...]] = []
+            unit_ordinal = 0
+            for group in text_groups:
+                group_ids: list[str] = []
+                for text in group:
+                    unit_id = (
+                        f"{block_id}.translation-unit-{unit_ordinal:06d}"
+                    )
+                    unit_ordinal += 1
+                    group_ids.append(unit_id)
+                    candidate_units.append(
+                        {
+                            "block_id": unit_id,
+                            "ordinal": block.get("ordinal"),
+                            "kind": "translation_unit",
+                            "section_path": block.get("section_path", []),
+                            "payload": {"text": text},
+                        }
+                    )
+                unit_groups.append(tuple(group_ids))
+            if not candidate_units:
+                raise TranslationWorkflowError(
+                    "translation_block_exceeds_input_budget",
+                    f"block {block_id} has no translatable bounded units",
+                )
+            if all(
+                _translation_prompt_size(
+                    (unit,),
+                    glossary=glossary,
+                    target_language=target_language,
+                    language=language,
+                    ordinal=0,
+                )
+                <= budget_bytes
+                and _translation_review_estimate_size(
+                    (unit,),
+                    glossary=glossary,
+                    target_language=target_language,
+                    ordinal=0,
+                )
+                <= budget_bytes
+                for unit in candidate_units
+            ):
+                units.extend(candidate_units)
+                plans.append(
+                    _TranslationUnitPlan(
+                        block_id,
+                        str(block.get("kind")),
+                        tuple(unit_groups),
+                        False,
+                    )
+                )
+                break
+            if text_budget == 64:
+                raise TranslationWorkflowError(
+                    "translation_block_exceeds_input_budget",
+                    f"block {block_id} cannot be divided below the "
+                    f"{budget_bytes}-byte translation input budget",
+                )
+            text_budget = max(64, text_budget // 2)
+    return tuple(units), tuple(plans)
+
+
+def _collapse_model_translation_units(
+    blocks: Sequence[Mapping[str, Any]],
+    plans: Sequence[_TranslationUnitPlan],
+    translations: Sequence[Mapping[str, str]],
+) -> tuple[Mapping[str, str], ...]:
+    if len(blocks) != len(plans):
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "translation unit plans do not cover the selected source blocks",
+        )
+    by_id = {str(item["block_id"]): str(item["text"]) for item in translations}
+    if len(by_id) != len(translations):
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "translation units contain duplicate IDs",
+        )
+    output: list[Mapping[str, str]] = []
+    consumed: set[str] = set()
+    for block, plan in zip(blocks, plans, strict=True):
+        if plan.block_id != str(block["block_id"]):
+            raise TranslationWorkflowError(
+                "translation_coverage_invalid",
+                "translation unit plan source identity is invalid",
+            )
+        group_values: list[str] = []
+        for group in plan.unit_groups:
+            values: list[str] = []
+            for unit_id in group:
+                if unit_id not in by_id:
+                    raise TranslationWorkflowError(
+                        "translation_coverage_invalid",
+                        f"translation omitted internal unit {unit_id}",
+                    )
+                consumed.add(unit_id)
+                value = by_id[unit_id].strip()
+                if plan.kind == "list" and not plan.direct:
+                    value = " ".join(
+                        line.strip()
+                        for line in value.splitlines()
+                        if line.strip()
+                    )
+                values.append(value)
+            group_values.append(" ".join(value for value in values if value))
+        text = (
+            "\n".join(group_values)
+            if plan.kind == "list" and not plan.direct
+            else " ".join(group_values)
+        ).strip()
+        text = restore_translation_identity(text, block)
+        try:
+            validate_translation_text(text, block)
+        except TranslationSourceError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        output.append({"block_id": plan.block_id, "text": text})
+    if consumed != set(by_id):
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "translation contains unknown internal units",
+        )
+    return tuple(output)
+
+
+def _collapse_model_translation_units_with_fallback(
+    blocks: Sequence[Mapping[str, Any]],
+    plans: Sequence[_TranslationUnitPlan],
+    translations: Sequence[Mapping[str, str]],
+) -> tuple[tuple[Mapping[str, str], ...], tuple[str, ...]]:
+    """Collapse bounded units while preserving only identity-invalid blocks.
+
+    Coverage, ordering, and unknown-unit errors remain fatal.  A source
+    identity error is localized to its original block and replaced with the
+    exact identity-preserving source projection.
+    """
+
+    try:
+        return (
+            _collapse_model_translation_units(blocks, plans, translations),
+            (),
+        )
+    except TranslationWorkflowError as exc:
+        if exc.code != "translation_source_identity_invalid":
+            raise
+
+    translated_by_id = {
+        str(item["block_id"]): item for item in translations
+    }
+    if len(translated_by_id) != len(translations):
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "translation units contain duplicate IDs",
+        )
+    expected_unit_ids = {
+        unit_id
+        for plan in plans
+        for group in plan.unit_groups
+        for unit_id in group
+    }
+    if set(translated_by_id) != expected_unit_ids:
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "translation units do not exactly cover the unit plan",
+        )
+
+    output: list[Mapping[str, str]] = []
+    source_fallback_ids: list[str] = []
+    for block, plan in zip(blocks, plans, strict=True):
+        unit_ids = [
+            unit_id for group in plan.unit_groups for unit_id in group
+        ]
+        block_translations = tuple(
+            translated_by_id[unit_id] for unit_id in unit_ids
+        )
+        try:
+            output.extend(
+                _collapse_model_translation_units(
+                    (block,), (plan,), block_translations
+                )
+            )
+        except TranslationWorkflowError as exc:
+            if exc.code != "translation_source_identity_invalid":
+                raise
+            output.append(
+                {
+                    "block_id": str(block["block_id"]),
+                    "text": _identity_preserving_source_text(block),
+                }
+            )
+            source_fallback_ids.append(str(block["block_id"]))
+    return tuple(output), tuple(source_fallback_ids)
+
+
+def _salvaged_translation_fallback(
+    blocks: Sequence[Mapping[str, Any]],
+    *,
+    candidate: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, str]], list[str]]:
+    candidate_by_id: dict[str, Mapping[str, Any]] = {}
+    raw_translations = (
+        candidate.get("translations")
+        if isinstance(candidate, Mapping)
+        else None
+    )
+    if isinstance(raw_translations, Sequence) and not isinstance(
+        raw_translations, (str, bytes)
+    ):
+        for item in raw_translations:
+            if not isinstance(item, Mapping):
+                continue
+            block_id = item.get("block_id")
+            if isinstance(block_id, str) and block_id not in candidate_by_id:
+                candidate_by_id[block_id] = item
+
+    translations: list[dict[str, str]] = []
+    source_fallback_ids: list[str] = []
+    for block in blocks:
+        block_id = str(block["block_id"])
+        candidate_item = candidate_by_id.get(block_id)
+        if candidate_item is not None:
+            try:
+                translations.extend(
+                    _validate_draft_window(
+                        {"translations": [dict(candidate_item)]},
+                        (block,),
+                    )
+                )
+                continue
+            except TranslationWorkflowError:
+                pass
+        source_fallback_ids.append(block_id)
+        translations.extend(
+            _validate_draft_window(
+                {
+                    "translations": [
+                        {
+                            "block_id": block_id,
+                            "text": _identity_preserving_source_text(block),
+                        }
+                    ]
+                },
+                (block,),
+            )
+        )
+    return translations, source_fallback_ids
+
+
+def _identity_preserving_source_text(block: Mapping[str, Any]) -> str:
+    text = block_text(prompt_block(block))
+    try:
+        validate_translation_text(text, block)
+    except TranslationSourceError as exc:
+        raise TranslationWorkflowError(
+            exc.code, str(exc), exc.details
+        ) from exc
+    return text
+
+
+def _publish_translation_fallback(
+    context: RunContext,
+    artifact_id: str,
+    *,
+    source_text_block_ids: Sequence[str],
+    review_skipped_block_ids: Sequence[str],
+    reason_codes: Sequence[str],
+) -> None:
+    document = {
+        "schema_version": "alc.translate.fallback_diagnostic.v1",
+        "source_text_block_ids": list(
+            dict.fromkeys(source_text_block_ids)
+        ),
+        "review_skipped_block_ids": list(
+            dict.fromkeys(review_skipped_block_ids)
+        ),
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+    }
+    existing = context.artifacts.find(artifact_id)
+    if existing is not None:
+        if _read_json_artifact(
+            context, existing, "translation fallback diagnostic"
+        ) != document:
+            raise TranslationWorkflowError(
+                "translation_fallback_mismatch",
+                "translation fallback diagnostic differs on replay",
+            )
+        return
+    context.artifacts.publish_json(artifact_id, document)
+    context.events.emit(
+        "translation_fallback",
+        {
+            "source_text_block_count": len(
+                document["source_text_block_ids"]
+            ),
+            "review_skipped_block_count": len(
+                document["review_skipped_block_ids"]
+            ),
+            "reason_codes": document["reason_codes"],
+        },
+    )
+
+
+def _load_translation_fallback(
+    context: RunContext,
+    artifact_id: str,
+    fallback_units: dict[str, str],
+) -> None:
+    ref = context.artifacts.find(artifact_id)
+    if ref is None:
+        return
+    document = _read_json_artifact(
+        context, ref, "translation fallback diagnostic"
+    )
+    if set(document) != {
+        "schema_version",
+        "source_text_block_ids",
+        "review_skipped_block_ids",
+        "reason_codes",
+    } or document.get("schema_version") != (
+        "alc.translate.fallback_diagnostic.v1"
+    ):
+        raise TranslationWorkflowError(
+            "translation_fallback_invalid",
+            "translation fallback diagnostic is invalid",
+        )
+    source_ids = _string_items(
+        document.get("source_text_block_ids"),
+        "source fallback block IDs",
+    )
+    review_ids = _string_items(
+        document.get("review_skipped_block_ids"),
+        "review fallback block IDs",
+    )
+    _string_items(document.get("reason_codes"), "fallback reason codes")
+    fallback_units.update(
+        (block_id, "review_skipped") for block_id in review_ids
+    )
+    fallback_units.update(
+        (block_id, "source_text") for block_id in source_ids
+    )
+
+
+def _collapse_translation_fallbacks(
+    plans: Sequence[_TranslationUnitPlan],
+    fallback_units: Mapping[str, str],
+) -> dict[str, str]:
+    known_units = {
+        unit_id
+        for plan in plans
+        for group in plan.unit_groups
+        for unit_id in group
+    }
+    if set(fallback_units) - known_units:
+        raise TranslationWorkflowError(
+            "translation_fallback_invalid",
+            "translation fallback refers to an unknown internal unit",
+        )
+    collapsed: dict[str, str] = {}
+    for plan in plans:
+        kinds = {
+            fallback_units[unit_id]
+            for group in plan.unit_groups
+            for unit_id in group
+            if unit_id in fallback_units
+        }
+        if "source_text" in kinds:
+            collapsed[plan.block_id] = "source_text"
+        elif "review_skipped" in kinds:
+            collapsed[plan.block_id] = "review_skipped"
+    return collapsed
+
+
 def _is_structural_figure(block: Mapping[str, Any]) -> bool:
     if str(block.get("kind")) != "figure":
         return False
@@ -1852,7 +2406,12 @@ def _validate_translation_window(
             raise TranslationWorkflowError(
                 "translation_coverage_invalid", "translation text must be a string"
             )
-        output.append({"block_id": str(translated["block_id"]), "text": text})
+        output.append(
+            {
+                "block_id": str(translated["block_id"]),
+                "text": restore_translation_identity(text, _block),
+            }
+        )
     _validate_window_formula_identity(blocks, output)
     for translated, block in zip(output, blocks, strict=True):
         try:
@@ -1884,6 +2443,82 @@ def _validate_accepted_window(
         mismatch_message="accepted translations must exactly match source order",
         item_description="accepted translation",
     )
+
+
+def _migrate_legacy_accepted_list_windows(
+    values: Mapping[int, Mapping[str, Any]],
+    windows: Sequence[Sequence[Mapping[str, Any]]],
+    plans: Sequence[_TranslationUnitPlan],
+) -> dict[int, Mapping[str, Any]]:
+    """Replay old whole-list translations across current item-unit windows."""
+
+    original = dict(values)
+    if not original:
+        return original
+    expected = tuple(
+        str(block["block_id"])
+        for window in windows
+        for block in window
+    )
+    expected_set = set(expected)
+    plans_by_owner = {
+        plan.block_id: plan
+        for plan in plans
+        if plan.kind == "list" and not plan.direct
+    }
+    migrated: list[dict[str, str]] = []
+    used_legacy_owner = False
+    for ordinal in sorted(original):
+        value = original[ordinal]
+        raw = value.get("translations")
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            return original
+        for item in raw:
+            if (
+                not isinstance(item, Mapping)
+                or set(item) != {"block_id", "text"}
+                or not isinstance(item.get("block_id"), str)
+                or not isinstance(item.get("text"), str)
+            ):
+                return original
+            block_id = str(item["block_id"])
+            text = str(item["text"])
+            if block_id in expected_set:
+                migrated.append({"block_id": block_id, "text": text})
+                continue
+            plan = plans_by_owner.get(block_id)
+            if plan is None or any(len(group) != 1 for group in plan.unit_groups):
+                return original
+            unit_ids = tuple(group[0] for group in plan.unit_groups)
+            if not set(unit_ids).issubset(expected_set):
+                return original
+            lines = tuple(
+                line.strip() for line in text.splitlines() if line.strip()
+            )
+            if len(lines) != len(unit_ids):
+                return original
+            used_legacy_owner = True
+            migrated.extend(
+                {"block_id": unit_id, "text": line}
+                for unit_id, line in zip(unit_ids, lines, strict=True)
+            )
+    if not used_legacy_owner:
+        return original
+    migrated_ids = tuple(item["block_id"] for item in migrated)
+    if migrated_ids != expected[: len(migrated_ids)]:
+        return original
+    repartitioned: dict[int, Mapping[str, Any]] = {}
+    cursor = 0
+    for ordinal, window in enumerate(windows):
+        window_size = len(window)
+        entries = migrated[cursor : cursor + window_size]
+        if not entries:
+            break
+        repartitioned[ordinal] = {"translations": entries}
+        cursor += len(entries)
+        if len(entries) != window_size:
+            break
+    return repartitioned
 
 
 def _validate_window_formula_identity(
@@ -1940,63 +2575,6 @@ def _apply_review(
         for item in draft
     ]
     return _validate_accepted_window({"translations": reviewed}, blocks)
-
-
-def _review_supervision(
-    context: RunContext,
-    *,
-    artifact_prefix: str,
-    ordinal: int,
-    draft: Sequence[Mapping[str, str]],
-    error_code: str,
-    error_message: str,
-) -> list[dict[str, str]] | Paused:
-    digest = _digest(
-        {
-            "window_ordinal": ordinal,
-            "draft": list(draft),
-            "error_code": error_code,
-            "error_message": error_message,
-        }
-    )[:24]
-    resume_key = f"review-{digest}"
-    value = context.resume_input
-    if value is not None and value.get("resume_key") == resume_key:
-        if set(value) != {"schema_version", "resume_key", "action"} or (
-            value.get("schema_version") != REVIEW_SUPERVISION_SCHEMA
-            or value.get("action") != "accept_pre_review"
-        ):
-            raise TranslationWorkflowError(
-                "review_supervision_invalid",
-                "only accept_pre_review is supported for a failed review",
-            )
-        return [dict(item) for item in draft]
-    request_id = (
-        f"{artifact_prefix}/windows/{ordinal:04d}/"
-        f"review-supervision/{digest}"
-    )
-    request_ref = context.artifacts.find(request_id)
-    if request_ref is None:
-        request_ref = context.artifacts.publish_json(
-            request_id,
-            {
-                "schema_version": REVIEW_SUPERVISION_SCHEMA,
-                "resume_key": resume_key,
-                "reason": error_code,
-                "message": error_message,
-                "allowed_actions": ["accept_pre_review"],
-            },
-        )
-    return Paused(
-        Awaiting(
-            ResumeReason.SUPERVISION_REQUIRED,
-            resume_key,
-            True,
-            request_ref,
-            REVIEW_SUPERVISION_SCHEMA,
-            {"window_ordinal": ordinal, "code": error_code},
-        )
-    )
 
 
 def _validate_language_binding(
@@ -2212,9 +2790,19 @@ def _publish_translation_result(
     target_language: str,
     artifact_prefix: str,
     coverage: str,
+    fallback_kinds: Mapping[str, str] | None = None,
 ) -> TranslationResult:
     rich_blocks = {item.block_id: item for item in source.rich.blocks}
     units_by_id = {str(item["block_id"]): item for item in units}
+    fallback_by_id = dict(fallback_kinds or {})
+    if any(
+        kind not in {"source_text", "review_skipped"}
+        for kind in fallback_by_id.values()
+    ):
+        raise TranslationWorkflowError(
+            "translation_fallback_invalid",
+            "translation fallback kind is invalid",
+        )
     source_identity = source_identity_from_rich_document(source.rich)
     revisions: list[FragmentRevisionRef] = []
     artifacts: list[TranslationRevisionArtifact] = []
@@ -2268,10 +2856,23 @@ def _publish_translation_result(
             "block_id": block_id,
             "target_language": target_language,
             "markdown_body": markdown_body,
+            "fallback_kind": fallback_by_id.get(block_id),
         }
         fragment_digest = hashlib.sha256(
             canonical_json_bytes(fragment_material)
         ).hexdigest()
+        fallback_kind = fallback_by_id.get(block_id)
+        fallback_provenance = (
+            {
+                "translation_fallback": {
+                    "schema_version": "alc.translate.fallback.v1",
+                    "kind": fallback_kind,
+                    "source_preserved": fallback_kind == "source_text",
+                }
+            }
+            if fallback_kind is not None
+            else {}
+        )
         revision = FragmentRevision(
             source=source_identity,
             fragment_id=f"translation-{fragment_digest[:32]}",
@@ -2291,6 +2892,7 @@ def _publish_translation_result(
                 "producer": "alc-translate",
                 "source_language": source_language,
                 "translation_mode": "enabled",
+                **fallback_provenance,
                 **note_provenance,
             },
             markdown_body=markdown_body,
@@ -2364,6 +2966,25 @@ def _require_fields(
         raise TranslationWorkflowError(
             "model_output_invalid", f"{description} has invalid fields"
         )
+
+
+def _string_items(value: Any, description: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or any(not isinstance(item, str) or not item for item in value)
+    ):
+        raise TranslationWorkflowError(
+            "translation_fallback_invalid",
+            f"{description} must contain non-empty strings",
+        )
+    items = tuple(value)
+    if len(items) != len(set(items)):
+        raise TranslationWorkflowError(
+            "translation_fallback_invalid",
+            f"{description} contains duplicates",
+        )
+    return items
 
 
 def _string(value: Mapping[str, Any], key: str) -> str:
