@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
 from ac_llm import LLMExecutionOptions, ModelSelection
+from ac_llm.config import resolve_model_selection
 from ac_document import (
     CachedDocumentStructureRef,
     EQUATION_LABEL_VISUAL_PROMPT_VERSION,
@@ -21,6 +22,7 @@ from ac_document import (
 
 from .prompts import (
     AUTHOR_IDENTITY_PROMPT_VERSION,
+    HISTORICAL_AUTHOR_IDENTITY_PROMPT_VERSION_V3,
     CHAPTER_GUIDE_PROMPT_VERSION,
     CHAPTER_GUIDE_REVIEW_PROMPT_VERSION,
     EDITORIAL_PROPOSER_PROMPT_VERSION,
@@ -242,7 +244,10 @@ class CompanionGenerationRecipe:
                 "cross_chapter_editorial_review must be a boolean"
             )
         supported = {
-            "author_identity_prompt": {AUTHOR_IDENTITY_PROMPT_VERSION},
+            "author_identity_prompt": {
+                AUTHOR_IDENTITY_PROMPT_VERSION,
+                HISTORICAL_AUTHOR_IDENTITY_PROMPT_VERSION_V3,
+            },
             "chapter_guide_prompt": {
                 CHAPTER_GUIDE_PROMPT_VERSION,
                 HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17,
@@ -290,6 +295,24 @@ class CompanionExecutionOptions:
             object.__setattr__(
                 self, "document_cache_root", Path(self.document_cache_root)
             )
+
+
+def freeze_generation_recipe(
+    recipe: CompanionGenerationRecipe,
+) -> CompanionGenerationRecipe:
+    """Resolve an automatic model exactly once for durable run identity."""
+
+    if recipe.model.provider != "auto" and recipe.model.model is not None:
+        return recipe
+    resolved = resolve_model_selection(recipe.model)
+    return replace(
+        recipe,
+        model=ModelSelection(
+            provider=resolved.provider,
+            model=resolved.model,
+            tier="medium",
+        ),
+    )
 
 
 def encode_build_request(
@@ -653,5 +676,6 @@ __all__ = [
     "encode_build_request",
     "encode_generation_recipe",
     "encode_handler_semantic_input",
+    "freeze_generation_recipe",
     "normalize_handler_semantic_input",
 ]

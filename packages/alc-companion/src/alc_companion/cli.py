@@ -54,6 +54,7 @@ from .request_contracts import (
     CompanionBuildRequest,
     CompanionExecutionOptions,
     CompanionGenerationRecipe,
+    freeze_generation_recipe,
 )
 from .service import (
     CompanionService,
@@ -133,6 +134,11 @@ def _parser() -> _Parser:
         "--approx-term-count", type=int, default=50, help="target glossary size (default: 50)"
     )
     build.add_argument("--refresh", action="store_true", help="refresh cached source data")
+    build.add_argument(
+        "--new-lineage",
+        action="store_true",
+        help="explicitly replace the selected run with a different source or recipe",
+    )
     build.add_argument(
         "--cross-chapter-editorial-review",
         action="store_true",
@@ -398,20 +404,34 @@ def _build(args: argparse.Namespace) -> CommandResult:
         authors=authors,
         reader_labels=reader_labels,
     )
-    recipe = CompanionGenerationRecipe(
-        model=ModelSelection(
-            provider=args.provider,
-            model=args.model,
-            tier="medium",
-        ),
-        approx_term_count=args.approx_term_count,
-        cross_chapter_editorial_review=(
-            args.cross_chapter_editorial_review
-        ),
+    recipe = freeze_generation_recipe(
+        CompanionGenerationRecipe(
+            model=ModelSelection(
+                provider=args.provider,
+                model=args.model,
+                tier="medium",
+            ),
+            approx_term_count=args.approx_term_count,
+            cross_chapter_editorial_review=(
+                args.cross_chapter_editorial_review
+            ),
+        )
     )
     execution = _execution_options(args)
     service = CompanionService(paths.jobs_root)
     run_id = companion_run_id(request, recipe)
+    selected_run = paths.current_run_id
+    if selected_run is not None:
+        if selected_run != run_id and not args.new_lineage:
+            raise CompanionProjectError(
+                "selected_run_conflict",
+                "project already selects another Companion lineage; use "
+                "status/resume or explicitly pass --new-lineage",
+            )
+        if selected_run == run_id:
+            selected = service.inspect(run_id).snapshot
+            if selected.status is not RunStatus.PENDING:
+                return _status_locked(paths)
     prepared = service.prepare(request, recipe=recipe, run_id=run_id)
     run_id = prepared.run_id
     paths.select_run(run_id)
@@ -468,9 +488,10 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
     selected_run = snapshot_data(view.snapshot)
     data: dict[str, Any] = {
         "selected_run": selected_run,
-        "build_diagnostics": CompanionService(
-            paths.jobs_root
-        ).build_diagnostics(run_id),
+        "build_diagnostics": CompanionService(paths.jobs_root).build_diagnostics(
+            run_id
+        ),
+        "progress": CompanionService(paths.jobs_root).progress(run_id),
     }
     artifacts: tuple[CommandArtifact, ...] = ()
     publication_warnings: list[CommandWarning] = []

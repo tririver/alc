@@ -13,7 +13,11 @@ For translated builds, every chapter translation is frozen before guide
 generation. Chapter proposers and reviewers receive exact commands for reading
 both the original and translated cached documents, so guide wording can follow
 the accepted names and terminology without copying whole document bodies into
-model-request JSON.
+model-request JSON. Companion automatically executes only these predeclared
+read-only `ac-document` commands through a bounded host broker; unknown
+commands, writes, network access, and another source identity are refused.
+Author verification receives bounded front-matter evidence directly and does
+not require a host read during an ordinary build.
 
 Guide writing uses `ac-proposer-reviewer`. A reviewer may accept a strong
 proposal immediately or give concrete, constructive suggestions for up to two
@@ -81,6 +85,22 @@ role `web`. On a pause, inspect top-level `resume.input_required` and
 `resume.request_artifact`; `--input` accepts inline JSON or a JSON file and may
 be omitted when no input is required. Resume replays verified completed work in
 the same durable run. Keep the original document-cache root and host authority.
+`data.progress` exposes the current phase, completed/total units and chapters,
+frozen provider/model, last progress time, partial Reader availability, and the
+single valid next action. Failed semantic validation also exposes its supported
+editable candidate path there; repair it and resume the same run rather than
+starting a fallback source, provider, or project.
+While a planned group is starting, `status` reports zero completed units until
+its atomic group state is published; an existing malformed state remains a
+strict error.
+Recoverable block-translation and review failures do not pause the build:
+invalid translated units fall back to source text, and invalid reviews retain
+the validated pre-review translation. Status reports these at
+`data.progress.translation_fallbacks`; final fragment provenance identifies the
+affected blocks. Source corruption, permission decisions, explicit stops, and
+an invalid final publication still stop safely.
+`build` refuses to replace a different selected source or recipe unless
+`--new-lineage` is explicit; that flag is not a retry mechanism.
 After an explicit render, use `data.delivery.html`; an empty delivery with
 `publication_not_selected` means a different run won selection before
 promotion.
@@ -91,7 +111,8 @@ The pass may revise or omit a guide only when the final reviewer explicitly
 approves the exact digest-bound edit. Original accepted guides remain as the
 audit baseline. The resolved publication includes a lightweight summary and a
 downloadable `alc.companion.editorial_review.v1` JSON report. Builds without
-the flag retain the v17 recipe identity and make no editorial model calls.
+the flag retain their non-editorial recipe identity and make no editorial
+model calls.
 
 Post-publication corrections use a canonical request and create immutable
 child revisions without changing the run-owned publication:
