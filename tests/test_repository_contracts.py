@@ -85,6 +85,40 @@ def test_plugin_exposes_only_learning_wrappers_and_workflows() -> None:
     assert "install ARC automatically" in skill
 
 
+def test_companion_skill_declares_codex_host_execution_boundary() -> None:
+    workflow = (PLUGIN / "skills/alc/workflows/companion.md").read_text(
+        encoding="utf-8"
+    )
+    manual = (PLUGIN / "skills/alc/manuals/alc-companion.md").read_text(
+        encoding="utf-8"
+    )
+    operating = (PLUGIN / "skills/alc/rules/operating.md").read_text(
+        encoding="utf-8"
+    )
+    workflow_prose = " ".join(workflow.split())
+    manual_prose = " ".join(manual.split())
+    operating_prose = " ".join(operating.split())
+
+    assert 'sandbox_permissions="require_escalated"' in workflow
+    assert "before the first model-backed `build` or `resume`" in workflow_prose
+    assert "Do not ask a separate chat confirmation" in workflow_prose
+    assert "let the host's configured approval reviewer decide" in workflow_prose
+    assert (
+        "already authorizes model processing of that source" in workflow_prose
+    )
+    assert "Do not ask a second chat question" in workflow_prose
+    assert "ac-llm doctor --provider auto" in workflow
+    assert "`data.provider`" in workflow
+    assert "Do not submit `--provider auto`" in workflow_prose
+    assert "--provider <resolved-provider>" in workflow
+    assert (
+        "does not make `--host-authority unrestricted` truthful" in manual_prose
+    )
+    assert "it cannot grant its own escalation" in manual_prose
+    assert "Do not discover this boundary by first launching" in operating_prose
+    assert "Do not split that one requested workflow" in operating_prose
+
+
 def test_runtime_source_lock_uses_full_shas() -> None:
     lock = json.loads((SCRIPTS / "runtime-sources.json").read_text(encoding="utf-8"))
     assert lock["schema_version"] == "ac.runtime_sources.v2"

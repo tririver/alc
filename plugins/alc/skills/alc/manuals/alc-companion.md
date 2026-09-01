@@ -63,7 +63,10 @@ a stable ignored path under `local/`. Companion claims only
 files remain untouched.
 
 Remote academic acquisition belongs to an optional host-level ARC research
-workflow. It must materialize a local rich source before this command. If the
+workflow. It must materialize one local rich source before this command. For an
+exact-version arXiv HTML URL, keep one self-contained HTML bundle authoritative
+for the selected project and run; do not fall back to TeX or flattened Markdown
+after a failure. If the
 user explicitly supplies authors, repeat `--author <name>`; otherwise let Companion
 verify source-derived candidates. Unsupported reader-interface languages need
 one complete `--reader-labels <json-file>` map.
@@ -73,7 +76,31 @@ one complete `--reader-labels <json-file>` map.
 Choose `--host-authority` once per run. Use `unrestricted` only when the host
 explicitly grants it; otherwise use `unknown` (or `restricted` when known).
 Reuse the same value on resume. Without an authorized broker, a required host
-model turn becomes a durable pause returned by the command.
+model turn becomes a durable pause returned by the command. Companion supplies
+a bounded broker for its own declared read-only `ac-document` source and
+translation commands; arbitrary commands, writes, network access, and another
+source identity are not brokered.
+
+Codex Desktop command execution permission is a separate boundary. A
+model-backed Companion `build` or `resume` that may use the Codex provider must
+run through host execution, as specified in `workflows/companion.md`, so the
+nested provider can reach its own local state and app-server. Granting that
+outer command permission does not make `--host-authority unrestricted`
+truthful: keep `unknown` unless the host independently reports unrestricted
+broker authority. Read-only commands such as `status` and `validate` do not
+need this model-provider permission merely because they inspect the same run.
+The Skill requests host execution directly and leaves approval to the host's
+configured reviewer; it cannot grant its own escalation. Do not add a separate
+chat confirmation before the tool call.
+The user's Companion request is the authorization to process the supplied
+source with the workflow's frozen provider. It is not necessary to obtain a
+second destination confirmation for that same provider.
+
+For a new `build`, never send unresolved `--provider auto` to host approval.
+Run the public `ac-llm doctor --provider auto` preflight through `alc-runtime`
+in the ordinary sandbox, require `data.available: true`, and pass its exact
+`data.provider` to the build. For `resume`, use the frozen provider/model
+reported by `status` in the host justification without changing the run.
 
 `--document-cache-root <path>` overrides the document cache for build or resume.
 Without it, Companion uses `AC_DOCUMENT_CACHE` when set, otherwise
@@ -113,12 +140,18 @@ lifecycle is `data.selected_run.status`. A succeeded publication also reports
 root reader appears as an artifact with role `web`; status does not expose a
 `data.delivery` field. Preserve status warnings about invalid workspaces or
 stale HTML.
+`data.progress` reports the current phase, completed and total units, completed
+and total chapters, the frozen provider/model, last progress time, partial
+Reader availability, translation fallback counts/reasons, and one normalized
+`next_action`.
 
 ## Resume, Render, and Validate
 
 If `status` or a build returns a pause, inspect top-level `resume`, including
-`resume.input_required` and `resume.request_artifact`. Resume the selected
-lineage:
+`resume.input_required` and `resume.request_artifact`, together with
+`data.progress.next_action`. Resume the selected lineage; never create an
+attempt-suffixed project, substitute another source representation, or change
+provider/model as an implicit fallback:
 
 ```bash
 alc-companion resume \
@@ -129,7 +162,25 @@ alc-companion resume \
 
 `--input` accepts an inline JSON object or a JSON file. Omit it when the current
 pause descriptor does not require input. Completed verified child work is
-replayed within the same run.
+replayed within the same run. A failed result with an editable candidate reports
+that exact path in `data.progress.next_action.candidate_path`; repair only that
+declared candidate and resume the same run without hand-writing an `ac-llm`
+resume object.
+
+Recoverable block-translation identity failures automatically preserve the
+affected source text as identity-preserving Markdown and continue after the
+bounded retry, including failures detected after bounded units are reassembled
+into their original block. Resuming through a previously persisted invalid
+draft or accepted model artifact applies the same block-local salvage instead
+of repeating the failure. Review failures keep the validated pre-review
+translation. These cases remain visible in
+`data.progress.translation_fallbacks` and fragment provenance; they do not
+require hand-written resume input. Source corruption, permission decisions,
+explicit stops, and invalid final publication remain safe stopping boundaries.
+
+`build` refuses to replace a different selected source/recipe by default. Use
+`--new-lineage` only after an explicit decision to start a genuinely different
+lineage; pauses, failures, and slow progress use `status` and `resume` instead.
 
 Use the existing cooperative stop when the user asks to stop:
 
