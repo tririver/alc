@@ -117,6 +117,19 @@ visible bibliography ordinal; the authored list prefix supplies that label.
 Comma-adjacent narrative author links retain their individual labels/targets
 without being frozen as a numeric citation group. Adjacent inline math spans
 are validated as separate formulas even when their Markdown delimiters touch.
+Markdown formulas or links left inside a parser text span, including arXiv
+links with nested bracket labels, are incorporated into the same source
+identity so the canonical source-text fallback always validates itself.
+Every list is translated and reviewed item by item. Oversized items and
+paragraph blocks are further divided into bounded internal units, then
+deterministically reassembled into one revision with the original block
+identity. Historical accepted whole-list translations are expanded into those
+item units before current budget windows are formed, so a changed window
+boundary does not discard already accepted work. Math and links remain
+indivisible while splitting.
+If a model adds exactly one redundant escape layer to a known source formula,
+the translator restores that exact source formula before strict validation;
+substituted, missing, duplicated, or newly invented formulas still fail.
 
 Generation and resume commands accept `--host-authority`. Set
 `<host-authority>` once per run: use `unrestricted` only when the host
@@ -135,11 +148,22 @@ grant a third automatic generation attempt.
 When a model response is structurally valid JSON but violates a
 machine-checkable language, term, block, formula, link target/label, or review
 identity or coverage contract, ALC makes one fresh full-generation attempt
-with validation feedback. A second unusable response pauses with both attempts
-and an editable candidate preserved. Completed windows and a valid pre-review
-translation stay available. Provider, authority, binding, input-budget, and
-corrupt-artifact failures are not semantic-output retries. Translation quality
-and scientific judgment are reviewer concerns, not program-invalid output.
+with validation feedback. After a second unusable block-translation response,
+ALC preserves the affected source text as the translation fallback and
+continues. Structured inline math and links are reconstructed as
+identity-preserving Markdown, and the final original-block reassembly applies
+the same per-block fallback without discarding valid neighboring translations.
+Replayed draft or accepted model artifacts use the same salvage boundary, so a
+resumed run cannot turn a previously persisted block-local content error into a
+workflow failure.
+If review fails, ALC keeps the already validated pre-review translation.
+Fragment provenance records `alc.translate.fallback.v1`, and run events record
+fallback counts and reasons. Provider authentication, quota, transport,
+timeout, or other execution failures, provider pauses that require host
+authority, source/binding corruption, explicit stops, and publication failures
+remain terminal or resumable boundaries; they are never mislabeled as a
+successful translation. Translation quality and scientific judgment remain
+reviewer concerns, not program-invalid output.
 
 ## Tests
 
