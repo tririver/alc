@@ -37,7 +37,11 @@ Choose a local rich Markdown, HTML, or flattened single-file TeX source. A PDF
 is optional and is used only for validation and page mapping. `alc-companion`
 does not resolve remote paper identifiers. When the input is remote, use an
 available host-level acquisition workflow to materialize a local rich source
-first. Preserve the user's exact
+first. For an exact-version arXiv HTML URL, acquire one self-contained HTML
+bundle and keep that file authoritative for the entire Companion lineage. Do
+not retry a structural, translation, or provider failure through TeX,
+flattened Markdown, a second source bundle, or another project root. Preserve
+the user's exact
 `user_intent`; when absent, Companion uses its neutral textbook intent.
 
 When the user explicitly requests OCR proofreading and supplies source
@@ -71,6 +75,44 @@ alc-companion build <source-path> \
   --workers <workers>
 ```
 
+Before requesting host execution for a new build whose provider is `auto`,
+resolve it in the ordinary command sandbox:
+
+```bash
+<skill-dir>/scripts/alc-runtime run ac-llm doctor --provider auto
+```
+
+Require a completed result with `data.available: true` and a non-empty exact
+`data.provider`. Replace the build argument with
+`--provider <resolved-provider>` before requesting host execution. Do not
+submit `--provider auto` to host execution, and do not turn a missing or
+unavailable provider into a user authorization question; report it as a
+technical readiness error. Provider-specific model resolution still belongs
+to the durable build and is frozen in its recipe. For `resume`, read the exact
+frozen provider/model from `status` and include them in the host-tool
+`justification`; never alter the recipe.
+
+When this Skill runs inside Codex Desktop, execute the outer model-backed
+`alc-companion build` or `alc-companion resume` command with host execution
+instead of the command sandbox. Do this before the first model-backed `build`
+or `resume`; do not wait for a nested Codex provider to fail first. For the
+Codex command tool, set `sandbox_permissions="require_escalated"` and give the
+tool a concise `justification` that the Companion invokes the selected model
+exact provider. Do not ask a separate chat confirmation before making that tool
+call; let the host's configured approval reviewer decide. If the host still
+surfaces a user approval prompt, wait for that decision and do not simulate or
+claim approval. Apply this boundary when `--provider codex` is selected and
+when another exact provider requires host execution. It grants the outer
+process the local access needed by the nested provider; it does not grant
+arbitrary source authority, change the frozen provider/model, or justify
+passing `--host-authority unrestricted`.
+
+The user's explicit request to build a Companion from the supplied source
+already authorizes model processing of that source through the provider frozen
+by this workflow. Do not ask a second chat question about sending the document
+to that same provider. Ask again only if a materially different provider,
+destination, source, or lineage is proposed.
+
 Add `--cross-chapter-editorial-review` only when the user wants an additional
 global redundancy audit after all chapter-local guides complete. It runs a
 separate single-worker proposer-reviewer scope for at most three rounds. Only
@@ -82,8 +124,19 @@ and model-call count.
 
 Choose `<host-authority>` once: use `unrestricted` only when the host
 explicitly reports unrestricted authority; otherwise use `unknown`. Reuse the
-identical value when resuming this run. Without an explicitly supplied broker,
-a model host request becomes a durable manual pause returned by the command.
+identical value when resuming this run. Companion automatically brokers only
+the exact read-only `ac-document` source and frozen-translation commands it
+declares. Unknown commands, writes, network access, and another source identity
+remain durable refusals or pauses.
+
+The build resolves `--provider auto` to one exact provider and model before it
+creates the durable recipe. Read the frozen values from status and keep them
+for every retry and resume. Never switch providers, create a fallback run, or
+start another project root because a build is slow, paused, or failed; that is
+a separate material action requiring explicit user authorization.
+If the selected project genuinely needs a different source or recipe, obtain
+that authorization and pass `--new-lineage`; never use it for ordinary retry
+or recovery.
 
 Add `--pdf <path>` only for a local PDF input validator. It is never a
 Companion output. `--pdf fetch` and remote refresh are not Companion features.
@@ -190,10 +243,21 @@ the final candidate as caller-owned routing data.
 
 ### Step 2: Resolve a pause
 
-Inspect the returned `resume` descriptor and request artifact. A model-requested
-host action is an `ac-llm` host turn; Companion does not define a separate
-evidence-input or evidence-resume contract. Resume
-with the same opaque resume key when input is required:
+Run `status` first and follow `data.progress.next_action`. It reports the
+current phase, completed and total units, frozen provider/model, last progress
+time, and any editable candidate path. Ordinary declared source reads are
+handled by Companion's read-only broker and should not become user-visible
+pauses. If an exceptional pause still requires input, inspect the returned
+`resume` descriptor and request artifact, validate the requested response, and
+resume the same opaque key:
+
+Block translation identity failures are not exceptional pauses: after the
+bounded automatic retry, ALC reconstructs structured source math and links as
+identity-preserving Markdown, retains that affected block, and continues.
+Final bounded-unit reassembly applies the same per-block fallback. Review
+failures retain the validated pre-review translation. Inspect
+`data.progress.translation_fallbacks` and the final fragment provenance; do not
+claim that fallback text is a completed translation.
 
 ```bash
 alc-companion resume --project-dir <project-dir> \
@@ -201,10 +265,11 @@ alc-companion resume --project-dir <project-dir> \
   --host-authority <host-authority>
 ```
 
-For a failed build, inspect
-`<project-dir>/.alc/companion/jobs/<run-id>/working/`. Candidate files are
-written before semantic validation and errors report their exact paths. Edit a
-candidate to adopt repaired content on a supported recovery path. A final guide
+For a failed build, inspect the candidate path reported by
+`data.progress.next_action`. Candidate files are written before semantic
+validation and errors report their exact paths. Edit that candidate only when
+the failure explicitly exposes it, then run `alc-companion resume` without
+creating a replacement run. A final guide
 candidate is backed by the durable proposer-reviewer transcript; deleting it
 re-materializes that frozen proposal rather than creating an extra model round.
 Keep visual QA under
