@@ -1,4 +1,4 @@
-# Direct external dependencies tested for ALC v2.0.4.
+# Direct external dependencies tested for ALC v2.0.5.
 beautifulsoup4==4.14.3
 json-repair==0.59.10
 jsonschema==4.26.0
