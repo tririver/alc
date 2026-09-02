@@ -1,6 +1,6 @@
 {
   "name": "alc",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "Agentic Learning Copilot for OCR proofreading, translation, Companion reading, and standalone HTML.",
   "author": {
     "name": "ALC"
