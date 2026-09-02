@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -102,6 +103,70 @@ def test_source_identity_uses_current_inline_spans() -> None:
         "[notes](https://example.test/notes)."
     }
     assert "inline_spans" not in str(prompted["payload"])
+
+
+@pytest.mark.parametrize(
+    ("text", "rendered_links", "identities"),
+    [
+        (
+            "[x](foo(bar))",
+            ["[x](foo(bar))"],
+            [("x", "foo(bar)")],
+        ),
+        (
+            '[x](foo "title")',
+            ['[x](foo "title")'],
+            [("x", "foo")],
+        ),
+        (
+            "[x](<foo(bar>)",
+            ["[x](<foo(bar>)"],
+            [("x", "<foo(bar>")],
+        ),
+        (
+            "[bad [x](foo)](broken",
+            ["[x](foo)"],
+            [("x", "foo")],
+        ),
+        (
+            "[x](foo(bar) junk [evil](https://evil.test))",
+            ["[evil](https://evil.test)"],
+            [("evil", "https://evil.test")],
+        ),
+        (
+            '<span title="[evil](https://evil.test)">x</span>',
+            ["[evil](https://evil.test)"],
+            [("evil", "https://evil.test")],
+        ),
+        (
+            "[x](foo\0bar)",
+            ["[x](foo\0bar)"],
+            [("x", "foo\ufffdbar")],
+        ),
+        ("[x]()", ["[x]()"], [("x", "")]),
+        ("[x]( )", ["[x]( )"], [("x", "")]),
+    ],
+)
+def test_markdown_link_matches_follow_commonmark_rendering(
+    text: str,
+    rendered_links: list[str],
+    identities: list[tuple[str, str]],
+) -> None:
+    matches = source_module._markdown_link_matches(text)
+
+    assert [text[start:end] for start, end, _, _ in matches] == rendered_links
+    assert [(label, target) for _, _, label, target in matches] == identities
+
+
+def test_markdown_link_matching_bounds_malformed_prefix_work() -> None:
+    text = "[x](" * 3_000
+
+    started = time.perf_counter()
+    matches = source_module._markdown_link_matches(text)
+    elapsed = time.perf_counter() - started
+
+    assert matches == ()
+    assert elapsed < 2.5
 
 
 def test_nested_old_tex_math_shifts_are_preserved_as_one_formula() -> None:
@@ -293,8 +358,16 @@ def _plain_paragraph(block_id: str) -> dict[str, object]:
         r"[额外](https://example.test/extra)。",
         r"看 $a$ 和 $\Psi^\dagger$；"
         r"https://example.test/notes https://example.test/notes",
+        r"看 $a$ 和 $\Psi^\dagger$；"
+        r"[注释](https://example.test/notes) [额外]()。",
     ],
-    ids=["missing", "replaced", "extra-target", "extra-duplicate"],
+    ids=[
+        "missing",
+        "replaced",
+        "extra-target",
+        "extra-duplicate",
+        "extra-empty-target",
+    ],
 )
 def test_changed_link_multiset_is_rejected(text: str) -> None:
     with pytest.raises(

@@ -1984,6 +1984,111 @@ def test_invalid_link_falls_back_to_source_and_continues(tmp_path):
     )
 
 
+def test_parenthesized_repeated_link_source_fallback_is_valid():
+    doi_target = (
+        "https://dx.doi.org/https://doi.org/10.1016/"
+        "0370-2693(80)90670-X"
+    )
+    article_target = (
+        "https://www.sciencedirect.com/science/article/pii/"
+        "037026938090670X"
+    )
+    block = {
+        "block_id": "block-parenthesized-links",
+        "kind": "list",
+        "payload": {
+            "ordered": False,
+            "items": [
+                {
+                    "text": (
+                        "[2] A. A. Starobinsky, Physics Letters B 91 no. 1, "
+                        "(1980) 99–102. "
+                        f"{article_target}."
+                    ),
+                    "inline_spans": [
+                        {"kind": "text", "text": "[2] A. A. Starobinsky, "},
+                        {
+                            "kind": "link",
+                            "text": "Physics Letters B",
+                            "target": doi_target,
+                        },
+                        {"kind": "link", "text": " ", "target": doi_target},
+                        {"kind": "link", "text": "91", "target": doi_target},
+                        {
+                            "kind": "link",
+                            "text": " no. 1, (1980) 99–102",
+                            "target": doi_target,
+                        },
+                        {"kind": "text", "text": ". "},
+                        {
+                            "kind": "link",
+                            "text": article_target,
+                            "target": article_target,
+                        },
+                        {"kind": "text", "text": "."},
+                    ],
+                }
+            ],
+        },
+    }
+
+    fallback, fallback_ids = _salvaged_translation_fallback(
+        (block,),
+        candidate={
+            "translations": [
+                {"block_id": block["block_id"], "text": "invalid translation"}
+            ]
+        },
+    )
+
+    assert fallback_ids == [block["block_id"]]
+    assert fallback == [
+        {
+            "block_id": block["block_id"],
+            "text": (
+                "[2] A. A. Starobinsky, "
+                f"[Physics Letters B]({doi_target})"
+                f"[ ]({doi_target})"
+                f"[91]({doi_target})"
+                f"[ no. 1, (1980) 99–102]({doi_target}). "
+                f"[{article_target}]({article_target})."
+            ),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["https://example.test/é", "foo&amp;bar"],
+    ids=["unicode", "entity"],
+)
+def test_lexical_link_source_fallback_is_valid(target):
+    block = {
+        "block_id": "block-lexical-link",
+        "kind": "paragraph",
+        "payload": {
+            "text": "source",
+            "inline_spans": [
+                {"kind": "link", "text": "source", "target": target}
+            ],
+        },
+    }
+
+    fallback, fallback_ids = _salvaged_translation_fallback(
+        (block,),
+        candidate={
+            "translations": [
+                {"block_id": block["block_id"], "text": "invalid translation"}
+            ]
+        },
+    )
+
+    assert fallback_ids == [block["block_id"]]
+    assert fallback == [
+        {"block_id": block["block_id"], "text": f"[source]({target})"}
+    ]
+
+
 @pytest.mark.parametrize("artifact_kind", ["draft", "accepted"])
 def test_invalid_replayed_translation_artifact_falls_back_and_continues(
     tmp_path, artifact_kind
