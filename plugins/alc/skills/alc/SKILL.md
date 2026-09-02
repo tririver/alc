@@ -64,6 +64,80 @@ whether the user wants to install it or continue without enrichment. Never
 install ARC automatically and never make it a Python or runtime dependency of
 ALC.
 
+## Direct HTML sources
+
+`alc-companion` accepts a local source only. When the user provides one direct
+HTML URL for a Companion, materialize it at the Skill layer before starting the
+build. This is acquisition, not academic enrichment:
+
+1. This workflow accepts direct HTML URLs only. Classify locally before probing
+   an executable. Route to ARC only for an exact
+   `https://arxiv.org/html/<id>[vN]` URL, deterministically extracting the ID
+   and preserving an explicit `vN` version. An explicit ar5iv URL and every
+   other HTTPS HTML URL go to generic ACF with the original URL unchanged.
+2. Probe ARC without installing it. When `arc-paper` is already on `PATH`, run
+   this no-network, no-write capability probe:
+
+   ```bash
+   arc-paper export-arxiv-html-acquisition --help
+   ```
+
+   Use that launcher only when the probe exits with status 0. Otherwise, only
+   when the ARC Skill is present, run its own:
+
+   ```bash
+   <arc-skill-dir>/scripts/arc-runtime doctor
+   ```
+
+   Continue only if it exits successfully and returns JSON with `ready:true`.
+   Then run the same no-network, no-write capability probe through that ready
+   runtime:
+
+   ```bash
+   <arc-skill-dir>/scripts/arc-runtime arc-paper \
+     export-arxiv-html-acquisition --help
+   ```
+
+   Use the runtime launcher only when this second probe exits with status 0.
+   Never call `setup`; any missing, not-ready, or failed probe goes to generic
+   ACF.
+3. When the exact official URL and an executable probe both pass, materialize
+   through:
+
+   ```bash
+   arc-paper export-arxiv-html-acquisition <paper-id> \
+     --output-dir <bundle-dir> [--cache-root <root>]
+   ```
+
+   If the ready ARC Skill runtime is being used instead of the console script,
+   use its own launcher:
+
+   ```bash
+   <arc-skill-dir>/scripts/arc-runtime arc-paper \
+     export-arxiv-html-acquisition <paper-id> --output-dir <bundle-dir>
+   ```
+
+   Do not use ALC's runtime launcher for an ARC command. ARC's materialized
+   export must contain the shared `ac.document.html_source_bundle.v1` bundle.
+4. If ARC is unavailable, old, not ready, incapable, or the input is not an
+   exact official arXiv HTML URL, invoke the explicit
+   provider-neutral `ac-document acquire-html-bundle` flow through
+   `alc-runtime` with `--output-dir <bundle-dir>`. It atomically creates
+   `<bundle-dir>/source.html`, `<bundle-dir>/manifest.json`, and any local
+   resources. Pass the original HTTPS URL unchanged. Do not install ARC or
+   retry through a different source type.
+5. In either route, retain the one materialized local HTML primary and its
+   materialized export manifest. The export's nested bundle uses the shared
+   contract, and the Companion integration projects its bundle identity,
+   primary artifact digest, requested URL, and final URL into the durable
+   lineage. Start Companion with the local `source.html` plus
+   `--html-source-manifest <manifest-path>`.
+
+Acquisition warnings, including partially unavailable resources, are retained
+through Companion's existing source-diagnostic warning surface. ALC package
+code does not import, install, or invoke ARC; ARC presence and recognition are
+Skill-level coordination only.
+
 ## Completion
 
 Validate the owning workflow before delivery. Publish visible HTML or native

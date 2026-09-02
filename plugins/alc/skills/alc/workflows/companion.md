@@ -35,14 +35,47 @@ installation.
 
 Choose a local rich Markdown, HTML, or flattened single-file TeX source. A PDF
 is optional and is used only for validation and page mapping. `alc-companion`
-does not resolve remote paper identifiers. When the input is remote, use an
-available host-level acquisition workflow to materialize a local rich source
-first. For an exact-version arXiv HTML URL, acquire one self-contained HTML
-bundle and keep that file authoritative for the entire Companion lineage. Do
-not retry a structural, translation, or provider failure through TeX,
-flattened Markdown, a second source bundle, or another project root. Preserve
-the user's exact
+does not resolve remote paper identifiers. For one direct HTML URL, use ARC
+only for exact `https://arxiv.org/html/<id>[vN]`; preserve the version while
+extracting the paper ID. An ar5iv URL or any other HTTPS HTML URL always goes
+to generic ACF with the original URL unchanged. If `arc-paper` is on `PATH`,
+first run `arc-paper export-arxiv-html-acquisition --help`; only exit status 0
+is usable. Otherwise, only an ARC Skill runtime whose `doctor` exits 0 with
+JSON `ready:true` may run
+`<arc-skill-dir>/scripts/arc-runtime arc-paper
+export-arxiv-html-acquisition --help`; only exit status 0 is usable. These
+probes are no-network and no-write. Never run `setup`; any failed probe uses
+the generic route. The accepted ARC route uses
+`arc-paper export-arxiv-html-acquisition <paper-id> --output-dir <bundle-dir>`
+with an optional `--cache-root <root>`. Both routes must return one materialized
+export containing an
+`ac.document.html_source_bundle.v1` bundle and one local HTML primary. The
+Companion integration projects the nested bundle's identity, primary artifact
+digest, requested URL, and final URL into the lineage; partial-resource
+warnings remain Companion source diagnostics. Do not retry a structural,
+translation, or provider failure through TeX, flattened Markdown, a second
+source bundle, or another project root. Preserve the user's exact
 `user_intent`; when absent, Companion uses its neutral textbook intent.
+
+For the generic route, create one explicit materialization directory:
+
+```bash
+<skill-dir>/scripts/alc-runtime ac-document acquire-html-bundle <html-url> \
+  --output-dir <bundle-dir>
+```
+
+Start the build with the manifest-adjacent local `source.html` and the export:
+
+```bash
+alc-companion build <bundle-dir>/source.html \
+  --html-source-manifest <bundle-dir>/manifest.json \
+  --project-dir <project-dir> \
+  --target-language <language-tag> \
+  --host-authority <host-authority>
+```
+
+Companion verifies that the explicit source path and bytes match the manifest;
+do not copy, rename, or substitute that source between acquisition and build.
 
 When the user explicitly requests OCR proofreading and supplies source
 Markdown, original PDF, and MinerU content-list JSON, first complete

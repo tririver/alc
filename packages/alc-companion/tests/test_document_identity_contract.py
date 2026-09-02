@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from ac_llm import ModelSelection
 from ac_document import (
     RichDocumentParserService,
     SourceFormat,
@@ -14,6 +15,7 @@ from ac_document import (
 
 from alc_companion.request_contracts import (
     COMPANION_BUILD_REQUEST_SCHEMA,
+    LEGACY_COMPANION_BUILD_REQUEST_SCHEMA,
     COMPANION_GENERATION_RECIPE_SCHEMA,
     EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA,
     EDITORIAL_PROPOSER_PROMPT_VERSION,
@@ -25,7 +27,9 @@ from alc_companion.request_contracts import (
     encode_build_request,
     encode_generation_recipe,
 )
+from alc_companion.source_bundle import HTMLSourceBundleBinding
 from alc_companion.source_identity import resolve_document_identity
+from alc_companion.service import companion_run_id
 
 
 def _document(tmp_path: Path, text: str):
@@ -59,7 +63,8 @@ def test_current_request_and_recipe_round_trip_only(tmp_path: Path) -> None:
     request_document = encode_build_request(request)
     recipe = CompanionGenerationRecipe()
     recipe_document = encode_generation_recipe(recipe)
-    assert request_document["schema_version"] == COMPANION_BUILD_REQUEST_SCHEMA
+    assert request_document["schema_version"] == LEGACY_COMPANION_BUILD_REQUEST_SCHEMA
+    assert "source_bundle" not in request_document
     assert request_document["reviewed_supplements"] == []
     assert recipe_document["schema_version"] == COMPANION_GENERATION_RECIPE_SCHEMA
     assert recipe_document == {
@@ -83,6 +88,74 @@ def test_current_request_and_recipe_round_trip_only(tmp_path: Path) -> None:
     assert decoded_request.authors == request.authors
     assert decoded_request.target_language == request.target_language
     assert decode_generation_recipe(recipe_document) == recipe
+
+
+def test_html_source_bundle_binding_has_a_distinct_durable_request_contract(
+    tmp_path: Path,
+) -> None:
+    binding = HTMLSourceBundleBinding(
+        bundle_digest="a" * 64,
+        primary_artifact_digest="b" * 64,
+        materialized_source_digest="c" * 64,
+        requested_url="https://example.test/paper.html",
+        final_url="https://example.test/paper.html",
+    )
+    request = CompanionBuildRequest(
+        _document(tmp_path, "# Source\n\nBody.\n"),
+        source_bundle=binding,
+    )
+
+    encoded = encode_build_request(request)
+    decoded = decode_build_request(encoded)
+
+    assert encoded["schema_version"] == COMPANION_BUILD_REQUEST_SCHEMA
+    assert encoded["source_bundle"] == {
+        "schema_version": "alc.companion.html_source_binding.v1",
+        "bundle_schema_version": "ac.document.html_source_bundle.v1",
+        "export_schema_version": "ac.document.html_source_export.v1",
+        "bundle_digest": "a" * 64,
+        "primary_artifact_digest": "b" * 64,
+        "materialized_source_digest": "c" * 64,
+        "requested_url": "https://example.test/paper.html",
+        "final_url": "https://example.test/paper.html",
+    }
+    assert decoded.source_bundle == binding
+
+
+def test_html_source_bundle_binding_changes_the_companion_run_identity(
+    tmp_path: Path,
+) -> None:
+    source = _document(tmp_path, "# Source\n\nBody.\n")
+    recipe = CompanionGenerationRecipe(
+        model=ModelSelection(provider="codex", model="gpt-5.6-luna", tier="medium")
+    )
+    first = CompanionBuildRequest(
+        source,
+        source_bundle=HTMLSourceBundleBinding(
+            bundle_digest="a" * 64,
+            primary_artifact_digest="b" * 64,
+            materialized_source_digest="c" * 64,
+            requested_url="https://example.test/paper.html",
+            final_url="https://example.test/first.html",
+        ),
+    )
+    changed_provenance = replace(
+        first,
+        source_bundle=HTMLSourceBundleBinding(
+            bundle_digest="a" * 64,
+            primary_artifact_digest="b" * 64,
+            materialized_source_digest="c" * 64,
+            requested_url="https://example.test/paper.html",
+            final_url="https://example.test/second.html",
+        ),
+    )
+
+    assert companion_run_id(first, recipe) != companion_run_id(
+        changed_provenance, recipe
+    )
+    assert companion_run_id(first, recipe) != companion_run_id(
+        CompanionBuildRequest(source), recipe
+    )
 
 
 def test_editorial_recipe_uses_current_schema_only_when_enabled() -> None:

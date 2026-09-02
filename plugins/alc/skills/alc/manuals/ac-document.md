@@ -40,6 +40,34 @@ ac-document export-rich-document source.md \
 The export contains `rich-source.json`, `metadata.json`, and copied resources.
 Do not hand-edit resource identities after export.
 
+## Acquire a Direct HTML Source
+
+For one direct public HTML URL, use the explicit acquisition command through
+the ALC runtime rather than a local import command. It materializes a local
+primary and a materialized export containing an
+`ac.document.html_source_bundle.v1` bundle; it is not an implicit parser
+network operation:
+
+```bash
+<skill-dir>/scripts/alc-runtime ac-document acquire-html-bundle <html-url> \
+  --output-dir <materialization-dir>
+```
+
+The command atomically publishes `<materialization-dir>/source.html`,
+`<materialization-dir>/manifest.json`, and any materialized local resources.
+
+When the source will feed a Companion, retain that one primary and materialized
+export, then run:
+
+```bash
+alc-companion build <materialization-dir>/source.html \
+  --html-source-manifest <materialization-dir>/manifest.json
+```
+
+Do not use this generic route to classify academic sources: optional installed
+ARC may first recognize and materialize an academic URL, but must return the
+same ACF bundle contract to ALC.
+
 Build an approximate durable keyword inventory from a local source:
 
 ```bash

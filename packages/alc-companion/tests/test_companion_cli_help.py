@@ -112,6 +112,13 @@ def test_build_exposes_optional_cross_chapter_editorial_review(
     assert "--cross-chapter-editorial-review" in capsys.readouterr().out
 
 
+def test_build_accepts_an_explicit_html_source_manifest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["build", "--help"]) == 0
+    assert "--html-source-manifest" in capsys.readouterr().out
+
+
 def test_build_requires_explicit_new_lineage_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

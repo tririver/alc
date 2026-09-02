@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 dependencies = [
   "ac-jobs>=2,<3",
   "ac-llm>=2.0.1,<3",
-  "ac-document>=2,<3",
+  "ac-document>=2.0.4,<3",
   "alc-render>=2,<3",
   "ac-proposer-reviewer>=2,<3",
   "alc-translate>=2,<3",

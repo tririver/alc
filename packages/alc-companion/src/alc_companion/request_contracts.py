@@ -39,9 +39,15 @@ from .reviewed_supplements import (
     encode_reviewed_companion_supplement,
     validate_reviewed_companion_supplement,
 )
+from .source_bundle import (
+    HTMLSourceBundleBinding,
+    decode_html_source_bundle_binding,
+    encode_html_source_bundle_binding,
+)
 
 
-COMPANION_BUILD_REQUEST_SCHEMA = "alc.companion.build_request.v8"
+LEGACY_COMPANION_BUILD_REQUEST_SCHEMA = "alc.companion.build_request.v8"
+COMPANION_BUILD_REQUEST_SCHEMA = "alc.companion.build_request.v9"
 COMPANION_GENERATION_RECIPE_SCHEMA = "alc.companion.generation_recipe.v19"
 EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA = (
     "alc.companion.generation_recipe.v20"
@@ -69,10 +75,17 @@ class CompanionBuildRequest:
     structure_ref: CachedDocumentStructureRef | None = None
     companion_section_ids: tuple[str, ...] | None = None
     reviewed_supplements: tuple[ReviewedCompanionSupplement, ...] = ()
+    source_bundle: HTMLSourceBundleBinding | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, RichDocument):
             raise ValueError("source must be a RichDocument")
+        if self.source_bundle is not None and not isinstance(
+            self.source_bundle, HTMLSourceBundleBinding
+        ):
+            raise ValueError(
+                "source_bundle must be an HTMLSourceBundleBinding or null"
+            )
         validators = tuple(sorted(set(self.validator_digests)))
         if any(_SHA256.fullmatch(item) is None for item in validators):
             raise ValueError(
@@ -318,8 +331,8 @@ def freeze_generation_recipe(
 def encode_build_request(
     request: CompanionBuildRequest,
 ) -> dict[str, Any]:
-    return {
-        "schema_version": COMPANION_BUILD_REQUEST_SCHEMA,
+    document = {
+        "schema_version": LEGACY_COMPANION_BUILD_REQUEST_SCHEMA,
         "source": rich_document_to_document(request.source),
         "validator_digests": list(request.validator_digests),
         "target_language": request.target_language,
@@ -346,6 +359,12 @@ def encode_build_request(
             for item in request.reviewed_supplements
         ],
     }
+    if request.source_bundle is not None:
+        document["schema_version"] = COMPANION_BUILD_REQUEST_SCHEMA
+        document["source_bundle"] = encode_html_source_bundle_binding(
+            request.source_bundle
+        )
+    return document
 
 
 def encode_generation_recipe(
@@ -415,11 +434,13 @@ def decode_build_request(
         "reader_labels",
         "structure_ref",
         "companion_section_ids",
+        "reviewed_supplements",
     }
     schema_version = document.get("schema_version")
-    if schema_version != COMPANION_BUILD_REQUEST_SCHEMA:
+    if schema_version == COMPANION_BUILD_REQUEST_SCHEMA:
+        fields.add("source_bundle")
+    elif schema_version != LEGACY_COMPANION_BUILD_REQUEST_SCHEMA:
         raise ValueError("unsupported Companion build-request schema")
-    fields.add("reviewed_supplements")
     request = _exact(document, fields, "build request")
     source = _mapping(request["source"], "rich source")
     validators = request["validator_digests"]
@@ -438,6 +459,13 @@ def decode_build_request(
     )
     return CompanionBuildRequest(
         source=rich_document_from_document(source),
+        source_bundle=(
+            decode_html_source_bundle_binding(
+                _mapping(request["source_bundle"], "source_bundle")
+            )
+            if schema_version == COMPANION_BUILD_REQUEST_SCHEMA
+            else None
+        ),
         validator_digests=tuple(validators),
         target_language=_string(request, "target_language"),
         user_intent=_string(request, "user_intent"),
@@ -661,6 +689,7 @@ def _string_sequence(value: Any, description: str) -> list[str]:
 
 __all__ = [
     "COMPANION_BUILD_REQUEST_SCHEMA",
+    "LEGACY_COMPANION_BUILD_REQUEST_SCHEMA",
     "COMPANION_CONTENT_CONTRACT",
     "COMPANION_GENERATION_RECIPE_SCHEMA",
     "EDITORIAL_COMPANION_GENERATION_RECIPE_SCHEMA",

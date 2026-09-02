@@ -56,6 +56,7 @@ from .request_contracts import (
     CompanionGenerationRecipe,
     freeze_generation_recipe,
 )
+from .source_bundle import load_html_source_manifest
 from .service import (
     CompanionService,
     CompanionServiceError,
@@ -101,6 +102,13 @@ def _parser() -> _Parser:
         description="Build a durable Companion from a verified local document.",
     )
     build.add_argument("source", help="local source path")
+    build.add_argument(
+        "--html-source-manifest",
+        help=(
+            "local ac.document.html_source_export.v1 manifest for the "
+            "materialized HTML source"
+        ),
+    )
     build.add_argument("--project-dir", required=True, help="Companion project directory")
     build.add_argument(
         "--pdf",
@@ -386,6 +394,18 @@ def _build(args: argparse.Namespace) -> CommandResult:
         and not Path(args.pdf).is_file()
     ):
         raise _UsageError("--pdf must be an existing path or 'fetch'")
+    try:
+        source_manifest = (
+            load_html_source_manifest(
+                args.html_source_manifest, source_path=args.source
+            )
+            if getattr(args, "html_source_manifest", None) is not None
+            else None
+        )
+    except ValueError as exc:
+        raise _UsageError(
+            f"--html-source-manifest is invalid: {exc}"
+        ) from exc
     require_translation_runtime()
     # Unknown project state is refused before source/cache writes.
     paths = CompanionProjectPaths.open(args.project_dir)
@@ -396,8 +416,13 @@ def _build(args: argparse.Namespace) -> CommandResult:
         pdf=args.pdf,
         refresh=args.refresh,
     )
+    if source_manifest is not None:
+        warnings = (*warnings, *source_manifest.warnings)
     request = CompanionBuildRequest(
         source=rich,
+        source_bundle=(
+            source_manifest.binding if source_manifest is not None else None
+        ),
         validator_digests=validators,
         target_language=args.target_language,
         user_intent=args.user_intent,

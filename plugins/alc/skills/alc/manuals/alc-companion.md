@@ -62,14 +62,41 @@ a stable ignored path under `local/`. Companion claims only
 `<project-dir>/.alc/companion/` and `<project-dir>/companion.html`; unrelated
 files remain untouched.
 
-Remote academic acquisition belongs to an optional host-level ARC research
-workflow. It must materialize one local rich source before this command. For an
-exact-version arXiv HTML URL, keep one self-contained HTML bundle authoritative
-for the selected project and run; do not fall back to TeX or flattened Markdown
-after a failure. If the
+For one direct HTML URL, use the Skill's host-level acquisition route before
+this command. ARC applies only to exact
+`https://arxiv.org/html/<id>[vN]`; preserve any explicit version. An ar5iv URL
+and every other HTTPS HTML URL use generic ACF with the original URL unchanged.
+When `arc-paper` is already on `PATH`, first run `arc-paper
+export-arxiv-html-acquisition --help`; only exit status 0 is usable. Otherwise,
+the ARC Skill route requires `doctor` to exit 0 with JSON `ready:true`, then
+requires `<arc-skill-dir>/scripts/arc-runtime arc-paper
+export-arxiv-html-acquisition --help` to exit 0. These probes are no-network
+and no-write. Never run `setup`; a failed probe uses generic ACF. The accepted
+ARC command is `arc-paper export-arxiv-html-acquisition <paper-id>
+--output-dir <bundle-dir> [--cache-root <root>]`. Otherwise use the explicit
+provider-neutral `ac-document acquire-html-bundle` flow. Both routes
+produce a local primary and one materialized export containing the shared
+`ac.document.html_source_bundle.v1` bundle. Keep that one bundle authoritative;
+the Companion integration binds its identity, primary artifact digest,
+requested URL, and final URL to the selected lineage.
+Partial-resource warnings are preserved through the normal source-diagnostic
+warning surface. Do not fall back to TeX or flattened Markdown after an
+acquisition failure. If the
 user explicitly supplies authors, repeat `--author <name>`; otherwise let Companion
 verify source-derived candidates. Unsupported reader-interface languages need
 one complete `--reader-labels <json-file>` map.
+
+Start from the materialization directory's exact `source.html` and manifest:
+
+```bash
+alc-companion build bundle/source.html \
+  --html-source-manifest bundle/manifest.json \
+  --project-dir <project-dir> --target-language <language-tag> \
+  --host-authority <host-authority>
+```
+
+The command rejects a source path, digest, or size that does not match the
+manifest. Do not copy or rename this source before the build.
 
 ## Authority and Document Cache
 
