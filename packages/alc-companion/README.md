@@ -51,9 +51,47 @@ Markdown, HTML, or flattened single-file TeX is authoritative. For local
 sources, `--pdf note.pdf` supplies an optional validator; PDF is never the
 reader source or output. Use `unrestricted` only when the host explicitly
 grants it. Otherwise use `unknown`, or `restricted` when known, and preserve the
-same authority on resume. Remote academic acquisition belongs to an optional
-host-level ARC research workflow, which must first materialize a local source
-for Companion.
+same authority on resume.
+
+## Direct HTML acquisition
+
+`alc-companion` does not acquire remote URLs. Materialize one local bundle
+first, then pass its exact `source.html` and manifest to the build:
+
+```bash
+alc-companion build bundle/source.html \
+  --html-source-manifest bundle/manifest.json \
+  --project-dir local/example --target-language zh-CN \
+  --host-authority unknown
+```
+
+For an ordinary direct HTML URL, use ALC's explicit provider-neutral document
+acquisition command:
+
+```bash
+<skill-dir>/scripts/alc-runtime ac-document acquire-html-bundle <html-url> \
+  --output-dir bundle
+```
+
+ARC is optional and remains outside the Python package. Use its academic export
+route only for an exact `https://arxiv.org/html/<id>[vN]` URL; retain the exact
+version. An ar5iv URL and every other HTTPS HTML URL use generic ACF with the
+original URL unchanged. If `arc-paper` is on `PATH`, first run
+`arc-paper export-arxiv-html-acquisition --help`; only exit status 0 is usable.
+Otherwise, the ARC Skill route requires
+`<arc-skill-dir>/scripts/arc-runtime doctor` to exit 0 with JSON `ready:true`,
+then requires its `arc-paper export-arxiv-html-acquisition --help` probe to
+exit 0. Never run `setup`; these probes are no-network and no-write. The
+accepted ARC export is:
+
+```bash
+arc-paper export-arxiv-html-acquisition <paper-id> \
+  --output-dir bundle [--cache-root <root>]
+```
+
+Both acquisition routes must produce the same ACF materialized export shape.
+Companion validates its manifest, source bytes, and resources before creating
+project state; warnings from unavailable resources remain source diagnostics.
 
 Every command prints an `ac.command_result.v2` envelope. For `build` and
 `resume`, read the selected durable identity at top-level `run.id`, lifecycle at

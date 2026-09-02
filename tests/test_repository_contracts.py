@@ -57,6 +57,12 @@ def test_package_set_metadata_and_dependency_graph() -> None:
                 assert int(ac_range[2]) == int(ac_range[1]) + 1
 
 
+def test_companion_requires_html_source_export_floor() -> None:
+    assert "ac-document>=2.0.4,<3" in _project("alc-companion")[
+        "dependencies"
+    ]
+
+
 def test_learning_packages_have_no_arc_code_dependency() -> None:
     source = "\n".join(
         path.read_text(encoding="utf-8", errors="ignore")

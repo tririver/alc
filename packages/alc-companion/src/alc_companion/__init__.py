@@ -36,6 +36,19 @@ def __getattr__(name: str) -> Any:
 
         return getattr(request_contracts, name)
     if name in {
+        "HTML_SOURCE_BUNDLE_SCHEMA",
+        "HTML_SOURCE_EXPORT_SCHEMA",
+        "HTML_SOURCE_BINDING_SCHEMA",
+        "HTMLSourceBundleBinding",
+        "HTMLSourceManifest",
+        "decode_html_source_bundle_binding",
+        "encode_html_source_bundle_binding",
+        "load_html_source_manifest",
+    }:
+        from . import source_bundle
+
+        return getattr(source_bundle, name)
+    if name in {
         "CompanionService",
         "CompanionServiceError",
         "companion_run_id",
@@ -91,6 +104,11 @@ __all__ = [
     "CompanionBuildRequest",
     "CompanionExecutionOptions",
     "CompanionGenerationRecipe",
+    "HTML_SOURCE_BINDING_SCHEMA",
+    "HTML_SOURCE_BUNDLE_SCHEMA",
+    "HTML_SOURCE_EXPORT_SCHEMA",
+    "HTMLSourceBundleBinding",
+    "HTMLSourceManifest",
     "CompanionFragmentReplacement",
     "CompanionProjectError",
     "CompanionProjectPaths",
@@ -115,9 +133,12 @@ __all__ = [
     "companion_run_id",
     "decode_reviewed_companion_supplement",
     "decode_publication_revision_request",
+    "decode_html_source_bundle_binding",
     "encode_publication_revision_request",
     "encode_publication_revision_result",
+    "encode_html_source_bundle_binding",
     "encode_reviewed_companion_supplement",
+    "load_html_source_manifest",
     "materialize_published_companion",
     "reviewed_anchor_fingerprint",
     "reviewed_source_inventory_digest",

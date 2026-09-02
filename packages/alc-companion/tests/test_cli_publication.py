@@ -20,6 +20,7 @@ from alc_companion import cli
 from alc_companion.project import CompanionProjectPaths
 from alc_companion.project import CompanionProjectError
 from alc_companion.service import _next_action, _translation_fallback_summary
+from alc_companion.source_bundle import HTMLSourceBundleBinding
 
 
 class _Service:
@@ -146,6 +147,115 @@ def test_build_refuses_implicit_selected_lineage_replacement(
         cli._build(args)
 
     assert error.value.code == "selected_run_conflict"
+
+
+def test_build_binds_html_source_manifest_and_persists_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = CompanionProjectPaths.open(tmp_path / "project")
+    binding = HTMLSourceBundleBinding(
+        bundle_digest="a" * 64,
+        primary_artifact_digest="b" * 64,
+        materialized_source_digest="c" * 64,
+        requested_url="https://example.test/paper.html",
+        final_url="https://example.test/paper.html",
+    )
+    source_manifest = SimpleNamespace(
+        binding=binding,
+        warnings=("html_dependency_fetch_failed: resource unavailable",),
+    )
+    captured: dict[str, object] = {}
+
+    class Service:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def prepare(self, request: object, **_kwargs: object) -> object:
+            captured["request"] = request
+            return SimpleNamespace(run_id="bundle-run")
+
+        def execute(self, _run_id: str, **_kwargs: object) -> object:
+            return SimpleNamespace()
+
+    def request_factory(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(cli, "require_translation_runtime", lambda: None)
+    monkeypatch.setattr(cli.CompanionProjectPaths, "open", lambda _value: paths)
+    monkeypatch.setattr(
+        cli, "load_html_source_manifest", lambda *_args, **_kwargs: source_manifest
+    )
+    monkeypatch.setattr(cli, "AcDocumentService", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "_resolve_source",
+        lambda *_args, **_kwargs: (object(), (), ("parser warning",)),
+    )
+    monkeypatch.setattr(cli, "CompanionBuildRequest", request_factory)
+    monkeypatch.setattr(cli, "freeze_generation_recipe", lambda value: value)
+    monkeypatch.setattr(cli, "CompanionService", Service)
+    monkeypatch.setattr(cli, "companion_run_id", lambda *_args: "bundle-run")
+    monkeypatch.setattr(cli, "_snapshot_result", lambda *_args, **_kwargs: "ok")
+    args = SimpleNamespace(
+        workers=1,
+        target_language="zh-CN",
+        provider="codex",
+        model=None,
+        approx_term_count=50,
+        author=[],
+        reader_labels=None,
+        pdf=None,
+        project_dir=str(paths.root),
+        document_cache_root=None,
+        source="source.html",
+        html_source_manifest="manifest.json",
+        refresh=False,
+        user_intent="",
+        cross_chapter_editorial_review=False,
+        host_authority="unknown",
+        new_lineage=False,
+    )
+
+    assert cli._build(args) == "ok"
+    assert captured["source_bundle"] == binding
+    assert paths.source_diagnostics("bundle-run") == (
+        "parser warning",
+        "html_dependency_fetch_failed: resource unavailable",
+    )
+
+
+def test_invalid_html_source_manifest_creates_no_companion_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "source.html"
+    source.write_text("<p>source</p>", encoding="utf-8")
+    project = tmp_path / "project"
+    monkeypatch.setattr(cli, "require_translation_runtime", lambda: None)
+
+    def invalid_manifest(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("manifest integrity failure")
+
+    monkeypatch.setattr(cli, "load_html_source_manifest", invalid_manifest)
+
+    assert cli.main(
+        [
+            "build",
+            str(source),
+            "--html-source-manifest",
+            str(tmp_path / "manifest.json"),
+            "--project-dir",
+            str(project),
+            "--host-authority",
+            "unknown",
+        ]
+    ) == 1
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"]["code"] == "invalid_request"
+    assert not (project / ".alc" / "companion" / "project.json").exists()
 
 
 def test_progress_summarizes_translation_fallback_events(
