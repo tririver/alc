@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import ac_document as _ac_document
+from markdown_it import MarkdownIt
+from markdown_it.common.utils import isStrSpace as _markdown_it_space
+from markdown_it.rules_inline.link import link as _markdown_it_link
 from ac_jobs import canonical_json_bytes
 from ac_document import (
     AcDocumentService,
@@ -26,12 +29,70 @@ from .contracts import TranslationSource
 
 
 STRUCTURAL_FIGURE_PLACEHOLDER = "\ufffc"
-_MARKDOWN_LINK = re.compile(
-    r"(?<!!)\[(?!\[)((?:[^\[\]]|\[[^\[\]]+\])+)\]"
-    r"\(([^)\s]+)(?:\s+[^)]*)?\)"
-)
 _INTERNAL_BIBLIOGRAPHY_TARGET = re.compile(r"#bib\.bib[1-9][0-9]*")
 _LINK_TOKEN_CHARACTER = r"A-Za-z0-9._~:/?#@!$&'*+,;=%-"
+
+
+def _markdown_link_matches(
+    text: str,
+) -> tuple[tuple[int, int, str, str], ...]:
+    """Return inline link spans using the same CommonMark parser as rendering."""
+
+    text = _normalize_markdown_text(text)
+    matches: list[tuple[int, int, str, str]] = []
+    parser = MarkdownIt(
+        "commonmark",
+        {
+            "html": False,
+            "linkify": False,
+            "typographer": False,
+            "breaks": False,
+        },
+    )
+
+    def capture_link(state: Any, silent: bool) -> bool:
+        start = state.pos
+        link_level = state.linkLevel
+        label_end = state.md.helpers.parseLinkLabel(state, start, True)
+        target = _markdown_link_lexical_target(state, label_end)
+        matched = _markdown_it_link(state, silent)
+        if (
+            matched
+            and not silent
+            and link_level == 0
+            and label_end >= 0
+            and target is not None
+        ):
+            matches.append((start, state.pos, text[start + 1 : label_end], target))
+        return matched
+
+    parser.inline.ruler.at("link", capture_link)
+    parser.inline.parse(text, parser, {}, [])
+    return tuple(matches)
+
+
+def _normalize_markdown_text(text: str) -> str:
+    return re.sub(r"\r\n?|\n", "\n", text).replace("\0", "\ufffd")
+
+
+def _markdown_link_lexical_target(state: Any, label_end: int) -> str | None:
+    position = label_end + 1
+    if label_end < 0 or position >= state.posMax or state.src[position] != "(":
+        return None
+    position += 1
+    while position < state.posMax:
+        character = state.src[position]
+        if character != "\n" and not _markdown_it_space(character):
+            break
+        position += 1
+    if position < state.posMax and state.src[position] == ")":
+        return ""
+    result = state.md.helpers.parseLinkDestination(
+        state.src, position, state.posMax
+    )
+    if not result.ok:
+        return None
+    return state.src[position : result.pos]
 
 
 class TranslationSourceError(RuntimeError):
@@ -643,14 +704,16 @@ def translation_text_groups(
 def _split_translation_markdown(
     value: str, *, max_bytes: int
 ) -> tuple[str, ...]:
-    text = str(value).strip()
+    text = _normalize_markdown_text(str(value)).strip()
     if not text or len(text.encode("utf-8")) <= max_bytes:
         return (text,) if text else ()
     protected = [
         *(span[:2] for span in _markdown_math_spans(text)),
         *(
-            match.span()
-            for match in _MARKDOWN_LINK.finditer(_without_markdown_math(text))
+            (start, end)
+            for start, end, _, _ in _markdown_link_matches(
+                _without_markdown_math(text)
+            )
         ),
     ]
     protected.sort()
@@ -754,8 +817,10 @@ def _extend_markdown_identity(
 ) -> None:
     equations.extend(_markdown_math_occurrences(text))
     links.extend(
-        match.group(2)
-        for match in _MARKDOWN_LINK.finditer(_without_markdown_math(text))
+        target
+        for _, _, _, target in _markdown_link_matches(
+            _without_markdown_math(text)
+        )
     )
 
 
@@ -1032,16 +1097,16 @@ def _link_occurrences(
     text: str,
     expected: Counter[str],
 ) -> Counter[str]:
-    text = _without_markdown_math(text)
-    matches = tuple(_MARKDOWN_LINK.finditer(text))
-    occurrences = Counter(match.group(2) for match in matches)
+    text = _normalize_markdown_text(_without_markdown_math(text))
+    matches = _markdown_link_matches(text)
+    occurrences = Counter(target for _, _, _, target in matches)
     pieces: list[str] = []
     previous = 0
-    for match in matches:
+    for start, end, _, _ in matches:
         pieces.extend(
-            (text[previous : match.start()], " " * (match.end() - match.start()))
+            (text[previous:start], " " * (end - start))
         )
-        previous = match.end()
+        previous = end
     pieces.append(text[previous:])
     unlinked_text = "".join(pieces)
     occurrences.update(
@@ -1158,20 +1223,22 @@ def _markdown_internal_bibliography_links(
     text: str,
 ) -> tuple[tuple[str, str], ...]:
     return tuple(
-        (match.group(2), match.group(1))
-        for match in _MARKDOWN_LINK.finditer(_without_markdown_math(text))
-        if _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(match.group(2))
+        (target, label)
+        for _, _, label, target in _markdown_link_matches(
+            _without_markdown_math(text)
+        )
+        if _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(target)
     )
 
 
 def _markdown_internal_bibliography_citation_groups(
     text: str,
 ) -> tuple[str, ...]:
-    value = _without_markdown_math(text)
+    value = _normalize_markdown_text(_without_markdown_math(text))
     matches = tuple(
         match
-        for match in _MARKDOWN_LINK.finditer(value)
-        if _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(match.group(2))
+        for match in _markdown_link_matches(value)
+        if _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(match[3])
     )
     groups: list[str] = []
     index = 0
@@ -1182,13 +1249,13 @@ def _markdown_internal_bibliography_citation_groups(
         next_index = index + 1
         while next_index < len(matches):
             candidate = matches[next_index]
-            between = value[last.end() : candidate.start()]
+            between = value[last[1] : candidate[0]]
             if not between or any(character not in separators for character in between):
                 break
             last = candidate
             next_index += 1
-        start = first.start()
-        end = last.end()
+        start = first[0]
+        end = last[1]
         bracketed = (
             start > 0
             and value[start - 1] == "["
@@ -1198,12 +1265,12 @@ def _markdown_internal_bibliography_citation_groups(
             and not _is_escaped(value, end)
         )
         if bracketed:
-            groups.append(text[start - 1 : end + 1])
+            groups.append(value[start - 1 : end + 1])
         elif last is not first and all(
-            match.group(1).strip().isdigit()
+            match[2].strip().isdigit()
             for match in matches[index:next_index]
         ):
-            groups.append(text[start:end])
+            groups.append(value[start:end])
         index = next_index
     return tuple(groups)
 
