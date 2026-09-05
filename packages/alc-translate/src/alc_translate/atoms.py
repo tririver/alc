@@ -230,6 +230,27 @@ def assemble_text_slot_translation(
                 f"translation text slot is invalid for {slot_id}",
             )
         values[slot_id] = value
+    missing_semantic_slots = [
+        slot_id
+        for slot_id, source_text in _text_slot_source_values(block).items()
+        if _has_semantic_authored_text(source_text)
+        and not _has_semantic_authored_text(values[slot_id])
+    ]
+    if missing_semantic_slots:
+        raise ProtectedAtomError(
+            "translation_coverage_invalid",
+            f"translation omitted meaningful text slots for {_block_id(block)}",
+            {
+                "missing_text_slot_ids": missing_semantic_slots,
+                "source_semantic_text_unit_count": len(
+                    _semantic_text_slot_ids(block)
+                ),
+                "translated_semantic_text_unit_count": (
+                    len(_semantic_text_slot_ids(block))
+                    - len(missing_semantic_slots)
+                ),
+            },
+        )
 
     parts: list[dict[str, Any]] = []
     for part in text_slot_plan(block)["parts"]:
@@ -386,15 +407,23 @@ def assemble_protected_translation(
             },
         )
     _validate_part_kinds(normalized, expected)
-    source_lexical_characters = _text_part_lexical_character_count(plan["parts"])
-    translated_lexical_characters = _text_part_lexical_character_count(normalized)
-    if source_lexical_characters and not translated_lexical_characters:
+    source_semantic_units = _semantic_text_unit_count(plan["parts"])
+    translated_semantic_units = _semantic_text_unit_count(normalized)
+    if source_semantic_units > translated_semantic_units:
         raise ProtectedAtomError(
             "translation_coverage_invalid",
-            f"translation omitted all meaningful text for {plan['block_id']}",
+            f"translation omitted meaningful text for {plan['block_id']}",
             {
-                "source_lexical_characters": source_lexical_characters,
-                "translated_lexical_characters": translated_lexical_characters,
+                "source_semantic_text_unit_count": source_semantic_units,
+                "translated_semantic_text_unit_count": translated_semantic_units,
+                # Retain the older diagnostic counters for artifact consumers;
+                # semantic-unit coverage above is the actual acceptance rule.
+                "source_lexical_characters": _text_part_semantic_character_count(
+                    plan["parts"]
+                ),
+                "translated_lexical_characters": (
+                    _text_part_semantic_character_count(normalized)
+                ),
             },
         )
     rendered = _render_parts(normalized, expected)
@@ -621,21 +650,66 @@ def _part_atom_ids(parts: Sequence[Mapping[str, Any]]) -> list[str]:
     return atom_ids
 
 
-def _text_part_lexical_character_count(
+def _text_slot_source_values(block: Mapping[str, Any]) -> dict[str, str]:
+    values: dict[str, str] = {}
+
+    def collect(parts: Sequence[Mapping[str, Any]]) -> None:
+        for part in parts:
+            if part["kind"] == "text_slot":
+                values[str(part["slot_id"])] = str(part["text"])
+            elif part["kind"] == "link":
+                collect(part["parts"])
+
+    collect(text_slot_plan(block)["parts"])
+    return values
+
+
+def _semantic_text_slot_ids(block: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        slot_id
+        for slot_id, text in _text_slot_source_values(block).items()
+        if _has_semantic_authored_text(text)
+    )
+
+
+def _has_semantic_authored_text(value: str) -> bool:
+    """Treat Unicode letters and numbers as authored semantic content."""
+
+    return any(character.isalnum() for character in value)
+
+
+def _semantic_text_unit_count(
     parts: Sequence[Mapping[str, Any]],
 ) -> int:
-    """Count human-readable letters without inspecting protected payloads."""
+    """Count source text units that carry authored semantic content."""
+
+    count = 0
+    for part in parts:
+        kind = part.get("kind")
+        if kind == "text":
+            count += int(_has_semantic_authored_text(str(part.get("text", ""))))
+        elif kind == "link":
+            count += _semantic_text_unit_count(part.get("parts", ()))
+    return count
+
+
+def _text_part_semantic_character_count(
+    parts: Sequence[Mapping[str, Any]],
+) -> int:
+    """Count semantic characters only for backwards-compatible diagnostics."""
 
     count = 0
     for part in parts:
         kind = part.get("kind")
         if kind == "text":
             count += sum(
-                character.isalpha()
+                character.isalnum()
                 for character in str(part.get("text", ""))
             )
         elif kind == "link":
-            count += _text_part_lexical_character_count(part.get("parts", ()))
+            count += _text_part_semantic_character_count(
+                part.get("parts", ())
+            )
     return count
 
 

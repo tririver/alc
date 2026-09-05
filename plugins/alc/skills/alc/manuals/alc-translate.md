@@ -168,12 +168,20 @@ generation attempt with exact bounded validation feedback. New translation and
 review calls return only input-dependent text-slot objects. Formulae, links,
 citations, bibliography labels, and code remain caller-owned and are
 deterministically reinserted; the model cannot omit or rewrite their IDs.
+Every source slot containing a Unicode letter or number must retain semantic
+content in that slot. A valid neighboring slot cannot hide a local omission;
+punctuation-only slots remain optional. Captionless tables and figures without
+language-bearing captions are retained programmatically, while source notes
+anchored to their cells or headers remain translatable.
 Historical protected-atom results retain their explicit compatibility path.
 Retries are scoped to invalid or missing blocks and retain valid first-response
 neighbors.
 If the scoped retry remains unusable, only the still-invalid units use source
 fallback. Completed windows are reused, and an invalid review cannot replace
 its valid pre-review translation.
+Accepted review output binds its fallback and provider evidence in the same
+immutable envelope, so an interrupted replay preserves the original audit
+classification.
 This boundary also validates assembled Markdown. An unclosed display-math
 delimiter or environment is retried as a model-output defect and then falls
 back only for that unit; it must not reach Companion as a whole-chapter parse

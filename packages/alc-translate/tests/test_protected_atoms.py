@@ -176,17 +176,64 @@ def test_text_slot_assembly_rejects_bibliography_shell_without_prose() -> None:
         assemble_text_slot_translation(block, slots)
 
     assert raised.value.code == "translation_coverage_invalid"
-    assert raised.value.details["source_lexical_characters"] > 0
-    assert raised.value.details["translated_lexical_characters"] == 0
+    assert raised.value.details["missing_text_slot_ids"]
+    assert raised.value.details["source_semantic_text_unit_count"] > 0
+    assert raised.value.details["translated_semantic_text_unit_count"] == 0
 
 
-def test_text_slot_assembly_allows_nonlexical_structure_only_source() -> None:
+def test_text_slot_assembly_rejects_dropped_numeric_authored_text() -> None:
     block = _paragraph(r"$x$ 123.")
+    slots = {slot_id: "" for slot_id in text_slot_ids(block)}
+
+    with pytest.raises(ProtectedAtomError) as raised:
+        assemble_text_slot_translation(block, slots)
+
+    assert raised.value.code == "translation_coverage_invalid"
+    assert raised.value.details["missing_text_slot_ids"] == [
+        "block-1.text-000000"
+    ]
+
+
+def test_text_slot_assembly_allows_punctuation_only_structure() -> None:
+    block = _paragraph(r"$x$ --.")
     slots = {slot_id: "" for slot_id in text_slot_ids(block)}
 
     rendered, _parts = assemble_text_slot_translation(block, slots)
 
     assert rendered == "$x$"
+
+
+def test_text_slot_assembly_rejects_a_missing_semantic_slot() -> None:
+    block = _paragraph(r"Alpha $x$ Beta")
+    first, second = text_slot_ids(block)
+
+    with pytest.raises(ProtectedAtomError) as raised:
+        assemble_text_slot_translation(
+            block,
+            {first: "", second: "译文"},
+        )
+
+    assert raised.value.code == "translation_coverage_invalid"
+    assert raised.value.details["missing_text_slot_ids"] == [first]
+
+
+def test_protected_assembly_rejects_a_missing_semantic_unit() -> None:
+    block = _paragraph(r"Alpha $x$ Beta")
+    atom_id = _atom_ids(protected_atom_plan(block))[0]
+
+    with pytest.raises(ProtectedAtomError) as raised:
+        assemble_protected_translation(
+            block,
+            [
+                {"kind": "text", "text": ""},
+                {"kind": "atom", "atom_id": atom_id},
+                {"kind": "text", "text": "译文"},
+            ],
+        )
+
+    assert raised.value.code == "translation_coverage_invalid"
+    assert raised.value.details["source_semantic_text_unit_count"] == 2
+    assert raised.value.details["translated_semantic_text_unit_count"] == 1
 
 
 def test_model_assembly_restores_missing_atoms_when_text_slots_are_exact() -> None:

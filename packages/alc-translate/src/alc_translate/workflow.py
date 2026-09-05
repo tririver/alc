@@ -119,6 +119,13 @@ from .source import (
 
 REVIEW_SUPERVISION_SCHEMA = "alc.translate.review_supervision.v1"
 OUTPUT_SUPERVISION_SCHEMA = "alc.translate.output_supervision.v1"
+REVIEW_ACCEPTED_WINDOW_SCHEMA = "alc.translate.review_accepted_window.v1"
+_TRANSLATION_FALLBACK_DIAGNOSTIC_SCHEMA = (
+    "alc.translate.fallback_diagnostic.v1"
+)
+_TRANSLATION_PROVIDER_FALLBACK_DIAGNOSTIC_SCHEMA = (
+    "alc.translate.provider_fallback_diagnostic.v1"
+)
 _PROVIDER_FALLBACK_MARKERS = frozenset(
     {
         "provider_transport",
@@ -978,14 +985,21 @@ class TranslationWorkflowService:
                 translations.extend(fallback)
                 continue
             if accepted_doc is not None:
+                (
+                    accepted_payload,
+                    accepted_fallback_document,
+                    accepted_provider_document,
+                ) = _unpack_review_accepted_window(accepted_doc)
                 try:
-                    accepted = _validate_accepted_window(accepted_doc, window)
+                    accepted = _validate_accepted_window(
+                        accepted_payload, window
+                    )
                 except TranslationWorkflowError as exc:
                     if exc.code == "translation_coverage_invalid":
                         return RunError(exc.code, str(exc))
                     fallback, source_fallback_ids = (
                         _salvaged_translation_fallback(
-                            window, candidate=accepted_doc
+                            window, candidate=accepted_payload
                         )
                     )
                     _publish_translation_fallback(
@@ -1002,9 +1016,23 @@ class TranslationWorkflowService:
                     translations.extend(fallback)
                     consecutive_provider_window_failures = 0
                     continue
-                fallback_reason_codes = _load_translation_fallback(
-                    context, fallback_id, fallback_units
-                )
+                if accepted_fallback_document is None:
+                    fallback_reason_codes = _load_translation_fallback(
+                        context, fallback_id, fallback_units
+                    )
+                else:
+                    fallback_reason_codes = _apply_translation_fallback_document(
+                        accepted_fallback_document, fallback_units
+                    )
+                    _publish_translation_fallback_document(
+                        context, fallback_id, accepted_fallback_document
+                    )
+                if accepted_provider_document is not None:
+                    _publish_translation_provider_failure_document(
+                        context,
+                        f"{fallback_id}-provider",
+                        accepted_provider_document,
+                    )
                 translations.extend(accepted)
                 replayed_provider_reason = _provider_reason_from_codes(
                     fallback_reason_codes
@@ -1215,7 +1243,7 @@ class TranslationWorkflowService:
             # later review failure may count the window again below.
             consecutive_provider_window_failures = 0
             window_provider_failure_reason: str | None = None
-            window_provider_failure_outcome: Paused | RunError | None = None
+            window_provider_failure_document: dict[str, Any] | None = None
             try:
                 draft = _validate_draft_window(draft_doc, window)
             except TranslationWorkflowError as exc:
@@ -1308,8 +1336,15 @@ class TranslationWorkflowService:
                                 "accepted translation review subwindow",
                             )
                             try:
+                                (
+                                    review_accepted_payload,
+                                    review_fallback_document,
+                                    review_provider_document,
+                                ) = _unpack_review_accepted_window(
+                                    review_accepted_doc
+                                )
                                 accepted_review = _validate_accepted_window(
-                                    review_accepted_doc,
+                                    review_accepted_payload,
                                     review_blocks,
                                 )
                             except TranslationWorkflowError as exc:
@@ -1325,6 +1360,25 @@ class TranslationWorkflowService:
                                     for block_id in review_ids
                                 )
                             else:
+                                if review_fallback_document is not None:
+                                    review_reason_codes.extend(
+                                        _apply_translation_fallback_document(
+                                            review_fallback_document,
+                                            fallback_units,
+                                        )
+                                    )
+                                    review_skipped_ids.extend(
+                                        _translation_fallback_entries(
+                                            review_fallback_document
+                                        )[1]
+                                    )
+                                if review_provider_document is not None:
+                                    window_provider_failure_document = (
+                                        review_provider_document
+                                    )
+                                    window_provider_failure_reason = str(
+                                        review_provider_document["reason_code"]
+                                    )
                                 reviewed.extend(accepted_review)
                             continue
                     review_error: tuple[str, str] | None = None
@@ -1419,7 +1473,31 @@ class TranslationWorkflowService:
                             if provider_reason is None:
                                 return review_generated
                             window_provider_failure_reason = provider_reason
-                            window_provider_failure_outcome = review_generated
+                            window_provider_failure_document = (
+                                _translation_provider_failure_document(
+                                    outcome=review_generated,
+                                    model=model,
+                                    reason_code=provider_reason,
+                                    stage="review",
+                                    window_ordinal=ordinal,
+                                    consecutive_window_failures=(
+                                        consecutive_provider_window_failures
+                                        + 1
+                                    ),
+                                    global_fallback_triggered=(
+                                        consecutive_provider_window_failures
+                                        + 1
+                                        >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                                    ),
+                                    remaining_windows_skipped=(
+                                        len(windows) - ordinal - 1
+                                        if consecutive_provider_window_failures
+                                        + 1
+                                        >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                                        else 0
+                                    ),
+                                )
+                            )
                             review_error = (
                                 provider_reason,
                                 "translation review provider delivery is "
@@ -1447,20 +1525,47 @@ class TranslationWorkflowService:
                         )
                     assert reviewed_window is not None
                     if split_review:
+                        review_fallback_document = (
+                            _translation_fallback_document(
+                                source_text_block_ids=[],
+                                review_skipped_block_ids=review_ids,
+                                reason_codes=review_reason_codes[-1:],
+                            )
+                            if review_error is not None
+                            else None
+                        )
                         context.artifacts.publish_json(
                             review_accepted_id,
-                            _translation_result_document(reviewed_window),
+                            _review_accepted_window_document(
+                                _translation_result_document(reviewed_window),
+                                fallback_document=review_fallback_document,
+                                provider_failure_document=(
+                                    window_provider_failure_document
+                                    if review_error is not None
+                                    else None
+                                ),
+                            ),
                         )
                     reviewed.extend(reviewed_window)
-            accepted_doc = _translation_result_document(reviewed)
-            context.artifacts.publish_json(accepted_id, accepted_doc)
-            if review_skipped_ids:
-                _publish_translation_fallback(
-                    context,
-                    fallback_id,
+            fallback_document = (
+                _translation_fallback_document(
                     source_text_block_ids=[],
                     review_skipped_block_ids=review_skipped_ids,
                     reason_codes=review_reason_codes,
+                )
+                if review_skipped_ids
+                else None
+            )
+            accepted_doc = _review_accepted_window_document(
+                _translation_result_document(reviewed),
+                fallback_document=fallback_document,
+                provider_failure_document=window_provider_failure_document,
+            )
+            context.artifacts.publish_json(accepted_id, accepted_doc)
+            if review_skipped_ids:
+                assert fallback_document is not None
+                _publish_translation_fallback_document(
+                    context, fallback_id, fallback_document
                 )
             translations.extend(reviewed)
             if window_provider_failure_reason is not None:
@@ -1472,26 +1577,11 @@ class TranslationWorkflowService:
                     global_provider_fallback_reason = (
                         window_provider_failure_reason
                     )
-                assert window_provider_failure_outcome is not None
-                _publish_translation_provider_failure(
+                assert window_provider_failure_document is not None
+                _publish_translation_provider_failure_document(
                     context,
                     f"{fallback_id}-provider",
-                    outcome=window_provider_failure_outcome,
-                    model=model,
-                    reason_code=window_provider_failure_reason,
-                    stage="review",
-                    window_ordinal=ordinal,
-                    consecutive_window_failures=(
-                        consecutive_provider_window_failures
-                    ),
-                    global_fallback_triggered=(
-                        global_provider_fallback_reason is not None
-                    ),
-                    remaining_windows_skipped=(
-                        len(windows) - ordinal - 1
-                        if global_provider_fallback_reason is not None
-                        else 0
-                    ),
+                    window_provider_failure_document,
                 )
         (
             collapsed_translations,
@@ -2507,7 +2597,7 @@ def _model_translation_blocks(
     return tuple(
         block
         for block in blocks
-        if not _is_structural_figure(block)
+        if not _is_nonlinguistic_media_block(block)
         and str(block.get("kind")) != "equation"
         and source_note_link_markdown(block) is None
     )
@@ -3040,6 +3130,30 @@ def _publish_translation_provider_failure(
     global_fallback_triggered: bool,
     remaining_windows_skipped: int,
 ) -> None:
+    document = _translation_provider_failure_document(
+        outcome=outcome,
+        model=model,
+        reason_code=reason_code,
+        stage=stage,
+        window_ordinal=window_ordinal,
+        consecutive_window_failures=consecutive_window_failures,
+        global_fallback_triggered=global_fallback_triggered,
+        remaining_windows_skipped=remaining_windows_skipped,
+    )
+    _publish_translation_provider_failure_document(context, artifact_id, document)
+
+
+def _translation_provider_failure_document(
+    *,
+    outcome: Paused | RunError,
+    model: ModelSelection,
+    reason_code: str,
+    stage: str,
+    window_ordinal: int,
+    consecutive_window_failures: int,
+    global_fallback_triggered: bool,
+    remaining_windows_skipped: int,
+) -> dict[str, Any]:
     details: Mapping[str, Any] = (
         outcome.awaiting.details if isinstance(outcome, Paused) else outcome.details
     )
@@ -3050,8 +3164,8 @@ def _publish_translation_provider_failure(
     detail_code = _optional_nonblank_string(
         provider_failure.get("detail_code")
     ) or _optional_nonblank_string(provider_failure.get("ac_error_code"))
-    document = {
-        "schema_version": "alc.translate.provider_fallback_diagnostic.v1",
+    return {
+        "schema_version": _TRANSLATION_PROVIDER_FALLBACK_DIAGNOSTIC_SCHEMA,
         "provider": model.provider,
         "model": model.model,
         "tier": model.tier,
@@ -3065,6 +3179,14 @@ def _publish_translation_provider_failure(
         "global_fallback_triggered": global_fallback_triggered,
         "remaining_windows_skipped": remaining_windows_skipped,
     }
+
+
+def _publish_translation_provider_failure_document(
+    context: RunContext,
+    artifact_id: str,
+    document: Mapping[str, Any],
+) -> None:
+    _validate_translation_provider_failure_document(document)
     existing = context.artifacts.find(artifact_id)
     if existing is not None:
         if _read_json_artifact(
@@ -3080,6 +3202,37 @@ def _publish_translation_provider_failure(
         "translation_provider_fallback",
         {key: value for key, value in document.items() if key != "schema_version"},
     )
+
+
+def _validate_translation_provider_failure_document(
+    document: Mapping[str, Any],
+) -> None:
+    expected_fields = {
+        "schema_version",
+        "provider",
+        "model",
+        "tier",
+        "effort",
+        "reason_code",
+        "failure_category",
+        "detail_code",
+        "stage",
+        "window_ordinal",
+        "consecutive_window_failures",
+        "global_fallback_triggered",
+        "remaining_windows_skipped",
+    }
+    if (
+        set(document) != expected_fields
+        or document.get("schema_version")
+        != _TRANSLATION_PROVIDER_FALLBACK_DIAGNOSTIC_SCHEMA
+        or not isinstance(document.get("reason_code"), str)
+        or not str(document["reason_code"])
+    ):
+        raise TranslationWorkflowError(
+            "translation_provider_fallback_invalid",
+            "translation provider fallback diagnostic is invalid",
+        )
 
 
 def _nested_provider_failure(value: Any) -> Mapping[str, Any]:
@@ -3133,8 +3286,22 @@ def _publish_translation_fallback(
     review_skipped_block_ids: Sequence[str],
     reason_codes: Sequence[str],
 ) -> None:
-    document = {
-        "schema_version": "alc.translate.fallback_diagnostic.v1",
+    document = _translation_fallback_document(
+        source_text_block_ids=source_text_block_ids,
+        review_skipped_block_ids=review_skipped_block_ids,
+        reason_codes=reason_codes,
+    )
+    _publish_translation_fallback_document(context, artifact_id, document)
+
+
+def _translation_fallback_document(
+    *,
+    source_text_block_ids: Sequence[str],
+    review_skipped_block_ids: Sequence[str],
+    reason_codes: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": _TRANSLATION_FALLBACK_DIAGNOSTIC_SCHEMA,
         "source_text_block_ids": list(
             dict.fromkeys(source_text_block_ids)
         ),
@@ -3143,6 +3310,14 @@ def _publish_translation_fallback(
         ),
         "reason_codes": list(dict.fromkeys(reason_codes)),
     }
+
+
+def _publish_translation_fallback_document(
+    context: RunContext,
+    artifact_id: str,
+    document: Mapping[str, Any],
+) -> None:
+    _translation_fallback_entries(document)
     existing = context.artifacts.find(artifact_id)
     if existing is not None:
         if _read_json_artifact(
@@ -3179,14 +3354,32 @@ def _load_translation_fallback(
     document = _read_json_artifact(
         context, ref, "translation fallback diagnostic"
     )
+    return _apply_translation_fallback_document(document, fallback_units)
+
+
+def _apply_translation_fallback_document(
+    document: Mapping[str, Any],
+    fallback_units: dict[str, str],
+) -> tuple[str, ...]:
+    source_ids, review_ids, reason_codes = _translation_fallback_entries(document)
+    fallback_units.update(
+        (block_id, "review_skipped") for block_id in review_ids
+    )
+    fallback_units.update(
+        (block_id, "source_text") for block_id in source_ids
+    )
+    return reason_codes
+
+
+def _translation_fallback_entries(
+    document: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     if set(document) != {
         "schema_version",
         "source_text_block_ids",
         "review_skipped_block_ids",
         "reason_codes",
-    } or document.get("schema_version") != (
-        "alc.translate.fallback_diagnostic.v1"
-    ):
+    } or document.get("schema_version") != _TRANSLATION_FALLBACK_DIAGNOSTIC_SCHEMA:
         raise TranslationWorkflowError(
             "translation_fallback_invalid",
             "translation fallback diagnostic is invalid",
@@ -3202,13 +3395,7 @@ def _load_translation_fallback(
     reason_codes = _string_items(
         document.get("reason_codes"), "fallback reason codes"
     )
-    fallback_units.update(
-        (block_id, "review_skipped") for block_id in review_ids
-    )
-    fallback_units.update(
-        (block_id, "source_text") for block_id in source_ids
-    )
-    return reason_codes
+    return source_ids, review_ids, reason_codes
 
 
 def _collapse_translation_fallbacks(
@@ -3256,10 +3443,24 @@ def _is_structural_figure(block: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_structural_table(block: Mapping[str, Any]) -> bool:
+    """Tables without a caption have no ALC translation surface."""
+
+    if str(block.get("kind")) != "table":
+        return False
+    payload = block.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TranslationWorkflowError(
+            "source_block_invalid",
+            "source block payload must be an object",
+        )
+    return not str(payload.get("caption", "")).strip()
+
+
 def _is_nonlinguistic_media_block(block: Mapping[str, Any]) -> bool:
     """Return whether a source media block has no language-bearing content."""
 
-    return _is_structural_figure(block)
+    return _is_structural_figure(block) or _is_structural_table(block)
 
 
 def _is_nonlinguistic_media_translation(
@@ -3267,6 +3468,8 @@ def _is_nonlinguistic_media_translation(
 ) -> bool:
     if not _is_nonlinguistic_media_block(block):
         return False
+    if _is_structural_table(block):
+        return text.strip() == STRUCTURAL_FIGURE_PLACEHOLDER
     payload = block.get("payload")
     assert isinstance(payload, Mapping)
     marker = text.strip()
@@ -3293,7 +3496,7 @@ def _merge_programmatic_translations(
         if link_markdown is not None:
             merged.append({"block_id": block_id, "text": link_markdown})
             continue
-        if _is_structural_figure(block):
+        if _is_nonlinguistic_media_block(block):
             merged.append(
                 {
                     "block_id": block_id,
@@ -3874,6 +4077,56 @@ def _merge_protected_translation_candidates(
     ):
         first_items = _text_slot_candidate_items(first)
         second_items = _text_slot_candidate_items(second)
+        first_protected_items = _protected_candidate_items(first)
+        second_protected_items = _protected_candidate_items(second)
+        if first_protected_items or second_protected_items:
+            # A retry always returns text slots, while a pre-text-slot accepted
+            # neighbor may use a valid non-canonical protected-atom order.
+            # Keep that validated arrangement intact and assemble only the
+            # retried units into the protected representation.
+            merged: list[dict[str, Any]] = []
+            for block in blocks:
+                block_id = str(block["block_id"])
+                chosen: dict[str, Any] | None = None
+                for items in (second_items, first_items):
+                    candidate = items.get(block_id)
+                    if candidate is None:
+                        continue
+                    normalized = _normalized_text_slot_candidate_item(
+                        candidate, block
+                    )
+                    if normalized is not None:
+                        chosen = normalized
+                        break
+                if chosen is None:
+                    for items in (second_protected_items, first_protected_items):
+                        candidates = items.get(block_id, ())
+                        if len(candidates) != 1:
+                            continue
+                        normalized = _normalized_model_candidate_item(
+                            candidates[0], block
+                        )
+                        if normalized is not None:
+                            chosen = normalized
+                            break
+                if chosen is None:
+                    for items in (second_protected_items, first_protected_items):
+                        candidates = items.get(block_id, ())
+                        if candidates:
+                            chosen = dict(candidates[0])
+                            break
+                if chosen is None:
+                    for items in (second_items, first_items):
+                        candidate = items.get(block_id)
+                        if candidate is not None:
+                            chosen = dict(candidate)
+                            break
+                if chosen is not None:
+                    merged.append(chosen)
+            return {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": merged,
+            }
         merged_slots: dict[str, dict[str, Any]] = {}
         for block in blocks:
             block_id = str(block["block_id"])
@@ -3962,6 +4215,78 @@ def _validate_accepted_window(
         mismatch_message="accepted translations must exactly match source order",
         item_description="accepted translation",
     )
+
+
+def _review_accepted_window_document(
+    accepted: Mapping[str, Any],
+    *,
+    fallback_document: Mapping[str, Any] | None = None,
+    provider_failure_document: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind a review outcome to its diagnostics in one immutable artifact."""
+
+    if fallback_document is None and provider_failure_document is None:
+        return dict(accepted)
+    if fallback_document is not None:
+        _translation_fallback_entries(fallback_document)
+    if provider_failure_document is not None:
+        _validate_translation_provider_failure_document(
+            provider_failure_document
+        )
+    return {
+        "schema_version": REVIEW_ACCEPTED_WINDOW_SCHEMA,
+        "accepted": dict(accepted),
+        "fallback": (
+            dict(fallback_document)
+            if fallback_document is not None
+            else None
+        ),
+        "provider_failure": (
+            dict(provider_failure_document)
+            if provider_failure_document is not None
+            else None
+        ),
+    }
+
+
+def _unpack_review_accepted_window(
+    value: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    if value.get("schema_version") != REVIEW_ACCEPTED_WINDOW_SCHEMA:
+        return dict(value), None, None
+    _require_fields(
+        value,
+        {"schema_version", "accepted", "fallback", "provider_failure"},
+        "review accepted translation window",
+    )
+    accepted = _object(value["accepted"], "review accepted translation")
+    fallback_value = value["fallback"]
+    provider_value = value["provider_failure"]
+    if fallback_value is not None and not isinstance(fallback_value, Mapping):
+        raise TranslationWorkflowError(
+            "translation_review_acceptance_invalid",
+            "review accepted fallback evidence is invalid",
+        )
+    if provider_value is not None and not isinstance(provider_value, Mapping):
+        raise TranslationWorkflowError(
+            "translation_review_acceptance_invalid",
+            "review accepted provider evidence is invalid",
+        )
+    fallback = dict(fallback_value) if isinstance(fallback_value, Mapping) else None
+    provider_failure = (
+        dict(provider_value) if isinstance(provider_value, Mapping) else None
+    )
+    if fallback is None:
+        if provider_failure is not None:
+            raise TranslationWorkflowError(
+                "translation_review_acceptance_invalid",
+                "review provider evidence requires fallback evidence",
+            )
+    else:
+        _translation_fallback_entries(fallback)
+    if provider_failure is not None:
+        _validate_translation_provider_failure_document(provider_failure)
+    return accepted, fallback, provider_failure
 
 
 def _migrate_legacy_accepted_list_windows(

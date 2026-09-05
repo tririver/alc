@@ -172,10 +172,13 @@ assembly. Historical protected-atom candidates remain readable through the
 explicit v1 compatibility path.
 
 Assembled units are also checked as standalone Markdown before they become
-accepted artifacts. If a source unit contains human-readable lexical text, a
-model result whose text slots collectively contain no lexical text is rejected
-even when caller-owned numbering or atoms keep the Markdown structurally
-non-empty. Unclosed `$$`, `\[`, or supported display-math environments
+accepted artifacts. Every source text slot containing a Unicode letter or
+number must retain semantic text in its corresponding result slot; one valid
+neighbor cannot hide another emptied slot, while punctuation-only slots remain
+optional. Historical protected-atom results preserve the same number of
+semantic text units even when they legally reorder atoms. Caller-owned
+numbering or atoms therefore cannot make an emptied translation look complete.
+Unclosed `$$`, `\[`, or supported display-math environments
 are model-output errors: they receive the same bounded semantic retry and then
 fall back only for the affected source unit. Adjacent inline formula spans are
 canonicalized only in downstream model views so their touching `$` delimiters
@@ -193,6 +196,12 @@ legacy compatibility path and are never reclassified as protected-atom output.
 An agent may correct a candidate and resume without another provider call.
 Deleting an exhausted retry candidate does not grant a third automatic
 generation attempt.
+Captionless tables and figures without caption or alt text have no language
+surface and are preserved programmatically instead of entering a zero-slot
+model request; source notes anchored to their cells or headers remain normal
+translation units. Review acceptance binds the accepted result, fallback
+evidence, and provider evidence in one immutable envelope so an interrupted
+replay cannot silently lose its audit classification.
 
 When a model response is structurally valid JSON but violates a
 machine-checkable language, term, block, text-slot, or review coverage
