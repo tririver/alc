@@ -6,6 +6,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from ac_document import (
+    RichDocument,
+    rich_document_from_document,
+    rich_document_to_document,
+)
 from ac_jobs import (
     ArtifactDigest,
     ArtifactSourceRef,
@@ -14,12 +19,6 @@ from ac_jobs import (
     encode_artifact_digest,
 )
 from ac_llm import LLMExecutionOptions, ModelSelection
-from ac_document import (
-    RichDocument,
-    rich_document_from_document,
-    rich_document_to_document,
-)
-
 
 SOURCE_SCHEMA = "alc.translate.source.v2"
 LANGUAGE_REQUEST_SCHEMA = "alc.translate.language_request.v1"
@@ -27,7 +26,11 @@ GLOSSARY_REQUEST_SCHEMA = "alc.translate.glossary_request.v1"
 BLOCKS_REQUEST_SCHEMA = "alc.translate.blocks_request.v1"
 GENERATION_RECIPE_SCHEMA = "alc.translate.generation_recipe.v1"
 LANGUAGE_RESULT_SCHEMA = "alc.translate.language_result.v1"
-GLOSSARY_RESULT_SCHEMA = "alc.translate.glossary_result.v1"
+GLOSSARY_RESULT_SCHEMA = "alc.translate.glossary_result.v2"
+LEGACY_GLOSSARY_RESULT_SCHEMA = "alc.translate.glossary_result.v1"
+GLOSSARY_FALLBACK_SUMMARY_SCHEMA = (
+    "alc.translate.glossary_fallback_summary.v1"
+)
 TRANSLATION_RESULT_SCHEMA = "alc.translate.translation_result.v1"
 
 DEFAULT_GLOSSARY_INPUT_BUDGET_BYTES = 32_000
@@ -172,13 +175,16 @@ def artifact_source_from_document(value: Any) -> ArtifactSourceRef:
 
 
 def recipe_to_document(recipe: GenerationRecipe) -> dict[str, JsonValue]:
+    model = {
+        "provider": recipe.model.provider,
+        "model": recipe.model.model,
+        "tier": recipe.model.tier,
+    }
+    if recipe.model.reasoning_effort is not None:
+        model["reasoning_effort"] = recipe.model.reasoning_effort
     return {
         "schema_version": GENERATION_RECIPE_SCHEMA,
-        "model": {
-            "provider": recipe.model.provider,
-            "model": recipe.model.model,
-            "tier": recipe.model.tier,
-        },
+        "model": model,
         "glossary_input_budget_bytes": recipe.glossary_input_budget_bytes,
         "translation_input_budget_bytes": recipe.translation_input_budget_bytes,
     }
@@ -197,11 +203,12 @@ def recipe_from_document(value: Mapping[str, Any]) -> GenerationRecipe:
     )
     if document["schema_version"] != GENERATION_RECIPE_SCHEMA:
         raise ValueError("unsupported generation recipe schema")
-    model = _exact(
-        _mapping(document["model"], "generation model"),
+    model = _mapping(document["model"], "generation model")
+    if set(model) not in (
         {"provider", "model", "tier"},
-        "generation model",
-    )
+        {"provider", "model", "tier", "reasoning_effort"},
+    ):
+        raise ValueError("generation model contains unknown or missing fields")
     exact_model = model["model"]
     if exact_model is not None and not isinstance(exact_model, str):
         raise ValueError("model.model must be a string or null")
@@ -210,6 +217,11 @@ def recipe_from_document(value: Mapping[str, Any]) -> GenerationRecipe:
             provider=_string(model, "provider"),
             model=exact_model,
             tier=_string(model, "tier"),  # type: ignore[arg-type]
+            reasoning_effort=(
+                None
+                if "reasoning_effort" not in model
+                else _string(model, "reasoning_effort")
+            ),  # type: ignore[arg-type]
         ),
         glossary_input_budget_bytes=_integer(
             document, "glossary_input_budget_bytes"
@@ -393,8 +405,10 @@ def _integer(value: Mapping[str, Any], key: str) -> int:
 __all__ = [
     "DEFAULT_GLOSSARY_INPUT_BUDGET_BYTES",
     "DEFAULT_TRANSLATION_INPUT_BUDGET_BYTES",
+    "GLOSSARY_FALLBACK_SUMMARY_SCHEMA",
     "GLOSSARY_RESULT_SCHEMA",
     "LANGUAGE_RESULT_SCHEMA",
+    "LEGACY_GLOSSARY_RESULT_SCHEMA",
     "TRANSLATION_RESULT_SCHEMA",
     "BlocksRequest",
     "ExecutionOptions",

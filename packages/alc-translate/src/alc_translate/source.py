@@ -10,10 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import ac_document as _ac_document
-from markdown_it import MarkdownIt
-from markdown_it.common.utils import isStrSpace as _markdown_it_space
-from markdown_it.rules_inline.link import link as _markdown_it_link
-from ac_jobs import canonical_json_bytes
 from ac_document import (
     AcDocumentService,
     ParseError,
@@ -24,13 +20,22 @@ from ac_document import (
     SourceRepositoryError,
     rich_block_to_document,
 )
+from ac_jobs import canonical_json_bytes
+from markdown_it import MarkdownIt
+from markdown_it.common.utils import isStrSpace as _markdown_it_space
+from markdown_it.rules_inline.link import link as _markdown_it_link
 
 from .contracts import TranslationSource
-
 
 STRUCTURAL_FIGURE_PLACEHOLDER = "\ufffc"
 _INTERNAL_BIBLIOGRAPHY_TARGET = re.compile(r"#bib\.bib[1-9][0-9]*")
 _LINK_TOKEN_CHARACTER = r"A-Za-z0-9._~:/?#@!$&'*+,;=%-"
+_NUMERIC_BIBLIOGRAPHY_LABEL = re.compile(r"(?:\[[1-9][0-9]*\]|\([1-9][0-9]*\))")
+_AUTHOR_YEAR_BIBLIOGRAPHY_SUFFIX = re.compile(
+    r"\((?:[12][0-9]{3}[a-z]?|n\.d\.|in press|forthcoming)\)(?=\s|$)",
+    re.IGNORECASE,
+)
+_BIBLIOGRAPHY_LABEL_SCAN_LIMIT = 256
 
 
 def _markdown_link_matches(
@@ -38,8 +43,22 @@ def _markdown_link_matches(
 ) -> tuple[tuple[int, int, str, str], ...]:
     """Return inline link spans using the same CommonMark parser as rendering."""
 
-    text = _normalize_markdown_text(text)
-    matches: list[tuple[int, int, str, str]] = []
+    return tuple(
+        (start, end, label, target)
+        for start, end, label, target, _target_start, _target_end in (
+            _markdown_link_details(text)
+        )
+    )
+
+
+def _markdown_link_details(
+    text: str,
+    *,
+    normalize: bool = True,
+) -> tuple[tuple[int, int, str, str, int, int], ...]:
+    if normalize:
+        text = _normalize_markdown_text(text)
+    matches: list[tuple[int, int, str, str, int, int]] = []
     parser = MarkdownIt(
         "commonmark",
         {
@@ -54,16 +73,26 @@ def _markdown_link_matches(
         start = state.pos
         link_level = state.linkLevel
         label_end = state.md.helpers.parseLinkLabel(state, start, True)
-        target = _markdown_link_lexical_target(state, label_end)
+        target_details = _markdown_link_lexical_target(state, label_end)
         matched = _markdown_it_link(state, silent)
         if (
             matched
             and not silent
             and link_level == 0
             and label_end >= 0
-            and target is not None
+            and target_details is not None
         ):
-            matches.append((start, state.pos, text[start + 1 : label_end], target))
+            target, target_start, target_end = target_details
+            matches.append(
+                (
+                    start,
+                    state.pos,
+                    text[start + 1 : label_end],
+                    target,
+                    target_start,
+                    target_end,
+                )
+            )
         return matched
 
     parser.inline.ruler.at("link", capture_link)
@@ -75,7 +104,70 @@ def _normalize_markdown_text(text: str) -> str:
     return re.sub(r"\r\n?|\n", "\n", text).replace("\0", "\ufffd")
 
 
-def _markdown_link_lexical_target(state: Any, label_end: int) -> str | None:
+def _mask_markdown_inline_code(line: str) -> str:
+    output = list(line)
+    index = 0
+    while index < len(line):
+        if line[index] != "`":
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(line) and line[run_end] == "`":
+            run_end += 1
+        delimiter = line[index:run_end]
+        closing = line.find(delimiter, run_end)
+        if closing < 0:
+            index = run_end
+            continue
+        end = closing + len(delimiter)
+        output[index:end] = " " * (end - index)
+        index = end
+    return "".join(output)
+
+
+def _unescaped_token_count(text: str, token: str) -> int:
+    count = 0
+    index = 0
+    while index < len(text):
+        if text.startswith(token, index) and not _is_escaped(text, index):
+            count += 1
+            index += len(token)
+        else:
+            index += 1
+    return count
+
+
+def _unescaped_tokens(text: str, tokens: Sequence[str]) -> tuple[tuple[int, str], ...]:
+    values: list[tuple[int, str]] = []
+    index = 0
+    while index < len(text):
+        token = next(
+            (
+                candidate
+                for candidate in tokens
+                if text.startswith(candidate, index) and not _is_escaped(text, index)
+            ),
+            None,
+        )
+        if token is None:
+            index += 1
+            continue
+        values.append((index, token))
+        index += len(token)
+    return tuple(values)
+
+
+def _mask_balanced_math(text: str) -> str:
+    output = list(text)
+    for start, end, _tex in _markdown_math_spans(text):
+        output[start:end] = " " * (end - start)
+    return "".join(output)
+
+
+def _markdown_link_lexical_target(
+    state: Any,
+    label_end: int,
+) -> tuple[str, int, int] | None:
     position = label_end + 1
     if label_end < 0 or position >= state.posMax or state.src[position] != "(":
         return None
@@ -86,13 +178,11 @@ def _markdown_link_lexical_target(state: Any, label_end: int) -> str | None:
             break
         position += 1
     if position < state.posMax and state.src[position] == ")":
-        return ""
-    result = state.md.helpers.parseLinkDestination(
-        state.src, position, state.posMax
-    )
+        return "", position, position
+    result = state.md.helpers.parseLinkDestination(state.src, position, state.posMax)
     if not result.ok:
         return None
-    return state.src[position : result.pos]
+    return state.src[position : result.pos], position, result.pos
 
 
 class TranslationSourceError(RuntimeError):
@@ -118,9 +208,7 @@ def resolve_translation_source(
     source_text = str(source)
     try:
         artifact = document.resolve_local_source(source_text)
-        rich = RichDocumentParserService(document.repository).parse_source(
-            artifact
-        )
+        rich = RichDocumentParserService(document.repository).parse_source(artifact)
     except (
         ParseError,
         RichDocumentValidationError,
@@ -337,6 +425,8 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
             "translation_coverage_invalid",
             f"translation text is empty for {block.get('block_id', '<unknown>')}",
         )
+    if str(block.get("kind")) != "code":
+        validate_translation_markdown(canonicalize_translation_markdown(text))
     identity = source_identity(block)
     if identity["code_text"] is not None and text != identity["code_text"]:
         raise TranslationSourceError(
@@ -357,8 +447,7 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
     ) or _formula_occurrences(text, expected_equations) != expected_equations:
         raise TranslationSourceError(
             "translation_source_identity_invalid",
-            "translation changed formula occurrences for "
-            f"{block['block_id']}",
+            f"translation changed formula occurrences for {block['block_id']}",
             {
                 "formula_diagnostics": list(
                     formula_identity_diagnostics(
@@ -376,10 +465,7 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
                 f"translation changed link occurrences for {block['block_id']}",
             )
         expected_citations = Counter(_internal_bibliography_links(block))
-        if (
-            _translated_internal_bibliography_links(text)
-            != expected_citations
-        ):
+        if _translated_internal_bibliography_links(text) != expected_citations:
             raise TranslationSourceError(
                 "translation_source_identity_invalid",
                 "translation changed internal bibliography link labels for "
@@ -403,18 +489,106 @@ def validate_translation_text(text: str, block: Mapping[str, Any]) -> None:
                 "translation_source_identity_invalid",
                 f"translation changed bibliography entry label for {block['block_id']}",
             )
-    if identity["asset_digest"] is not None and not str(
-        identity["asset_digest"]
-    ).strip():
+    if (
+        identity["asset_digest"] is not None
+        and not str(identity["asset_digest"]).strip()
+    ):
         raise TranslationSourceError(
             "translation_source_identity_invalid",
             f"source asset identity is invalid for {block['block_id']}",
         )
 
 
-def restore_translation_identity(
-    text: str, block: Mapping[str, Any]
-) -> str:
+def validate_translation_markdown(text: str) -> None:
+    """Reject structurally unsafe model-authored Markdown before persistence.
+
+    Translation formulas are caller-owned atoms.  This validator therefore
+    only needs to ensure the assembled Markdown cannot leave a display-math
+    construct open and poison a later whole-chapter parse.  Fenced, indented,
+    and inline code are excluded by the CommonMark parser before scanning.
+    """
+
+    if not isinstance(text, str):
+        raise TranslationSourceError(
+            "translation_markdown_invalid",
+            "translation Markdown must be a string",
+        )
+    normalized = _normalize_markdown_text(text)
+    lines = normalized.split("\n")
+    excluded: set[int] = set()
+    for token in MarkdownIt("commonmark").parse(normalized):
+        if token.type in {"fence", "code_block"} and token.map is not None:
+            excluded.update(range(token.map[0], token.map[1]))
+    active = "\n".join(
+        "" if line_number in excluded else _mask_markdown_inline_code(line)
+        for line_number, line in enumerate(lines)
+    )
+    if _unescaped_token_count(active, "$$") % 2:
+        raise TranslationSourceError(
+            "translation_markdown_invalid",
+            "translation contains an unclosed display-math delimiter $$",
+            {"delimiter": "$$"},
+        )
+
+    bracket_active = _mask_balanced_math(active)
+    bracket_depth = 0
+    for _position, token in _unescaped_tokens(bracket_active, (r"\[", r"\]")):
+        if token == r"\[":
+            bracket_depth += 1
+        elif bracket_depth:
+            bracket_depth -= 1
+    if bracket_depth:
+        raise TranslationSourceError(
+            "translation_markdown_invalid",
+            r"translation contains an unclosed display-math delimiter \[",
+            {"delimiter": r"\["},
+        )
+
+    environments: list[str] = []
+    for match in re.finditer(
+        r"(?<!\\)\\(?P<kind>begin|end)\{"
+        r"(?P<env>equation|align|gather|multline|eqnarray)\*?\}",
+        bracket_active,
+    ):
+        environment = str(match.group("env"))
+        if match.group("kind") == "begin":
+            environments.append(environment)
+        elif environments and environments[-1] == environment:
+            environments.pop()
+        else:
+            raise TranslationSourceError(
+                "translation_markdown_invalid",
+                f"translation contains an unmatched {environment} environment",
+                {"environment": environment},
+            )
+    if environments:
+        raise TranslationSourceError(
+            "translation_markdown_invalid",
+            f"translation contains an unclosed {environments[-1]} environment",
+            {"environment": environments[-1]},
+        )
+
+
+def canonicalize_translation_markdown(text: str) -> str:
+    """Disambiguate adjacent inline-math boundaries without visible spacing."""
+
+    normalized = _normalize_markdown_text(text)
+    spans = _markdown_math_spans(normalized)
+    boundaries = [
+        previous[1]
+        for previous, following in zip(spans, spans[1:], strict=False)
+        if previous[1] == following[0]
+        and normalized[previous[0] :].startswith("$")
+        and not normalized[previous[0] :].startswith("$$")
+        and normalized[following[0] :].startswith("$")
+        and not normalized[following[0] :].startswith("$$")
+    ]
+    for position in reversed(boundaries):
+        normalized = normalized[:position] + "\u2060" + normalized[position:]
+    return normalized
+
+
+def restore_translation_identity(text: str, block: Mapping[str, Any]) -> str:
     """Restore one mechanically overescaped layer of source TeX identity.
 
     Provider JSON output occasionally preserves a Markdown math span while
@@ -672,11 +846,7 @@ def translation_text_groups(
     space.  Markdown math and links are indivisible while splitting.
     """
 
-    if (
-        isinstance(max_bytes, bool)
-        or not isinstance(max_bytes, int)
-        or max_bytes < 64
-    ):
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 64:
         raise TranslationSourceError(
             "translation_unit_invalid", "translation max_bytes is too small"
         )
@@ -688,22 +858,18 @@ def translation_text_groups(
         )
     if kind == "list":
         values = tuple(
-            _compact_inline_text(item)
-            for item in _mapping_items(payload.get("items"))
+            _compact_inline_text(item) for item in _mapping_items(payload.get("items"))
         )
     elif kind in {"paragraph", "source_note"}:
         values = (_compact_inline_text(payload),)
     else:
         values = (block_text(block),)
     return tuple(
-        _split_translation_markdown(value, max_bytes=max_bytes)
-        for value in values
+        _split_translation_markdown(value, max_bytes=max_bytes) for value in values
     )
 
 
-def _split_translation_markdown(
-    value: str, *, max_bytes: int
-) -> tuple[str, ...]:
+def _split_translation_markdown(value: str, *, max_bytes: int) -> tuple[str, ...]:
     text = _normalize_markdown_text(str(value)).strip()
     if not text or len(text.encode("utf-8")) <= max_bytes:
         return (text,) if text else ()
@@ -711,9 +877,7 @@ def _split_translation_markdown(
         *(span[:2] for span in _markdown_math_spans(text)),
         *(
             (start, end)
-            for start, end, _, _ in _markdown_link_matches(
-                _without_markdown_math(text)
-            )
+            for start, end, _, _ in _markdown_link_matches(_without_markdown_math(text))
         ),
     ]
     protected.sort()
@@ -818,9 +982,7 @@ def _extend_markdown_identity(
     equations.extend(_markdown_math_occurrences(text))
     links.extend(
         target
-        for _, _, _, target in _markdown_link_matches(
-            _without_markdown_math(text)
-        )
+        for _, _, _, target in _markdown_link_matches(_without_markdown_math(text))
     )
 
 
@@ -837,22 +999,42 @@ def _markdown_math_spans(text: str) -> tuple[tuple[int, int, str], ...]:
     dollar at brace depth zero closes the outer Markdown span.
     """
 
+    link_destinations = (
+        tuple(
+            (target_start, target_end)
+            for _start, _end, _label, _target, target_start, target_end in (
+                _markdown_link_details(text, normalize=False)
+            )
+            if target_start < target_end
+        )
+        if "](" in text
+        else ()
+    )
+    scanned_text = text
+    for start, end in reversed(link_destinations):
+        scanned_text = scanned_text[:start] + " " * (end - start) + scanned_text[end:]
     spans: list[tuple[int, int, str]] = []
     index = 0
-    while index < len(text):
+    while index < len(scanned_text):
         delimiter: str | None = None
         closing: str | None = None
         content_start = index
-        if text.startswith(r"\[", index) and not _is_escaped(text, index):
+        if scanned_text.startswith(r"\[", index) and not _is_escaped(
+            scanned_text, index
+        ):
             delimiter, closing, content_start = r"\[", r"\]", index + 2
-        elif text.startswith(r"\(", index) and not _is_escaped(text, index):
+        elif scanned_text.startswith(r"\(", index) and not _is_escaped(
+            scanned_text, index
+        ):
             delimiter, closing, content_start = r"\(", r"\)", index + 2
-        elif text.startswith("$$", index) and not _is_escaped(text, index):
+        elif scanned_text.startswith("$$", index) and not _is_escaped(
+            scanned_text, index
+        ):
             delimiter, closing, content_start = "$$", "$$", index + 2
         elif (
-            text[index] == "$"
-            and not _is_escaped(text, index)
-            and not text.startswith("$$", index)
+            scanned_text[index] == "$"
+            and not _is_escaped(scanned_text, index)
+            and not scanned_text.startswith("$$", index)
         ):
             delimiter, closing, content_start = "$", "$", index + 1
         if delimiter is None or closing is None:
@@ -860,7 +1042,7 @@ def _markdown_math_spans(text: str) -> tuple[tuple[int, int, str], ...]:
             continue
 
         end = _find_math_closing(
-            text,
+            scanned_text,
             content_start,
             closing,
             brace_aware=delimiter == "$",
@@ -935,8 +1117,7 @@ def _formula_occurrences(
             match.span()
             for match in pattern.finditer(text)
             if not any(
-                match.start() < end and start < match.end()
-                for start, end in occupied
+                match.start() < end and start < match.end() for start, end in occupied
             )
         ]
         if matches:
@@ -967,12 +1148,10 @@ def formula_identity_diagnostics(
     source_occurrences: dict[str, list[tuple[str, int]]] = {}
     translation_occurrences: dict[str, list[tuple[str, int]]] = {}
     source_positions = {
-        str(block.get("block_id")): index
-        for index, block in enumerate(source_blocks)
+        str(block.get("block_id")): index for index, block in enumerate(source_blocks)
     }
     translation_positions = {
-        str(item.get("block_id")): index
-        for index, item in enumerate(translations)
+        str(item.get("block_id")): index for index, item in enumerate(translations)
     }
 
     for block_id, block in source_by_id.items():
@@ -1083,9 +1262,7 @@ def _formula_diagnostic(
     }
 
 
-def _neighbor_block_ids(
-    blocks: Sequence[Mapping[str, Any]], index: int
-) -> list[str]:
+def _neighbor_block_ids(blocks: Sequence[Mapping[str, Any]], index: int) -> list[str]:
     return [
         str(blocks[neighbor].get("block_id"))
         for neighbor in (index - 1, index + 1)
@@ -1103,9 +1280,7 @@ def _link_occurrences(
     pieces: list[str] = []
     previous = 0
     for start, end, _, _ in matches:
-        pieces.extend(
-            (text[previous:start], " " * (end - start))
-        )
+        pieces.extend((text[previous:start], " " * (end - start)))
         previous = end
     pieces.append(text[previous:])
     unlinked_text = "".join(pieces)
@@ -1149,11 +1324,7 @@ def _internal_bibliography_links(
         elif kind == "table":
             texts.append(str(payload.get("caption", "")))
             texts.extend(str(item) for item in payload.get("headers", ()))
-            texts.extend(
-                str(item)
-                for row in payload.get("rows", ())
-                for item in row
-            )
+            texts.extend(str(item) for row in payload.get("rows", ()) for item in row)
         for value in texts:
             values.extend(_markdown_internal_bibliography_links(value))
     return tuple(values)
@@ -1180,8 +1351,7 @@ def _block_markdown_values(block: Mapping[str, Any]) -> tuple[str, ...]:
         return (_compact_inline_text(payload),)
     if kind == "list":
         return tuple(
-            _compact_inline_text(item)
-            for item in _mapping_items(payload.get("items"))
+            _compact_inline_text(item) for item in _mapping_items(payload.get("items"))
         )
     if kind in {"heading", "translation_unit"}:
         return (str(payload.get("text", "")),)
@@ -1191,11 +1361,7 @@ def _block_markdown_values(block: Mapping[str, Any]) -> tuple[str, ...]:
         return (
             str(payload.get("caption", "")),
             *(str(item) for item in payload.get("headers", ())),
-            *(
-                str(item)
-                for row in payload.get("rows", ())
-                for item in row
-            ),
+            *(str(item) for row in payload.get("rows", ()) for item in row),
         )
     return ()
 
@@ -1206,16 +1372,11 @@ def _extend_internal_bibliography_inline(
     for span in _mapping_items(raw_spans):
         kind = str(span.get("kind"))
         target = str(span.get("target", ""))
-        if (
-            kind == "link"
-            and _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(target)
-        ):
+        if kind == "link" and _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(target):
             values.append((target, str(span.get("text", ""))))
         elif kind == "text":
             values.extend(
-                _markdown_internal_bibliography_links(
-                    str(span.get("text", ""))
-                )
+                _markdown_internal_bibliography_links(str(span.get("text", "")))
             )
 
 
@@ -1224,9 +1385,7 @@ def _markdown_internal_bibliography_links(
 ) -> tuple[tuple[str, str], ...]:
     return tuple(
         (target, label)
-        for _, _, label, target in _markdown_link_matches(
-            _without_markdown_math(text)
-        )
+        for _, _, label, target in _markdown_link_matches(_without_markdown_math(text))
         if _INTERNAL_BIBLIOGRAPHY_TARGET.fullmatch(target)
     )
 
@@ -1267,8 +1426,7 @@ def _markdown_internal_bibliography_citation_groups(
         if bracketed:
             groups.append(value[start - 1 : end + 1])
         elif last is not first and all(
-            match[2].strip().isdigit()
-            for match in matches[index:next_index]
+            match[2].strip().isdigit() for match in matches[index:next_index]
         ):
             groups.append(value[start:end])
         index = next_index
@@ -1293,16 +1451,32 @@ def _bibliography_entry_label(block: Mapping[str, Any]) -> str | None:
         raise TranslationSourceError(
             "source_block_invalid", "bibliography block must contain one item"
         )
-    label_match = re.match(
-        r"\[([1-9][0-9]*)\]",
-        str(items[0].get("text", "")).lstrip(),
-    )
-    if label_match is None:
+    label = _authored_bibliography_label(str(items[0].get("text", "")))
+    if label is None:
         raise TranslationSourceError(
             "source_block_invalid",
-            "bibliography block is missing its authored numeric label",
+            "bibliography block is missing its authored visible label",
         )
-    return label_match.group(0)
+    return label
+
+
+def _authored_bibliography_label(text: str) -> str | None:
+    """Return the exact source-visible prefix used to identify a bibliography item."""
+
+    value = str(text).lstrip()
+    numeric = _NUMERIC_BIBLIOGRAPHY_LABEL.match(value)
+    if numeric is not None:
+        return numeric.group(0)
+
+    # RichDocument retains a LaTeXML author-year tag as the leading visible
+    # text rather than as a separate label field. Bound the scan so a year in
+    # the body of an unlabeled reference cannot freeze an arbitrary long span.
+    scan_end = min(len(value), _BIBLIOGRAPHY_LABEL_SCAN_LIMIT)
+    for match in _AUTHOR_YEAR_BIBLIOGRAPHY_SUFFIX.finditer(value, 0, scan_end):
+        author = value[: match.start()].strip()
+        if author and any(character.isalpha() for character in author):
+            return value[: match.end()]
+    return None
 
 
 def _translation_has_bibliography_label(text: str, label: str) -> bool:
@@ -1359,16 +1533,18 @@ __all__ = [
     "TranslationSourceError",
     "block_digest",
     "block_text",
+    "canonicalize_translation_markdown",
     "deterministic_language_samples",
     "formula_identity_diagnostics",
     "prompt_block",
     "resolve_translation_source",
+    "restore_translation_identity",
     "same_primary_language",
     "source_blocks",
+    "source_identity",
     "source_note_blocks",
     "source_note_link_markdown",
-    "source_identity",
     "translation_text_groups",
-    "restore_translation_identity",
+    "validate_translation_markdown",
     "validate_translation_text",
 ]
