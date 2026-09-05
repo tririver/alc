@@ -81,6 +81,15 @@ def test_guide_prompts_bind_local_section_numbers() -> None:
         assert "sections" in prompt
 
 
+def test_guide_prompts_use_the_host_request_schema_field() -> None:
+    for prompt in (
+        chapter_guide_proposer_instructions(),
+        chapter_guide_reviewer_instructions(),
+    ):
+        assert "host_request.request_id" in prompt
+        assert "host_request.id" not in prompt
+
+
 def test_current_guide_prompts_require_canonical_display_math() -> None:
     proposer = chapter_guide_proposer_instructions()
     reviewer = chapter_guide_reviewer_instructions()

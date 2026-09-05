@@ -328,7 +328,7 @@ def validate_chapter_guide_review_audit(
 def _guide_text(value: Any, description: str) -> dict[str, str]:
     result = _exact(value, {"title", "content_markdown"}, description)
     return {
-        "title": _nonempty(result["title"], f"{description} title"),
+        "title": _plain_title(result["title"], f"{description} title"),
         "content_markdown": _nonempty(
             result["content_markdown"], f"{description} Markdown"
         ),
@@ -358,7 +358,7 @@ def _located_guide(
         )
     return {
         "location": location,
-        "title": _nonempty(result["title"], f"{description} title"),
+        "title": _plain_title(result["title"], f"{description} title"),
         "content_markdown": result["content_markdown"],
     }
 
@@ -514,6 +514,19 @@ def _nonempty(value: Any, description: str) -> str:
             "model_output_invalid", f"{description} must be non-empty"
         )
     return value.strip()
+
+
+def _plain_title(value: Any, description: str) -> str:
+    """Keep structured titles readable without making them Markdown blocks."""
+
+    title = _nonempty(value, description)
+    title = re.sub(
+        r"(?<!\\)\$(?!\$)([^$\n]+?)(?<!\\)\$(?!\$)",
+        r"\1",
+        title,
+    )
+    title = re.sub(r"\\\((.+?)\\\)", r"\1", title)
+    return " ".join(title.split())
 
 
 def _without_leading_heading(text: str, *, description: str) -> str:

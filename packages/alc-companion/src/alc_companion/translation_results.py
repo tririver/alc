@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ac_jobs import AcJobsError, RunContext
 from ac_document import RichBlock, RichBlockKind, RichDocument
+from ac_jobs import AcJobsError, RunContext
 from alc_render import (
     AnchorKind,
     FragmentRevision,
@@ -16,7 +16,14 @@ from alc_render import (
     decode_fragment_revision,
     source_identity_from_rich_document,
 )
-from alc_translate import TranslationResult
+from alc_translate import (
+    TranslationResult,
+    TranslationSourceError,
+    canonicalize_translation_markdown,
+    validate_translation_markdown,
+)
+
+from .model_source import model_source_block_view
 
 
 class CompanionTranslationResultError(ValueError):
@@ -28,6 +35,7 @@ class ValidatedTranslationSelection:
     result: TranslationResult
     revisions: tuple[FragmentRevision, ...]
     view_records: tuple[Mapping[str, str], ...]
+    delivery_issues: tuple[Mapping[str, Any], ...]
 
 
 def load_translation_selection(
@@ -66,11 +74,18 @@ def load_translation_selection(
             "chapter translation refers to an unknown source block"
         ) from exc
     expected = tuple(
-        block.block_id
-        for block in ordered_blocks
-        if not _non_language_figure(block)
+        block.block_id for block in ordered_blocks if not _non_language_figure(block)
     )
-    revisions: list[FragmentRevision] = []
+    expected_notes = _source_notes_for_owners(source, set(expected))
+    notes_by_id = {
+        note_id: owner_block_id for note_id, owner_block_id in expected_notes
+    }
+    ordinary_revisions: list[FragmentRevision] = []
+    note_revisions: list[FragmentRevision] = []
+    ordinary_coverage: list[str] = []
+    note_coverage: list[str] = []
+    invalid_block_ids: set[str] = set()
+    delivery_issues: list[dict[str, Any]] = []
     try:
         for item in result.revision_artifacts:
             payload = context.artifacts.read_bytes(item.artifact)
@@ -92,39 +107,98 @@ def load_translation_selection(
                 or revision.anchor.kind is not AnchorKind.BLOCK
             ):
                 raise ValueError("translation revision identity mismatch")
-            block = blocks.get(revision.anchor.target_id)
-            if (
-                block is None
-                or revision.anchor.related_blocks
-                != (anchor_block_from_rich_block(block),)
-            ):
-                raise ValueError("translation revision anchor mismatch")
-            revisions.append(revision)
+            note_id = _source_note_id(revision)
+            if note_id is None:
+                block = blocks.get(revision.anchor.target_id)
+                if block is None or revision.anchor.related_blocks != (
+                    anchor_block_from_rich_block(block),
+                ):
+                    raise ValueError("translation revision anchor mismatch")
+                ordinary_coverage.append(revision.anchor.target_id)
+            else:
+                owner_block_id = notes_by_id.get(note_id)
+                if (
+                    owner_block_id is None
+                    or revision.anchor.target_id != owner_block_id
+                    or revision.anchor.related_blocks
+                    != (anchor_block_from_rich_block(blocks[owner_block_id]),)
+                ):
+                    raise ValueError("source note translation anchor mismatch")
+                note_coverage.append(note_id)
+            recovered_markdown = canonicalize_translation_markdown(
+                revision.markdown_body
+            )
+            try:
+                validate_translation_markdown(recovered_markdown)
+            except TranslationSourceError as exc:
+                scope = note_id or revision.anchor.target_id
+                if note_id is None:
+                    invalid_block_ids.add(revision.anchor.target_id)
+                delivery_issues.append(
+                    {
+                        "issue_id": (
+                            f"translation-markdown-invalid-{revision.fragment_id}"
+                        ),
+                        "category": "translation_omitted",
+                        "scope": scope,
+                        "fallback": "source_text",
+                        "affected_count": 1,
+                        "source_preserved": True,
+                        "retry": "translation_boundary_rejected",
+                        "evidence": exc.code,
+                    }
+                )
+                continue
+            if recovered_markdown != revision.markdown_body:
+                revision = replace(
+                    revision,
+                    provenance={
+                        **dict(revision.provenance),
+                        "translation_markdown_recovery": {
+                            "schema_version": ("alc.translate.markdown_recovery.v1"),
+                            "kind": "adjacent_inline_math",
+                        },
+                    },
+                    markdown_body=recovered_markdown,
+                )
+            if note_id is None:
+                ordinary_revisions.append(revision)
+            else:
+                note_revisions.append(revision)
     except (AcJobsError, OSError, UnicodeError, ValueError) as exc:
         raise CompanionTranslationResultError(
             "alc-translate revision artifact is invalid"
         ) from exc
-    if tuple(item.anchor.target_id for item in revisions) != expected:
+    if tuple(ordinary_coverage) != expected:
         raise CompanionTranslationResultError(
             "alc-translate did not exactly cover the chapter source order"
         )
+    if tuple(note_coverage) != tuple(item[0] for item in expected_notes):
+        raise CompanionTranslationResultError(
+            "alc-translate did not exactly cover chapter source notes"
+        )
 
-    by_block = {item.anchor.target_id: item for item in revisions}
+    by_block = {item.anchor.target_id: item for item in ordinary_revisions}
     records = tuple(
         {
             "block_id": block.block_id,
             "text": (
                 "\ufffc"
                 if _non_language_figure(block)
-                else by_block[block.block_id].markdown_body
+                else (
+                    model_source_block_view(block)
+                    if block.block_id in invalid_block_ids
+                    else by_block[block.block_id].markdown_body
+                )
             ),
         }
         for block in ordered_blocks
     )
     return ValidatedTranslationSelection(
         result,
-        tuple(revisions),
+        (*ordinary_revisions, *note_revisions),
         records,
+        tuple(delivery_issues),
     )
 
 
@@ -134,6 +208,53 @@ def _non_language_figure(block: RichBlock) -> bool:
         and not str(block.payload["caption"]).strip()
         and not str(block.payload["alt_text"]).strip()
     )
+
+
+def _source_note_id(revision: FragmentRevision) -> str | None:
+    value = revision.provenance.get("source_note_translation")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"schema_version", "note_id"}
+        or value.get("schema_version") != "alc.render.source_note_translation.v1"
+        or not isinstance(value.get("note_id"), str)
+        or not value["note_id"]
+    ):
+        raise ValueError("source note translation provenance is invalid")
+    return str(value["note_id"])
+
+
+def _source_notes_for_owners(
+    source: RichDocument, owner_block_ids: set[str]
+) -> tuple[tuple[str, str], ...]:
+    metadata = source.metadata
+    raw = metadata.get("source_notes")
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("notes"), Sequence):
+        raise CompanionTranslationResultError("source note metadata is invalid")
+    values: list[tuple[int, str, str]] = []
+    for note in raw["notes"]:
+        if not isinstance(note, Mapping):
+            raise CompanionTranslationResultError("source note metadata is invalid")
+        note_id = note.get("note_id")
+        owner_block_id = note.get("owner_block_id")
+        ordinal = note.get("ordinal")
+        if (
+            not isinstance(note_id, str)
+            or not note_id
+            or not isinstance(owner_block_id, str)
+            or not owner_block_id
+            or isinstance(ordinal, bool)
+            or not isinstance(ordinal, int)
+        ):
+            raise CompanionTranslationResultError("source note metadata is invalid")
+        if owner_block_id in owner_block_ids:
+            values.append((ordinal, note_id, owner_block_id))
+    if len({item[1] for item in values}) != len(values):
+        raise CompanionTranslationResultError("source note IDs repeat")
+    return tuple((note_id, owner) for _ordinal, note_id, owner in sorted(values))
 
 
 __all__ = [

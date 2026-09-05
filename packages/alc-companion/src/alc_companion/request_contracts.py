@@ -8,25 +8,25 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from ac_llm import LLMExecutionOptions, ModelSelection
-from ac_llm.config import resolve_model_selection
 from ac_document import (
-    CachedDocumentStructureRef,
     EQUATION_LABEL_VISUAL_PROMPT_VERSION,
+    CachedDocumentStructureRef,
     RichDocument,
     cached_document_structure_ref_from_document,
     cached_document_structure_ref_to_document,
     rich_document_from_document,
     rich_document_to_document,
 )
+from ac_llm import ExecutionLimits, LLMExecutionOptions, ModelSelection
+from ac_llm.config import resolve_model_selection
 
 from .prompts import (
     AUTHOR_IDENTITY_PROMPT_VERSION,
-    HISTORICAL_AUTHOR_IDENTITY_PROMPT_VERSION_V3,
     CHAPTER_GUIDE_PROMPT_VERSION,
     CHAPTER_GUIDE_REVIEW_PROMPT_VERSION,
     EDITORIAL_PROPOSER_PROMPT_VERSION,
     EDITORIAL_REVIEWER_PROMPT_VERSION,
+    HISTORICAL_AUTHOR_IDENTITY_PROMPT_VERSION_V3,
     HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V16,
     HISTORICAL_CHAPTER_GUIDE_PROMPT_VERSION_V17,
     HISTORICAL_CHAPTER_GUIDE_REVIEW_PROMPT_VERSION_V16,
@@ -45,7 +45,6 @@ from .source_bundle import (
     encode_html_source_bundle_binding,
 )
 
-
 LEGACY_COMPANION_BUILD_REQUEST_SCHEMA = "alc.companion.build_request.v8"
 COMPANION_BUILD_REQUEST_SCHEMA = "alc.companion.build_request.v9"
 COMPANION_GENERATION_RECIPE_SCHEMA = "alc.companion.generation_recipe.v19"
@@ -58,7 +57,16 @@ NEUTRAL_TEXTBOOK_INTENT = (
     "Explain the source faithfully as a neutral textbook companion for an "
     "engaged reader, adding selective help only where it improves understanding."
 )
+_DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 300.0
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _default_llm_execution_options() -> LLMExecutionOptions:
+    return LLMExecutionOptions(
+        limits=ExecutionLimits(
+            idle_timeout_seconds=_DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -292,7 +300,9 @@ class CompanionExecutionOptions:
     """Non-semantic runtime policy for one invocation."""
 
     workers: int = 16
-    llm: LLMExecutionOptions = field(default_factory=LLMExecutionOptions)
+    llm: LLMExecutionOptions = field(
+        default_factory=_default_llm_execution_options
+    )
     document_cache_root: Path | None = None
 
     def __post_init__(self) -> None:
@@ -316,14 +326,26 @@ def freeze_generation_recipe(
     """Resolve an automatic model exactly once for durable run identity."""
 
     if recipe.model.provider != "auto" and recipe.model.model is not None:
-        return recipe
+        if (
+            recipe.model.provider != "codex"
+            or recipe.model.reasoning_effort is not None
+        ):
+            return recipe
+        return replace(
+            recipe,
+            model=replace(recipe.model, reasoning_effort="medium"),
+        )
     resolved = resolve_model_selection(recipe.model)
+    reasoning_effort = resolved.reasoning_effort
+    if resolved.provider == "codex" and reasoning_effort is None:
+        reasoning_effort = "medium"
     return replace(
         recipe,
         model=ModelSelection(
             provider=resolved.provider,
             model=resolved.model,
             tier="medium",
+            reasoning_effort=reasoning_effort,
         ),
     )
 
@@ -370,13 +392,16 @@ def encode_build_request(
 def encode_generation_recipe(
     recipe: CompanionGenerationRecipe,
 ) -> dict[str, Any]:
+    model = {
+        "provider": recipe.model.provider,
+        "model": recipe.model.model,
+        "tier": recipe.model.tier,
+    }
+    if recipe.model.reasoning_effort is not None:
+        model["reasoning_effort"] = recipe.model.reasoning_effort
     document = {
         "schema_version": COMPANION_GENERATION_RECIPE_SCHEMA,
-        "model": {
-            "provider": recipe.model.provider,
-            "model": recipe.model.model,
-            "tier": recipe.model.tier,
-        },
+        "model": model,
         "approx_term_count": recipe.approx_term_count,
         "author_identity_prompt": recipe.author_identity_prompt,
         "chapter_guide_prompt": recipe.chapter_guide_prompt,
@@ -534,11 +559,12 @@ def decode_generation_recipe(
         raise ValueError(
             "editorial generation recipe requires cross_chapter_editorial_review"
         )
-    model = _exact(
-        _mapping(raw_recipe["model"], "model"),
+    model = _mapping(raw_recipe["model"], "model")
+    if set(model) not in (
         {"provider", "model", "tier"},
-        "model",
-    )
+        {"provider", "model", "tier", "reasoning_effort"},
+    ):
+        raise ValueError("model contains unknown or missing fields")
     exact_model = model["model"]
     if exact_model is not None and not isinstance(exact_model, str):
         raise ValueError("model.model must be a string or null")
@@ -556,6 +582,11 @@ def decode_generation_recipe(
             provider=_string(model, "provider"),
             model=exact_model,
             tier=_string(model, "tier"),  # type: ignore[arg-type]
+            reasoning_effort=(
+                None
+                if "reasoning_effort" not in model
+                else _string(model, "reasoning_effort")
+            ),  # type: ignore[arg-type]
         ),
         approx_term_count=_integer(raw_recipe, "approx_term_count"),
         author_identity_prompt=_string(raw_recipe, "author_identity_prompt"),

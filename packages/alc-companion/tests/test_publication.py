@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import alc_companion.publication as publication_module
 import pytest
-from ac_jobs import ImmutableArtifactStore, RunContext, RunRepository, RunSpec
 from ac_document import (
     AcDocumentService,
     RichDocumentParserService,
@@ -13,23 +13,8 @@ from ac_document import (
     SourceOriginKind,
     SourceRepository,
 )
-from alc_render import (
-    AnchorKind,
-    FragmentAnchor,
-    FragmentRevision,
-    Layer,
-    anchor_block_from_rich_block,
-    block_text_to_markdown,
-    decode_fragment_revision,
-    encode_fragment_revision,
-    fragment_revision_filename,
-    fragment_revision_ref,
-    source_identity_from_rich_document,
-    validate_publication_workspace,
-)
-from alc_translate import TranslationResult, TranslationRevisionArtifact
-
-import alc_companion.publication as publication_module
+from ac_jobs import ImmutableArtifactStore, RunContext, RunRepository, RunSpec
+from alc_companion.generation_validation import validate_chapter_guide
 from alc_companion.publication import (
     CompanionPublicationError,
     PublishedCompanion,
@@ -46,8 +31,24 @@ from alc_companion.reviewed_supplements import (
     reviewed_anchor_fingerprint,
     reviewed_source_inventory_digest,
 )
-from alc_companion.generation_validation import validate_chapter_guide
 from alc_companion.source_planning import plan_source_chapters
+from alc_companion.translation_results import load_translation_selection
+from alc_render import (
+    AnchorKind,
+    FragmentAnchor,
+    FragmentRevision,
+    Layer,
+    anchor_block_from_rich_block,
+    block_text_to_markdown,
+    decode_fragment_revision,
+    encode_fragment_revision,
+    fragment_revision_filename,
+    fragment_revision_ref,
+    render_publication_html,
+    source_identity_from_rich_document,
+    validate_publication_workspace,
+)
+from alc_translate import TranslationResult, TranslationRevisionArtifact
 
 
 def _source(tmp_path: Path):
@@ -74,9 +75,7 @@ def _illustrated_source(tmp_path: Path):
     )
     service = AcDocumentService(cache_root=tmp_path / "paper")
     artifact = service.import_source(source_path)
-    return RichDocumentParserService(service.repository).parse_source(
-        artifact
-    )
+    return RichDocumentParserService(service.repository).parse_source(artifact)
 
 
 def test_publication_uses_atomic_overlays_and_materializes_directly(
@@ -150,9 +149,7 @@ def test_publication_uses_atomic_overlays_and_materializes_directly(
     editorial = published.publication.reader_profile["editorial_review"]
     assert editorial["status"] == "no_changes"
     assert editorial["revised_units"] == 0
-    assert editorial["warning"] == (
-        "The final audit did not bind the proposal."
-    )
+    assert editorial["warning"] == ("The final audit did not bind the proposal.")
     assert "Warning:" in editorial["summary"]
     icon = published.publication.reader_profile["reader_icon"]
     assert icon["initial"] == "T"
@@ -176,13 +173,12 @@ def test_publication_uses_atomic_overlays_and_materializes_directly(
         for item in published.resource_refs
         if item.digest.value == report_resource["artifact_digest"]
     )
-    assert json.loads(context.artifacts.read_bytes(report_ref))[
-        "schema_version"
-    ] == "alc.companion.editorial_review.v1"
+    assert (
+        json.loads(context.artifacts.read_bytes(report_ref))["schema_version"]
+        == "alc.companion.editorial_review.v1"
+    )
     published_revisions = tuple(
-        decode_fragment_revision(
-            context.artifacts.read_bytes(ref).decode("utf-8")
-        )
+        decode_fragment_revision(context.artifacts.read_bytes(ref).decode("utf-8"))
         for ref in published.fragment_refs
     )
     assert {item.priority for item in published_revisions} == {10, 20}
@@ -191,8 +187,7 @@ def test_publication_uses_atomic_overlays_and_materializes_directly(
         for item in published_revisions
         if item.role == "translation"
     } == {
-        item.revision.semantic_digest
-        for item in translation_result.revision_artifacts
+        item.revision.semantic_digest for item in translation_result.revision_artifacts
     }
 
     workspace = tmp_path / "publication"
@@ -254,9 +249,7 @@ def test_materialization_validates_resource_size_bytes(tmp_path: Path) -> None:
     source = _illustrated_source(tmp_path)
     chapter = plan_source_chapters(source)[0]
     repository = RunRepository(tmp_path / "jobs")
-    snapshot = repository.create(
-        RunSpec("resource-run", "handler", {"input": "test"})
-    )
+    snapshot = repository.create(RunSpec("resource-run", "handler", {"input": "test"}))
     context = RunContext(repository, snapshot, resume_input=None)
 
     published = publish_companion(
@@ -298,6 +291,214 @@ def test_materialization_validates_resource_size_bytes(tmp_path: Path) -> None:
     assert validate_publication_workspace(publication_path) == ()
 
 
+def test_missing_source_resource_is_explicitly_degraded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = _illustrated_source(tmp_path)
+    chapter = plan_source_chapters(source)[0]
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("missing-resource", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+
+    class MissingAssetRepository:
+        def get_asset(self, _digest):
+            raise OSError("asset unavailable")
+
+        def read_asset_bytes(self, _asset):
+            raise AssertionError("missing asset was unexpectedly read")
+
+    class MissingAssetDocument:
+        def __init__(self, **_kwargs):
+            self.repository = MissingAssetRepository()
+
+    monkeypatch.setattr(publication_module, "AcDocumentService", MissingAssetDocument)
+    published = publish_companion(
+        context,
+        source=source,
+        title="Illustrated",
+        authors=(),
+        source_language="en",
+        target_language="en",
+        translation_mode="skipped",
+        reader_labels={},
+        chapters=(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "block_ids": list(chapter.block_ids),
+                "display_anchor_block_id": chapter.display_anchor_block_id,
+                "section_block_ids": list(chapter.section_block_ids),
+                "section_titles": list(chapter.section_titles),
+                "section_levels": list(chapter.section_levels),
+                "translation_result": None,
+                "learning_units": [],
+            },
+        ),
+        glossary=(),
+        bibliography=(),
+        document_cache_root=tmp_path / "paper",
+    )
+    ledger = published.publication.reader_profile["delivery_ledger"]
+    assert ledger["delivery_grade"] == "degraded"
+    assert ledger["issues"][0]["category"] == "resource_unavailable"
+    resources = next(item for item in ledger["stages"] if item["stage"] == "resources")
+    assert resources == {
+        "stage": "resources",
+        "status": "degraded",
+        "expected": 3,
+        "produced": 2,
+        "accounted": 3,
+    }
+    workspace = tmp_path / "missing-resource-publication"
+    publication_path = materialize_published_companion(
+        ImmutableArtifactStore(
+            repository.run_directory("missing-resource"),
+            repository_root=repository.root,
+        ),
+        published,
+        workspace,
+    )
+    rendered = render_publication_html(publication_path, workspace / "reader.html")
+    assert rendered.html_path.is_file()
+    final_ledger = json.loads(
+        (workspace / "reader.delivery-ledger.json").read_text(encoding="utf-8")
+    )
+    assert final_ledger["delivery_grade"] == "degraded"
+    assert next(
+        item for item in final_ledger["stages"] if item["stage"] == "render"
+    ) == {
+        "stage": "render",
+        "status": "complete",
+        "expected": 1,
+        "produced": 1,
+        "accounted": 1,
+    }
+
+
+def test_glossary_fallback_summary_is_accounted_in_delivery_ledger(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    chapter = plan_source_chapters(source)[0]
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("glossary-fallback", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+    published = publish_companion(
+        context,
+        source=source,
+        title="Title",
+        authors=(),
+        source_language="en",
+        target_language="en",
+        translation_mode="skipped",
+        reader_labels={},
+        chapters=(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "block_ids": list(chapter.block_ids),
+                "display_anchor_block_id": chapter.display_anchor_block_id,
+                "section_block_ids": list(chapter.section_block_ids),
+                "section_titles": list(chapter.section_titles),
+                "section_levels": list(chapter.section_levels),
+                "translation_result": None,
+                "learning_units": [],
+            },
+        ),
+        glossary=(
+            {
+                "entry_id": "term-recovered",
+                "term": "Body",
+                "translated_term": "Body",
+                "definition": "Recovered definition.",
+                "anchor_ids": [source.blocks[1].block_id],
+                "citations": [],
+            },
+        ),
+        glossary_fallback_summary={
+            "schema_version": "alc.translate.glossary_fallback_summary.v1",
+            "recovered_term_ids": ["term-recovered"],
+            "dropped_term_ids": ["term-omitted"],
+            "reason_codes": ["glossary_control_character_invalid"],
+        },
+        bibliography=(),
+        document_cache_root=tmp_path / "paper",
+    )
+    ledger = published.publication.reader_profile["delivery_ledger"]
+    glossary = next(item for item in ledger["stages"] if item["stage"] == "glossary")
+    assert glossary == {
+        "stage": "glossary",
+        "status": "degraded",
+        "expected": 2,
+        "produced": 1,
+        "accounted": 2,
+    }
+    assert {item["category"] for item in ledger["issues"]} == {
+        "glossary_recovered",
+        "glossary_omitted",
+    }
+
+
+def test_unanchored_glossary_entry_is_explicitly_omitted(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    chapter = plan_source_chapters(source)[0]
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("unanchored-glossary", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+    published = publish_companion(
+        context,
+        source=source,
+        title="Title",
+        authors=(),
+        source_language="en",
+        target_language="en",
+        translation_mode="skipped",
+        reader_labels={},
+        chapters=(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "block_ids": list(chapter.block_ids),
+                "display_anchor_block_id": chapter.display_anchor_block_id,
+                "section_block_ids": list(chapter.section_block_ids),
+                "section_titles": list(chapter.section_titles),
+                "section_levels": list(chapter.section_levels),
+                "translation_result": None,
+                "learning_units": [],
+            },
+        ),
+        glossary=(
+            {
+                "entry_id": "term-anchored",
+                "term": "Body",
+                "translated_term": "Body",
+                "definition": "Definition.",
+                "anchor_ids": [source.blocks[1].block_id],
+                "citations": [],
+            },
+        ),
+        glossary_unanchored_ids=("term-unanchored",),
+        bibliography=(),
+        document_cache_root=tmp_path / "paper",
+    )
+    ledger = published.publication.reader_profile["delivery_ledger"]
+    glossary = next(item for item in ledger["stages"] if item["stage"] == "glossary")
+    assert glossary["expected"] == 2
+    assert glossary["produced"] == 1
+    assert any(
+        item["issue_id"] == "glossary-omitted-term-unanchored"
+        for item in ledger["issues"]
+    )
+
+
 def test_reviewed_supplement_publishes_provenance_resource_and_coverage(
     tmp_path: Path,
 ) -> None:
@@ -331,9 +532,7 @@ def test_reviewed_supplement_publishes_provenance_resource_and_coverage(
         supplement_id="reviewed-notes",
         summary="Reviewed notes with exhaustive dispositions.",
         source_unit_count=len(coverage),
-        source_inventory_digest=reviewed_source_inventory_digest(
-            coverage
-        ),
+        source_inventory_digest=reviewed_source_inventory_digest(coverage),
         entries=(
             ReviewedSupplementEntry(
                 entry_id="entry-1",
@@ -416,16 +615,23 @@ def test_reviewed_supplement_publishes_provenance_resource_and_coverage(
     assert revision.provenance["source_draft_ids"] == ("draft-1",)
     assert revision.provenance["source_unit_ids"] == ("unit-1",)
     assert revision.provenance["source_basis"] == "supplement_units"
-    assert len(published.resource_refs) == 3
+    assert len(published.resource_refs) == 4
+    ledger_resource = next(
+        item
+        for item in published.publication.resources
+        if item["logical_name"] == "alc-companion-delivery-ledger.json"
+    )
+    assert any(
+        item.digest.value == ledger_resource["artifact_digest"]
+        for item in published.resource_refs
+    )
     report_ref = next(
         item
         for item in published.resource_refs
         if item.media_type == "application/json"
     )
     report = json.loads(context.artifacts.read_bytes(report_ref))
-    assert report["schema_version"] == (
-        "alc.companion.supplement_coverage.v1"
-    )
+    assert report["schema_version"] == ("alc.companion.supplement_coverage.v1")
     assert report["totals"] == {
         "supplements": 1,
         "source_units": 2,
@@ -465,9 +671,7 @@ def test_changed_companion_content_gets_a_distinct_fragment_identity(
 
     def publish(content: str, name: str) -> str:
         repository = RunRepository(tmp_path / f"jobs-{name}")
-        snapshot = repository.create(
-            RunSpec(f"run-{name}", "handler", {"input": name})
-        )
+        snapshot = repository.create(RunSpec(f"run-{name}", "handler", {"input": name}))
         context = RunContext(repository, snapshot, resume_input=None)
         translation = _translation_result(context, source)
         chapter = {
@@ -505,20 +709,12 @@ def test_changed_companion_content_gets_a_distinct_fragment_identity(
             document_cache_root=tmp_path / "paper",
         )
         revisions = [
-            decode_fragment_revision(
-                context.artifacts.read_bytes(ref).decode("utf-8")
-            )
+            decode_fragment_revision(context.artifacts.read_bytes(ref).decode("utf-8"))
             for ref in result.fragment_refs
         ]
-        return next(
-            item.fragment_id
-            for item in revisions
-            if item.role == "companion"
-        )
+        return next(item.fragment_id for item in revisions if item.role == "companion")
 
-    assert publish("第一版说明。", "first") != publish(
-        "第二版说明。", "second"
-    )
+    assert publish("第一版说明。", "first") != publish("第二版说明。", "second")
 
 
 def test_chapter_display_anchor_skips_front_matter(tmp_path: Path) -> None:
@@ -526,9 +722,7 @@ def test_chapter_display_anchor_skips_front_matter(tmp_path: Path) -> None:
     artifact = repository.store_bytes(
         b"March 2007\n\n# Fearful Symmetry\n\nBody.\n",
         source_format=SourceFormat.MARKDOWN,
-        origin=SourceOrigin(
-            SourceOriginKind.LOCAL_IMPORT, locator="source.md"
-        ),
+        origin=SourceOrigin(SourceOriginKind.LOCAL_IMPORT, locator="source.md"),
     )
     source = RichDocumentParserService(repository).parse_source(artifact)
 
@@ -556,9 +750,7 @@ def test_chapter_display_anchor_skips_front_matter(tmp_path: Path) -> None:
         block_ids=chapter.block_ids,
         chapter_anchor_block_id=chapter.display_anchor_block_id,
     )
-    assert guide["learning_units"][0]["anchor_block_ids"] == [
-        anchor.block_id
-    ]
+    assert guide["learning_units"][0]["anchor_block_ids"] == [anchor.block_id]
 
 
 def test_simple_chapter_may_publish_no_guide_units(tmp_path: Path) -> None:
@@ -620,16 +812,12 @@ def test_publication_outline_uses_program_chapters_and_subsections(
     artifact = paper.store_bytes(
         b"Front matter.\n\n# Real Chapter\n\nBody.\n\n## Real Section\n\nDetail.\n",
         source_format=SourceFormat.MARKDOWN,
-        origin=SourceOrigin(
-            SourceOriginKind.LOCAL_IMPORT, locator="source.md"
-        ),
+        origin=SourceOrigin(SourceOriginKind.LOCAL_IMPORT, locator="source.md"),
     )
     source = RichDocumentParserService(paper).parse_source(artifact)
     chapter = plan_source_chapters(source)[0]
     repository = RunRepository(tmp_path / "jobs")
-    snapshot = repository.create(
-        RunSpec("outline-run", "handler", {"input": "test"})
-    )
+    snapshot = repository.create(RunSpec("outline-run", "handler", {"input": "test"}))
     context = RunContext(repository, snapshot, resume_input=None)
 
     published = publish_companion(
@@ -646,9 +834,7 @@ def test_publication_outline_uses_program_chapters_and_subsections(
                 "chapter_id": chapter.chapter_id,
                 "title": chapter.title,
                 "block_ids": list(chapter.block_ids),
-                "display_anchor_block_id": (
-                    chapter.display_anchor_block_id
-                ),
+                "display_anchor_block_id": (chapter.display_anchor_block_id),
                 "section_block_ids": list(chapter.section_block_ids),
                 "section_titles": list(chapter.section_titles),
                 "section_levels": list(chapter.section_levels),
@@ -673,9 +859,166 @@ def test_publication_outline_uses_program_chapters_and_subsections(
     assert subsection.path[0] == chapter.chapter_id
 
 
+def test_publication_omits_one_persisted_malformed_translation(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    chapter = plan_source_chapters(source)[0]
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("malformed-translation", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+    malformed = source.blocks[1]
+    translation = _translation_result(
+        context, source, malformed_ordinal=malformed.ordinal
+    )
+    selection = load_translation_selection(
+        context,
+        translation.to_document(),
+        source=source,
+        block_ids=chapter.block_ids,
+        target_language="zh-CN",
+    )
+    fallback_record = next(
+        item
+        for item in selection.view_records
+        if item["block_id"] == malformed.block_id
+    )
+    assert "Body." in fallback_record["text"]
+    assert "$$" not in fallback_record["text"]
+
+    published = publish_companion(
+        context,
+        source=source,
+        title="Title",
+        authors=(),
+        source_language="en",
+        target_language="zh-CN",
+        translation_mode="enabled",
+        reader_labels={},
+        chapters=(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "block_ids": list(chapter.block_ids),
+                "display_anchor_block_id": chapter.display_anchor_block_id,
+                "section_block_ids": list(chapter.section_block_ids),
+                "section_titles": list(chapter.section_titles),
+                "section_levels": list(chapter.section_levels),
+                "translation_result": translation.to_document(),
+                "learning_units": [],
+            },
+        ),
+        glossary=(),
+        bibliography=(),
+        document_cache_root=tmp_path / "paper",
+    )
+
+    ledger = published.publication.reader_profile["delivery_ledger"]
+    assert published.publication.reader_profile["delivery_mode"] == (
+        "partial_bilingual"
+    )
+    translation_stage = next(
+        item for item in ledger["stages"] if item["stage"] == "translation"
+    )
+    assert translation_stage["status"] == "degraded"
+    assert translation_stage["produced"] == len(source.blocks) - 1
+    issue = next(
+        item for item in ledger["issues"] if item["category"] == "translation_omitted"
+    )
+    assert issue["scope"] == malformed.block_id
+    assert issue["evidence"] == "translation_markdown_invalid"
+    published_revisions = tuple(
+        decode_fragment_revision(context.artifacts.read_bytes(ref).decode("utf-8"))
+        for ref in published.fragment_refs
+    )
+    assert all(
+        revision.role != "translation"
+        or revision.anchor.target_id != malformed.block_id
+        for revision in published_revisions
+    )
+
+
+def test_publication_records_sanitized_provider_failure(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path)
+    chapter = plan_source_chapters(source)[0]
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("provider-diagnostic", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+    translation = _translation_result(context, source)
+    context.events.emit(
+        "translation_provider_fallback",
+        {
+            "provider": "codex",
+            "model": "gpt-5.6-luna",
+            "tier": "medium",
+            "reason_code": "provider_crash_retry_exhausted",
+            "failure_category": "timeout",
+            "detail_code": "provider_idle_timeout",
+            "stage": "translation",
+            "window_ordinal": 2,
+            "consecutive_window_failures": 2,
+            "global_fallback_triggered": True,
+            "remaining_windows_skipped": 3,
+        },
+    )
+
+    published = publish_companion(
+        context,
+        source=source,
+        title="Title",
+        authors=(),
+        source_language="en",
+        target_language="zh-CN",
+        translation_mode="enabled",
+        reader_labels={},
+        chapters=(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "block_ids": list(chapter.block_ids),
+                "display_anchor_block_id": chapter.display_anchor_block_id,
+                "section_block_ids": list(chapter.section_block_ids),
+                "section_titles": list(chapter.section_titles),
+                "section_levels": list(chapter.section_levels),
+                "translation_result": translation.to_document(),
+                "learning_units": [],
+            },
+        ),
+        glossary=(),
+        bibliography=(),
+        document_cache_root=tmp_path / "paper",
+    )
+
+    issue = next(
+        item
+        for item in published.publication.reader_profile["delivery_ledger"][
+            "issues"
+        ]
+        if item["category"] == "translation_provider_failure"
+    )
+    assert issue == {
+        "issue_id": "translation-provider-translation-2",
+        "category": "translation_provider_failure",
+        "scope": "window:2",
+        "fallback": "source_text_remaining_windows",
+        "affected_count": 4,
+        "source_preserved": True,
+        "retry": "provider_crash_retry_exhausted",
+        "evidence": "codex/gpt-5.6-luna:timeout/provider_idle_timeout",
+    }
+
+
 def _translation_result(
     context: RunContext,
     source,
+    *,
+    malformed_ordinal: int | None = None,
 ) -> TranslationResult:
     source_identity = source_identity_from_rich_document(source)
     references = []
@@ -702,11 +1045,13 @@ def _translation_result(
             title=None,
             citation_ids=(),
             provenance={"producer": "alc-translate"},
-            markdown_body=block_text_to_markdown(block, text),
+            markdown_body=(
+                "模型译文意外打开 $$ 但没有关闭。\n"
+                if block.ordinal == malformed_ordinal
+                else block_text_to_markdown(block, text)
+            ),
         )
-        relative = (
-            f"fragments/{fragment_revision_filename(revision)}"
-        )
+        relative = f"fragments/{fragment_revision_filename(revision)}"
         reference = fragment_revision_ref(relative, revision)
         payload = encode_fragment_revision(revision).encode("utf-8")
         artifact = context.artifacts.publish_bytes(
@@ -715,16 +1060,12 @@ def _translation_result(
             media_type="text/markdown",
         )
         references.append(reference)
-        artifacts.append(
-            TranslationRevisionArtifact(reference, artifact)
-        )
+        artifacts.append(TranslationRevisionArtifact(reference, artifact))
     return TranslationResult(
         source_language="en",
         target_language="zh-CN",
         mode="enabled",
         coverage="selection",
-        layer=Layer(
-            source_identity, "alc-translate", tuple(references)
-        ),
+        layer=Layer(source_identity, "alc-translate", tuple(references)),
         revision_artifacts=tuple(artifacts),
     )

@@ -25,6 +25,7 @@ def test_build_freezes_auto_provider_and_model(
         provider="codex",
         model="gpt-5.6-luna",
         tier="medium",
+        reasoning_effort="medium",
     )
 
 
@@ -51,6 +52,26 @@ def test_build_freezes_missing_model_for_explicit_provider(
         provider="codex",
         model="gpt-5.6-luna",
         tier="medium",
+        reasoning_effort="medium",
+    )
+
+
+def test_build_preserves_custom_model_and_reasoning_effort() -> None:
+    frozen = freeze_generation_recipe(
+        CompanionGenerationRecipe(
+            model=ModelSelection(
+                provider="codex",
+                model="gpt-5.6-terra",
+                reasoning_effort="high",
+            )
+        )
+    )
+
+    assert frozen.model == ModelSelection(
+        provider="codex",
+        model="gpt-5.6-terra",
+        tier="medium",
+        reasoning_effort="high",
     )
 
 
@@ -110,6 +131,15 @@ def test_build_exposes_optional_cross_chapter_editorial_review(
 ) -> None:
     assert main(["build", "--help"]) == 0
     assert "--cross-chapter-editorial-review" in capsys.readouterr().out
+
+
+def test_build_exposes_independent_model_and_effort_controls(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["build", "--help"]) == 0
+    output = capsys.readouterr().out
+    assert "--model MODEL" in output
+    assert "--effort {low,medium,high,xhigh}" in output
 
 
 def test_build_accepts_an_explicit_html_source_manifest(

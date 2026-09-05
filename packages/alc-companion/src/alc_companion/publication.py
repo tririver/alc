@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ac_document import (
+    AcDocumentService,
+    RichBlockKind,
+    RichDocument,
+    SourceRepositoryError,
+)
 from ac_jobs import (
     AcJobsError,
     ArtifactRef,
@@ -17,13 +23,10 @@ from ac_jobs import (
     atomic_write_bytes,
     decode_artifact_ref,
 )
-from ac_document import (
-    AcDocumentService,
-    RichBlockKind,
-    RichDocument,
-    SourceRepositoryError,
-)
 from alc_render import (
+    DELIVERY_LEDGER_SCHEMA,
+    READER_ICON_LOGICAL_NAME,
+    READER_ICON_MEDIA_TYPE,
     AnchorKind,
     FragmentAnchor,
     FragmentRevision,
@@ -31,32 +34,30 @@ from alc_render import (
     Layer,
     Publication,
     PublicationOutlineItem,
-    READER_ICON_LOGICAL_NAME,
-    READER_ICON_MEDIA_TYPE,
     anchor_block_from_rich_block,
+    build_reader_icon,
     encode_fragment_revision,
     fragment_revision_ref,
     fragment_revision_storage_path,
     layer_from_document,
     layer_to_document,
     normalize_markdown,
-    build_reader_icon,
     publication_from_document,
     publication_to_document,
+    validate_delivery_ledger,
 )
 
 from ._build_support import ref_document
 from .editorial_review import EditorialReviewError, validate_editorial_report
-from .translation_results import (
-    CompanionTranslationResultError,
-    load_translation_selection,
-)
 from .reviewed_supplements import (
     ReviewedCompanionSupplement,
     encode_reviewed_companion_supplement,
     validate_reviewed_companion_supplement,
 )
-
+from .translation_results import (
+    CompanionTranslationResultError,
+    load_translation_selection,
+)
 
 BUILD_RESULT_SCHEMA = "alc.companion.build_result.v2"
 PUBLICATION_ARTIFACT = "publication/publication.json"
@@ -72,6 +73,8 @@ SUPPLEMENT_COVERAGE_LOGICAL_NAME = (
 EDITORIAL_REVIEW_SCHEMA = "alc.companion.editorial_review.v1"
 EDITORIAL_REVIEW_ARTIFACT = "publication/reports/editorial-review.json"
 EDITORIAL_REVIEW_LOGICAL_NAME = "alc-companion-editorial-review.json"
+DELIVERY_LEDGER_ARTIFACT = "publication/reports/delivery-ledger.json"
+DELIVERY_LEDGER_LOGICAL_NAME = "alc-companion-delivery-ledger.json"
 
 
 class CompanionPublicationError(ValueError):
@@ -99,10 +102,14 @@ def publish_companion(
     reader_labels: Mapping[str, str],
     chapters: Sequence[Mapping[str, Any]],
     glossary: Sequence[Mapping[str, Any]],
+    glossary_unanchored_ids: Sequence[str] = (),
+    glossary_fallback_summary: Mapping[str, Any] | None = None,
     bibliography: Sequence[Mapping[str, Any]],
     reviewed_supplements: Sequence[ReviewedCompanionSupplement] = (),
     editorial_review: Mapping[str, Any] | None = None,
+    delivery_issues: Sequence[Mapping[str, Any]] = (),
     document_cache_root: str | Path | None = None,
+    build_state: str | None = None,
 ) -> PublishedCompanion:
     """Publish immutable overlay revisions, their layers, and one publication."""
 
@@ -110,6 +117,7 @@ def publish_companion(
     source_identity = Publication(source).source
     translation_revisions: list[FragmentRevision] = []
     companion_revisions: list[FragmentRevision] = []
+    delivery_issue_values = [dict(item) for item in delivery_issues]
     supplements = tuple(reviewed_supplements)
     supplement_ids: set[str] = set()
     for supplement in supplements:
@@ -136,6 +144,9 @@ def publish_companion(
             except CompanionTranslationResultError as exc:
                 raise CompanionPublicationError(str(exc)) from exc
             translation_revisions.extend(selection.revisions)
+            delivery_issue_values.extend(
+                dict(item) for item in selection.delivery_issues
+            )
         elif raw_translation is not None:
             raise CompanionPublicationError(
                 "a skipped translation must not contain a translation result"
@@ -277,11 +288,20 @@ def publish_companion(
         try:
             cached = paper.repository.get_asset(asset.artifact_digest)
             payload = paper.repository.read_asset_bytes(cached)
-        except (OSError, SourceRepositoryError) as exc:
-            raise CompanionPublicationError(
-                "source asset is unavailable for the run-owned publication: "
-                f"{asset.artifact_digest}"
-            ) from exc
+        except (OSError, SourceRepositoryError):
+            delivery_issue_values.append(
+                {
+                    "issue_id": f"resource-{asset.artifact_digest}",
+                    "category": "resource_unavailable",
+                    "scope": asset.logical_name,
+                    "fallback": "source_placeholder",
+                    "affected_count": 1,
+                    "source_preserved": True,
+                    "retry": "not_semantic_retry",
+                    "evidence": "source resource was unavailable for publication",
+                }
+            )
+            continue
         source_payloads[asset.artifact_digest] = payload
         relative = f"resources/{asset.artifact_digest}"
         resource_artifacts.append(
@@ -488,6 +508,89 @@ def publish_companion(
             **dict(counts),
         }
 
+    delivery_issue_values.extend(
+        _translation_provider_delivery_issues(context)
+    )
+    ledger = _delivery_ledger_document(
+        source=source,
+        translation_mode=translation_mode,
+        translation_revisions=translation_revisions,
+        chapters=chapters,
+        glossary=glossary,
+        glossary_unanchored_ids=glossary_unanchored_ids,
+        glossary_fallback_summary=glossary_fallback_summary,
+        resources_expected=(
+            len(resources) + 1 + len(source.assets) - len(source_payloads)
+        ),
+        resources_produced=len(resources) + 1,
+        editorial_review=editorial_review,
+        explicit_issues=delivery_issue_values,
+    )
+    if build_state == "provider_source_only":
+        source_only_stages = [
+            {
+                **stage,
+                "status": (
+                    "source_only"
+                    if stage["stage"] == "source"
+                    else stage["status"]
+                ),
+            }
+            for stage in ledger["stages"]
+        ]
+        ledger = validate_delivery_ledger(
+            {
+                **ledger,
+                "delivery_grade": "source_only",
+                "stages": source_only_stages,
+            },
+            source_unit_count=len(source.blocks),
+        )
+    delivery_mode = (
+        "source_only"
+        if build_state == "provider_source_only"
+        else (
+            "partial_bilingual"
+            if translation_mode == "enabled"
+            and any(
+                item["category"]
+                in {"translation_source_text", "translation_omitted"}
+                for item in ledger["issues"]
+            )
+            else "bilingual"
+            if translation_mode == "enabled"
+            else "source_language"
+        )
+    )
+    ledger_payload = (
+        json.dumps(
+            ledger, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        + b"\n"
+    )
+    ledger_ref = context.artifacts.publish_bytes(
+        DELIVERY_LEDGER_ARTIFACT,
+        ledger_payload,
+        media_type="application/json",
+    )
+    if (
+        ledger_ref.digest.value in resource_digests
+        or DELIVERY_LEDGER_LOGICAL_NAME in resource_names
+    ):
+        raise CompanionPublicationError(
+            "delivery ledger conflicts with a publication resource"
+        )
+    resource_artifacts.append(ledger_ref)
+    resources.append(
+        {
+            "artifact_digest": ledger_ref.digest.value,
+            "media_type": "application/json",
+            "logical_name": DELIVERY_LEDGER_LOGICAL_NAME,
+            "size": ledger_ref.digest.size_bytes,
+            "path": "reports/delivery-ledger.json",
+        }
+    )
+
     publication = Publication(
         source_document=source,
         layers=tuple(
@@ -505,6 +608,17 @@ def publish_companion(
             "source_language": source_language,
             "target_language": target_language,
             "translation_mode": translation_mode,
+            "delivery_mode": delivery_mode,
+            **(
+                {"build_state": build_state}
+                if build_state is not None
+                else {}
+            ),
+            "delivery_ledger": ledger,
+            "delivery_ledger_report": {
+                "logical_name": DELIVERY_LEDGER_LOGICAL_NAME,
+                "filename": "delivery-ledger.json",
+            },
             "reader_icon": {
                 "recipe": "alc.render.reader_icon.v1",
                 "logical_name": READER_ICON_LOGICAL_NAME,
@@ -537,6 +651,50 @@ def publish_companion(
     )
 
 
+def publish_provider_source_only_companion(
+    context: RunContext,
+    *,
+    source: RichDocument,
+    title: str,
+    authors: Sequence[str],
+    source_language: str,
+    target_language: str,
+    reader_labels: Mapping[str, str],
+    stage: str,
+    reason_code: str,
+    document_cache_root: str | Path | None = None,
+) -> PublishedCompanion:
+    """Publish an honest terminal Reader when model delivery is unavailable."""
+
+    return publish_companion(
+        context,
+        source=source,
+        title=title,
+        authors=authors,
+        source_language=source_language,
+        target_language=target_language,
+        translation_mode="skipped",
+        reader_labels=reader_labels,
+        chapters=(),
+        glossary=(),
+        bibliography=(),
+        delivery_issues=(
+            {
+                "issue_id": f"provider-delivery-{stage}",
+                "category": "provider_delivery_unavailable",
+                "scope": stage,
+                "fallback": "static_source_only",
+                "affected_count": 1,
+                "source_preserved": True,
+                "retry": "bounded_retry_exhausted",
+                "evidence": reason_code,
+            },
+        ),
+        document_cache_root=document_cache_root,
+        build_state="provider_source_only",
+    )
+
+
 def _cover_payload(
     source: RichDocument, payloads: Mapping[str, bytes]
 ) -> bytes | None:
@@ -565,6 +723,411 @@ def _cover_payload(
         if selected is not None
         else None
     )
+
+
+def _delivery_ledger_document(
+    *,
+    source: RichDocument,
+    translation_mode: str,
+    translation_revisions: Sequence[FragmentRevision],
+    chapters: Sequence[Mapping[str, Any]],
+    glossary: Sequence[Mapping[str, Any]],
+    glossary_unanchored_ids: Sequence[str],
+    glossary_fallback_summary: Mapping[str, Any] | None,
+    resources_expected: int,
+    resources_produced: int,
+    editorial_review: Mapping[str, Any] | None,
+    explicit_issues: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Bind every source-preserving fallback to one immutable report."""
+
+    issues: list[dict[str, Any]] = []
+    for revision in translation_revisions:
+        fallback = revision.provenance.get("translation_fallback")
+        if not isinstance(fallback, Mapping):
+            continue
+        kind = str(fallback.get("kind") or "source_preserved")
+        block_id = revision.anchor.target_id
+        issues.append(
+            {
+                "issue_id": f"translation-{revision.fragment_id}",
+                "category": f"translation_{kind}",
+                "scope": block_id,
+                "fallback": (
+                    "source_text" if kind == "source_text" else "pre_review_translation"
+                ),
+                "affected_count": 1,
+                "source_preserved": kind == "source_text",
+                "retry": "bounded_retry_exhausted",
+                "evidence": str(fallback.get("reason") or kind),
+            }
+        )
+    for item in explicit_issues:
+        try:
+            issue = {
+                key: item[key]
+                for key in (
+                    "issue_id",
+                    "category",
+                    "scope",
+                    "fallback",
+                    "affected_count",
+                    "source_preserved",
+                    "retry",
+                    "evidence",
+                )
+            }
+        except KeyError as exc:
+            raise CompanionPublicationError("delivery issue is incomplete") from exc
+        issues.append(issue)
+    glossary_expected, glossary_issues = _glossary_delivery_issues(
+        glossary, glossary_fallback_summary, glossary_unanchored_ids
+    )
+    issues.extend(glossary_issues)
+    guide_expected, guide_produced, guide_issues = _guide_delivery_issues(
+        chapters, existing_issues=issues
+    )
+    issues.extend(guide_issues)
+    if editorial_review is not None and editorial_review.get("status") == "unavailable":
+        issues.append(
+            {
+                "issue_id": "editorial-review-unavailable",
+                "category": "editorial_review_unavailable",
+                "scope": "document",
+                "fallback": "validated_chapter_guides",
+                "affected_count": 1,
+                "source_preserved": False,
+                "retry": "not_semantic_retry",
+                "evidence": str(editorial_review.get("reason") or "unavailable"),
+            }
+        )
+    if len({str(item["issue_id"]) for item in issues}) != len(issues):
+        raise CompanionPublicationError("delivery issues repeat an issue ID")
+    translation_expected = _expected_translation_units(
+        source, chapters, translation_mode=translation_mode
+    )
+    stages = [
+        {
+            "stage": "source",
+            "status": "complete",
+            "expected": len(source.blocks),
+            "produced": len(source.blocks),
+            "accounted": len(source.blocks),
+        },
+        {
+            "stage": "translation",
+            "status": (
+                "degraded"
+                if any(
+                    str(item["category"]).startswith("translation_")
+                    for item in issues
+                )
+                else ("complete" if translation_mode == "enabled" else "skipped")
+            ),
+            "expected": translation_expected,
+            "produced": len(translation_revisions),
+            "accounted": translation_expected,
+        },
+        {
+            "stage": "guides",
+            "status": (
+                "degraded"
+                if any(str(item["category"]).startswith("guide_") for item in issues)
+                else "complete"
+            ),
+            "expected": guide_expected,
+            "produced": guide_produced,
+            "accounted": guide_expected,
+        },
+        {
+            "stage": "glossary",
+            "status": "degraded" if glossary_issues else "complete",
+            "expected": glossary_expected,
+            "produced": len(glossary),
+            "accounted": glossary_expected,
+        },
+        {
+            "stage": "editorial",
+            "status": (
+                "degraded"
+                if any(
+                    str(item["category"]).startswith("editorial_")
+                    for item in issues
+                )
+                else ("complete" if editorial_review is not None else "skipped")
+            ),
+            "expected": 1 if editorial_review is not None else 0,
+            "produced": 1 if editorial_review is not None else 0,
+            "accounted": 1 if editorial_review is not None else 0,
+        },
+        {
+            "stage": "resources",
+            "status": (
+                "degraded"
+                if any(
+                    str(item["category"]) == "resource_unavailable"
+                    for item in issues
+                )
+                else "complete"
+            ),
+            "expected": resources_expected,
+            "produced": resources_produced,
+            "accounted": resources_expected,
+        },
+        {
+            "stage": "render",
+            "status": "skipped",
+            "expected": 0,
+            "produced": 0,
+            "accounted": 0,
+        },
+    ]
+    ledger = {
+        "schema_version": DELIVERY_LEDGER_SCHEMA,
+        "delivery_grade": "degraded" if issues else "complete",
+        "stages": stages,
+        "issues": issues,
+        "unaccounted_source_units": 0,
+    }
+    try:
+        return validate_delivery_ledger(ledger, source_unit_count=len(source.blocks))
+    except ValueError as exc:
+        raise CompanionPublicationError("delivery ledger is invalid") from exc
+
+
+def _translation_provider_delivery_issues(
+    context: RunContext,
+) -> tuple[dict[str, Any], ...]:
+    issues: list[dict[str, Any]] = []
+    for event in context.events.read_all():
+        if not isinstance(event, Mapping) or event.get("event") != (
+            "translation_provider_fallback"
+        ):
+            continue
+        data = event.get("data")
+        if not isinstance(data, Mapping):
+            continue
+        ordinal = data.get("window_ordinal")
+        remaining = data.get("remaining_windows_skipped")
+        stage = data.get("stage")
+        if (
+            type(ordinal) is not int
+            or ordinal < 0
+            or type(remaining) is not int
+            or remaining < 0
+            or stage not in {"translation", "review"}
+        ):
+            continue
+        provider = str(data.get("provider") or "unknown")
+        model = str(data.get("model") or "default")
+        category = str(data.get("failure_category") or "unknown")
+        detail_code = str(data.get("detail_code") or "unknown")
+        reason_code = str(data.get("reason_code") or detail_code)
+        global_fallback = data.get("global_fallback_triggered") is True
+        issues.append(
+            {
+                "issue_id": f"translation-provider-{stage}-{ordinal}",
+                "category": "translation_provider_failure",
+                "scope": f"window:{ordinal}",
+                "fallback": (
+                    "source_text_remaining_windows"
+                    if global_fallback
+                    else (
+                        "pre_review_translation"
+                        if stage == "review"
+                        else "source_text_current_window"
+                    )
+                ),
+                "affected_count": 1 + remaining,
+                "source_preserved": True,
+                "retry": reason_code,
+                "evidence": (
+                    f"{provider}/{model}:{category}/{detail_code}"
+                ),
+            }
+        )
+    return tuple(issues)
+
+
+def _glossary_delivery_issues(
+    glossary: Sequence[Mapping[str, Any]],
+    summary: Mapping[str, Any] | None,
+    unanchored_ids: Sequence[str],
+) -> tuple[int, list[dict[str, Any]]]:
+    """Account for every inventory entry before Reader anchoring filters it."""
+
+    unanchored = _delivery_string_ids(
+        list(unanchored_ids), "unanchored glossary term IDs"
+    )
+    if summary is None:
+        return len(glossary) + len(unanchored), [
+            {
+                "issue_id": f"glossary-omitted-{term_id}",
+                "category": "glossary_omitted",
+                "scope": term_id,
+                "fallback": "source_term_only",
+                "affected_count": 1,
+                "source_preserved": True,
+                "retry": "not_semantic_retry",
+                "evidence": "entry has no Reader source anchor",
+            }
+            for term_id in unanchored
+        ]
+    expected_fields = {
+        "schema_version",
+        "recovered_term_ids",
+        "dropped_term_ids",
+        "reason_codes",
+    }
+    if (
+        set(summary) != expected_fields
+        or summary.get("schema_version")
+        != "alc.translate.glossary_fallback_summary.v1"
+    ):
+        raise CompanionPublicationError("glossary fallback summary is invalid")
+    recovered = _delivery_string_ids(
+        summary.get("recovered_term_ids"), "recovered glossary term IDs"
+    )
+    dropped = _delivery_string_ids(
+        summary.get("dropped_term_ids"), "dropped glossary term IDs"
+    )
+    reasons = _delivery_string_ids(
+        summary.get("reason_codes"), "glossary fallback reasons"
+    )
+    if set(recovered) & set(dropped) or bool(recovered or dropped) != bool(reasons):
+        raise CompanionPublicationError("glossary fallback summary is inconsistent")
+    if set(unanchored) & set(dropped):
+        raise CompanionPublicationError(
+            "glossary fallback and unanchored entry IDs overlap"
+        )
+    evidence = ",".join(reasons) or "no fallback"
+    issues = [
+        {
+            "issue_id": f"glossary-recovered-{term_id}",
+            "category": "glossary_recovered",
+            "scope": term_id,
+            "fallback": "recovered_entry",
+            "affected_count": 1,
+            "source_preserved": False,
+            "retry": "bounded_retry_exhausted",
+            "evidence": evidence,
+        }
+        for term_id in recovered
+    ]
+    issues.extend(
+        {
+            "issue_id": f"glossary-omitted-{term_id}",
+            "category": "glossary_omitted",
+            "scope": term_id,
+            "fallback": "source_term_only",
+            "affected_count": 1,
+            "source_preserved": True,
+            "retry": "bounded_retry_exhausted",
+            "evidence": evidence,
+        }
+        for term_id in dropped
+    )
+    issues.extend(
+        {
+            "issue_id": f"glossary-omitted-{term_id}",
+            "category": "glossary_omitted",
+            "scope": term_id,
+            "fallback": "source_term_only",
+            "affected_count": 1,
+            "source_preserved": True,
+            "retry": "not_semantic_retry",
+            "evidence": "entry has no Reader source anchor",
+        }
+        for term_id in unanchored
+    )
+    return len(glossary) + len(dropped) + len(unanchored), issues
+
+
+def _guide_delivery_issues(
+    chapters: Sequence[Mapping[str, Any]],
+    *,
+    existing_issues: Sequence[Mapping[str, Any]],
+) -> tuple[int, int, list[dict[str, Any]]]:
+    expected = 0
+    produced = 0
+    issues: list[dict[str, Any]] = []
+    for chapter in chapters:
+        if chapter.get("guide_expected") is not True:
+            continue
+        expected += 1
+        units = chapter.get("learning_units")
+        if isinstance(units, Sequence) and not isinstance(units, (str, bytes)) and units:
+            produced += 1
+            continue
+        chapter_id = _string(chapter, "chapter_id")
+        if any(
+            str(item.get("category") or "").startswith("guide_")
+            and item.get("scope") == chapter_id
+            for item in existing_issues
+        ):
+            continue
+        issues.append(
+            {
+                "issue_id": f"guide-omitted-{chapter_id}",
+                "category": "guide_evaluated_omitted",
+                "scope": chapter_id,
+                "fallback": "source_and_translation_only",
+                "affected_count": 1,
+                "source_preserved": True,
+                "retry": "not_semantic_retry",
+                "evidence": "no guide units were accepted",
+            }
+        )
+    return expected, produced, issues
+
+
+def _expected_translation_units(
+    source: RichDocument,
+    chapters: Sequence[Mapping[str, Any]],
+    *,
+    translation_mode: str,
+) -> int:
+    if translation_mode != "enabled":
+        return 0
+    blocks = {item.block_id: item for item in source.blocks}
+    expected = 0
+    for chapter in chapters:
+        for block_id in _string_list(chapter.get("block_ids"), "chapter block IDs"):
+            block = _block(blocks, block_id)
+            if (
+                block.kind is RichBlockKind.FIGURE
+                and not str(block.payload.get("caption") or "").strip()
+                and not str(block.payload.get("alt_text") or "").strip()
+            ):
+                continue
+            expected += 1
+    source_notes = source.metadata.get("source_notes")
+    if isinstance(source_notes, Mapping) and isinstance(
+        source_notes.get("notes"), Sequence
+    ):
+        selected = {
+            block_id
+            for chapter in chapters
+            for block_id in _string_list(
+                chapter.get("block_ids"), "chapter block IDs"
+            )
+        }
+        expected += sum(
+            isinstance(note, Mapping)
+            and note.get("owner_block_id") in selected
+            for note in source_notes["notes"]
+        )
+    return expected
+
+
+def _delivery_string_ids(value: Any, description: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise CompanionPublicationError(f"{description} are invalid")
+    return tuple(value)
 def _editorial_review_document(
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1015,6 +1578,31 @@ def _validate_published_artifacts(
                     "resource artifact metadata differs from the publication"
                 )
             store.read_bytes(artifact)
+        ledger = published.publication.reader_profile.get("delivery_ledger")
+        if ledger is not None:
+            validated_ledger = validate_delivery_ledger(
+                ledger,
+                source_unit_count=len(published.publication.source_document.blocks),
+            )
+            ledger_resource = next(
+                (
+                    item
+                    for item in published.publication.resources
+                    if item.get("logical_name") == DELIVERY_LEDGER_LOGICAL_NAME
+                ),
+                None,
+            )
+            if ledger_resource is None:
+                raise ValueError("delivery ledger report is missing")
+            ledger_digest = _string(ledger_resource, "artifact_digest")
+            try:
+                payload = json.loads(
+                    store.read_bytes(actual_resources[ledger_digest]).decode("utf-8")
+                )
+            except (KeyError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("delivery ledger report is unreadable") from exc
+            if payload != validated_ledger:
+                raise ValueError("delivery ledger report differs from publication")
         return tuple(layers)
     except (
         AcJobsError,
@@ -1151,4 +1739,5 @@ __all__ = [
     "load_published_companion",
     "materialize_published_companion",
     "publish_companion",
+    "publish_provider_source_only_companion",
 ]

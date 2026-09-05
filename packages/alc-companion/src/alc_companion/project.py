@@ -106,6 +106,10 @@ class CompanionProjectPaths:
         return self.root / "companion.html"
 
     @property
+    def delivery_ledger(self) -> Path:
+        return self.root / "companion.delivery-ledger.json"
+
+    @property
     def delivery_lease(self) -> Path:
         return self.runtime_root / "delivery.lock"
 
@@ -114,6 +118,9 @@ class CompanionProjectPaths:
 
     def publication_html(self, run_id: str) -> Path:
         return self.publication_workspace(run_id) / "companion.html"
+
+    def publication_ledger(self, run_id: str) -> Path:
+        return self.publication_workspace(run_id) / "companion.delivery-ledger.json"
 
     @property
     def current_run_id(self) -> str | None:
@@ -146,6 +153,15 @@ class CompanionProjectPaths:
                 "run-specific standalone HTML is unreadable",
             ) from exc
         atomic_write_bytes(self.delivery_html, payload)
+        ledger = self.publication_ledger(run_id)
+        if ledger.is_file():
+            try:
+                atomic_write_bytes(self.delivery_ledger, ledger.read_bytes())
+            except OSError as exc:
+                raise CompanionProjectError(
+                    "publication_ledger_unavailable",
+                    "run-specific final delivery ledger is unreadable",
+                ) from exc
         return True
 
     def write_source_diagnostics(

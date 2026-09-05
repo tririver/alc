@@ -2,26 +2,15 @@ from __future__ import annotations
 
 import builtins
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from threading import Event, Lock
 
-import pytest
-
 import alc_companion.build as companion_build
 import alc_companion.request_contracts as request_contracts
 import alc_companion.service as companion_service
-
-from ac_jobs import (
-    ImmutableArtifactStore,
-    RunContext,
-    RunEngine,
-    RunRepository,
-    RunSpec,
-    RunStatus,
-    semantic_key,
-)
-from ac_llm import LLMCompleted, ModelSelection
+import pytest
 from ac_document import (
     AcDocumentService,
     CachedDocumentRef,
@@ -36,21 +25,27 @@ from ac_document import (
     SourceRepository,
     cached_document_ref_from_document,
 )
-from alc_render import (
-    AnchorKind,
-    FragmentAnchor,
-    FragmentRevision,
-    Layer,
-    anchor_block_from_rich_block,
-    block_text_to_markdown,
-    decode_fragment_revision,
-    encode_fragment_revision,
-    fragment_revision_filename,
-    fragment_revision_ref,
-    source_identity_from_rich_document,
+from ac_jobs import (
+    Awaiting,
+    ImmutableArtifactStore,
+    Paused,
+    ResumeReason,
+    RunContext,
+    RunEngine,
+    RunError,
+    RunRepository,
+    RunSpec,
+    RunStatus,
+    semantic_key,
 )
-from alc_translate import TranslationResult, TranslationRevisionArtifact
-
+from ac_llm import (
+    AcRuntimeEnvironment,
+    LLMCompleted,
+    LLMExecutionOptions,
+    ModelSelection,
+)
+from ac_proposer_reviewer import BatchResult, LoopResult, LoopTermination
+from ac_proposer_reviewer.protocol import encode_batch_result
 from alc_companion.build import (
     COMPANION_BUILD_HANDLER,
     CompanionBuildHandler,
@@ -86,6 +81,22 @@ from alc_companion.translation_adapter import (
     CompanionTranslationRuntimeError,
     require_translation_runtime,
 )
+from alc_render import (
+    AnchorKind,
+    FragmentAnchor,
+    FragmentRevision,
+    Layer,
+    anchor_block_from_rich_block,
+    block_text_to_markdown,
+    decode_fragment_revision,
+    encode_fragment_revision,
+    fragment_revision_filename,
+    fragment_revision_ref,
+    render_source_only_html,
+    source_identity_from_rich_document,
+    validate_source_only_html,
+)
+from alc_translate import TranslationResult, TranslationRevisionArtifact
 
 
 class FakeGuideTasks:
@@ -412,6 +423,16 @@ class FakeTranslationAdapter:
         ).to_document()
 
 
+class TerminalLanguageAdapter(FakeTranslationAdapter):
+    def __init__(self, outcome: Paused | RunError) -> None:
+        super().__init__(mode="enabled")
+        self.outcome = outcome
+
+    def detect_language(self, _context, _source, **_kwargs):
+        self.calls.append("language")
+        return self.outcome
+
+
 def _document(tmp_path: Path):
     repository = SourceRepository(tmp_path / "paper")
     artifact = repository.store_bytes(
@@ -425,6 +446,371 @@ def _document(tmp_path: Path):
         ),
     )
     return RichDocumentParserService(repository).parse_source(artifact)
+
+
+@pytest.mark.parametrize(
+    ("pause_code", "category", "detail_code"),
+    [
+        (
+            "provider_crash_retry_exhausted",
+            "transport",
+            "provider_transport_closed",
+        ),
+        (
+            "provider_unavailable",
+            "unavailable",
+            "provider_circuit_open",
+        ),
+        (
+            "provider_rate_limit",
+            "rate_limit",
+            "provider_rate_limited",
+        ),
+        (
+            "provider_quota",
+            "quota",
+            "provider_quota_exhausted",
+        ),
+        (
+            "provider_timeout",
+            "timeout",
+            "provider_idle_timeout",
+        ),
+    ],
+)
+def test_provider_exhaustion_publishes_terminal_source_only_companion(
+    tmp_path: Path,
+    pause_code: str,
+    category: str,
+    detail_code: str,
+) -> None:
+    paused = Paused(
+        Awaiting(
+            ResumeReason.EXECUTION_INTERRUPTED,
+            "provider-retry",
+            False,
+            details={
+                "code": pause_code,
+                "provider_failure": {
+                    "category": category,
+                    "ac_error_code": f"provider_{category}",
+                    "detail_code": detail_code,
+                },
+            },
+        )
+    )
+    service = CompanionService(tmp_path / "jobs")
+
+    completed = service.build(
+        CompanionBuildRequest(_document(tmp_path), authors=("Author",)),
+        execution=CompanionExecutionOptions(
+            workers=1,
+            document_cache_root=tmp_path / "paper",
+        ),
+        task_service=FakeGuideTasks(),  # type: ignore[arg-type]
+        translation_adapter=TerminalLanguageAdapter(paused),
+    )
+
+    assert completed.status is RunStatus.SUCCEEDED
+    publication = service.publication(completed.run_id)
+    assert publication.reader_profile["build_state"] == "provider_source_only"
+    assert publication.reader_profile["delivery_mode"] == "source_only"
+    ledger = publication.reader_profile["delivery_ledger"]
+    assert ledger["delivery_grade"] == "source_only"
+    assert next(
+        item for item in ledger["stages"] if item["stage"] == "source"
+    )["status"] == "source_only"
+    issue = next(
+        item
+        for item in ledger["issues"]
+        if item["category"] == "provider_delivery_unavailable"
+    )
+    assert issue["scope"] == "language_detection"
+    assert issue["evidence"] in {pause_code, detail_code}
+    progress = service.progress(completed.run_id)
+    assert progress["phase"] == "completed"
+    assert progress["translation_fallbacks"] == {
+        "source_text_units": 0,
+        "review_skipped_units": 0,
+        "reason_codes": [issue["evidence"]],
+    }
+    html_path = tmp_path / f"{pause_code}.html"
+    render_source_only_html(publication, html_path)
+    validate_source_only_html(publication, html_path)
+    assert 'data-alc-source-only="true"' in html_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        Paused(
+            Awaiting(
+                ResumeReason.EXTERNAL_CONDITION,
+                "provider-auth",
+                False,
+                details={
+                    "code": "authentication",
+                    "provider_failure": {
+                        "category": "authentication",
+                        "ac_error_code": "provider_authentication",
+                    },
+                },
+            )
+        ),
+        RunError("invalid_schema", "response schema is invalid"),
+    ],
+)
+def test_unsafe_provider_failures_remain_stopping_boundaries(
+    tmp_path: Path, outcome: Paused | RunError
+) -> None:
+    result = CompanionService(tmp_path / "jobs").build(
+        CompanionBuildRequest(_document(tmp_path), authors=("Author",)),
+        execution=CompanionExecutionOptions(
+            workers=1,
+            document_cache_root=tmp_path / "paper",
+        ),
+        task_service=FakeGuideTasks(),  # type: ignore[arg-type]
+        translation_adapter=TerminalLanguageAdapter(outcome),
+    )
+
+    assert result.status is (
+        RunStatus.PAUSED if isinstance(outcome, Paused) else RunStatus.FAILED
+    )
+
+
+def test_companion_runtime_keeps_venv_console_script_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlinked venv Python must still locate sibling ac-document."""
+
+    venv_bin = tmp_path / "venv" / "bin"
+    system_bin = tmp_path / "system" / "bin"
+    venv_bin.mkdir(parents=True)
+    system_bin.mkdir(parents=True)
+    system_python = system_bin / "python"
+    system_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    venv_python = venv_bin / "python"
+    os.symlink(system_python, venv_python)
+    command = venv_bin / "ac-document"
+    command.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(companion_build.sys, "executable", str(venv_python))
+    monkeypatch.setattr(companion_build.shutil, "which", lambda *_args, **_kwargs: None)
+    options = companion_build._companion_llm_options(
+        CompanionExecutionOptions(
+            document_cache_root=tmp_path / "cache",
+            llm=LLMExecutionOptions(
+                runtime_environment=AcRuntimeEnvironment(
+                    {
+                        "AC_HOME": str(tmp_path / "ac-home"),
+                        "AC_RUNTIME_HOME": str(tmp_path / "runtime-home"),
+                        "AC_DOCUMENT_CACHE": str(tmp_path / "cache"),
+                        "PATH": "",
+                    }
+                )
+            ),
+        )
+    )
+    assert (
+        options.runtime_environment.values["PATH"].split(os.pathsep)[0]
+        == str(venv_bin)
+    )
+
+
+def test_duplicate_host_request_id_is_local_only_for_reviewer() -> None:
+    duplicate = companion_build._recoverable_guide_delivery_issue(
+        RunError(
+            "reviewer_failed",
+            "reviewer failed",
+            {
+                "causes": [
+                    {
+                        "worker_id": "guide-reviewer",
+                        "code": "duplicate_host_request_id",
+                        "message": "host request ID was already completed",
+                    }
+                ]
+            },
+        ),
+        chapter_id="chapter-1",
+    )
+    assert duplicate is not None
+    assert duplicate["category"] == "guide_review_skipped"
+    assert duplicate["retry"] == "not_semantic_retry"
+    conflict = companion_build._recoverable_guide_delivery_issue(
+        RunError(
+            "reviewer_failed",
+            "reviewer failed",
+            {
+                "causes": [
+                    {
+                        "worker_id": "guide-reviewer",
+                        "code": "host_request_id_conflict",
+                        "message": (
+                            "Host request ID is bound to a different instruction."
+                        ),
+                    }
+                ]
+            },
+        ),
+        chapter_id="chapter-1",
+    )
+    assert conflict is not None
+    assert conflict["category"] == "guide_review_skipped"
+    assert companion_build._recoverable_guide_delivery_issue(
+        RunError("provider_permission_denied", "permission denied"),
+        chapter_id="chapter-1",
+    ) is None
+    assert companion_build._recoverable_guide_delivery_issue(
+        RunError(
+            "reviewer_failed",
+            "reviewer failed",
+            {
+                "causes": [
+                    {
+                        "worker_id": "guide-reviewer",
+                        "code": "reviewer_output_invalid",
+                    }
+                ]
+            },
+        ),
+        chapter_id="chapter-1",
+    ) is not None
+
+
+def test_exhausted_provider_is_a_guide_local_delivery_issue() -> None:
+    issue = companion_build._recoverable_guide_delivery_issue(
+        RunError(
+            "provider_timeout",
+            "guide provider stopped producing output",
+            {
+                "provider_failure": {
+                    "category": "timeout",
+                    "detail_code": "provider_idle_timeout",
+                }
+            },
+        ),
+        chapter_id="chapter-1",
+    )
+
+    assert issue == {
+        "issue_id": "guide-provider-chapter-1",
+        "category": "guide_evaluated_omitted",
+        "scope": "chapter-1",
+        "fallback": "source_and_translation_only",
+        "affected_count": 1,
+        "source_preserved": True,
+        "retry": "bounded_retry_exhausted",
+        "evidence": "provider_timeout",
+    }
+
+
+@pytest.mark.parametrize(
+    ("proposal_state", "expected_category"),
+    [
+        ("valid", "guide_review_skipped"),
+        ("missing", "guide_evaluated_omitted"),
+        ("invalid", "guide_evaluated_omitted"),
+        ("provider", "guide_evaluated_omitted"),
+    ],
+)
+def test_reviewer_duplicate_id_recovers_only_admissible_proposals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proposal_state: str,
+    expected_category: str,
+) -> None:
+    class DuplicateReviewerService:
+        def __init__(self, _tasks) -> None:
+            pass
+
+        def execute(self, context, request, *, options, execution_scope=None):
+            assert request.failure_policy.value == "collect"
+            loops = []
+            for loop in request.loops:
+                if proposal_state not in {"missing", "provider"}:
+                    proposal = {
+                        "chapter_guide": {
+                            "title": "Validated guide",
+                            "content_markdown": "A validated explanation.",
+                        },
+                        "section_guides": [],
+                        "companions": [],
+                        "references": [],
+                    }
+                    if proposal_state == "invalid":
+                        proposal["companions"] = [
+                            {
+                                "after_part": 999,
+                                "title": "Invalid",
+                                "content_markdown": "Invalid anchor.",
+                            }
+                        ]
+                loops.append(
+                    LoopResult(
+                        loop.loop_id,
+                        LoopTermination.FAILED,
+                        0,
+                        (
+                            {"guide-proposer": proposal}
+                            if proposal_state not in {"missing", "provider"}
+                            else {}
+                        ),
+                        None,
+                        (
+                            RunError(
+                                "provider_timeout",
+                                "guide provider stopped producing output",
+                                {
+                                    "provider_failure": {
+                                        "category": "timeout",
+                                        "detail_code": "provider_idle_timeout",
+                                    }
+                                },
+                            )
+                            if proposal_state == "provider"
+                            else RunError(
+                                "reviewer_failed",
+                                "reviewer failed",
+                                {
+                                    "causes": [
+                                        {
+                                            "worker_id": "guide-reviewer",
+                                            "code": "duplicate_host_request_id",
+                                            "message": "host request ID was already completed",
+                                        }
+                                    ]
+                                },
+                            )
+                        ),
+                    )
+                )
+            result = BatchResult("ac.proposer_reviewer.result.v1", tuple(loops))
+            ref = context.artifacts.publish_json(
+                "proposer-reviewer/batch/result", encode_batch_result(result)
+            )
+            return companion_build.Succeeded(ref)
+
+    monkeypatch.setattr(
+        companion_build, "ProposerReviewerService", DuplicateReviewerService
+    )
+    service = CompanionService(tmp_path / "jobs")
+    completed = service.build(
+        CompanionBuildRequest(_document(tmp_path), target_language="zh-CN"),
+        recipe=CompanionGenerationRecipe(
+            model=ModelSelection(provider="test", model="fixture")
+        ),
+        execution=CompanionExecutionOptions(
+            workers=1, document_cache_root=tmp_path / "paper"
+        ),
+        task_service=FakeGuideTasks(),  # type: ignore[arg-type]
+        translation_adapter=FakeTranslationAdapter(mode="enabled"),
+    )
+    assert completed.status is RunStatus.SUCCEEDED
+    ledger = service.publication(completed.run_id).reader_profile["delivery_ledger"]
+    assert ledger["delivery_grade"] == "degraded"
+    assert expected_category in {
+        item["category"] for item in ledger["issues"]
+    }
 
 
 def test_glossary_matching_does_not_cross_word_boundaries(
@@ -505,6 +891,7 @@ def test_prepare_resolves_model_once_and_binds_run_id_to_stored_recipe(
         provider="codex",
         model="model-a",
         tier="medium",
+        reasoning_effort="medium",
     )
     assert prepared.run_id == companion_run_id(request, stored_recipe)
 
@@ -519,7 +906,10 @@ def test_progress_treats_explicit_request_authors_as_ready(
     )
     recipe = CompanionGenerationRecipe(
         model=ModelSelection(
-            provider="codex", model="fixed-model", tier="medium"
+            provider="codex",
+            model="fixed-model",
+            tier="medium",
+            reasoning_effort="high",
         )
     )
     repository = RunRepository(tmp_path / "jobs")
@@ -538,6 +928,12 @@ def test_progress_treats_explicit_request_authors_as_ready(
     progress = CompanionService(repository).progress(run_id)
 
     assert progress["phase"] == "language_detection"
+    assert progress["active_model"] == {
+        "provider": "codex",
+        "model": "fixed-model",
+        "tier": "medium",
+        "effort": "high",
+    }
 
 
 class StrictLegacyTranslationAdapter(FakeTranslationAdapter):
@@ -709,6 +1105,10 @@ def test_translation_precedes_reviewed_guides_and_uses_local_glossary(
             item["shell"] and item["argv"][0] == "ac-document"
             for item in commands["source"]
         )
+        assert all(
+            item["host_request_id"].startswith("source-")
+            for item in commands["source"]
+        )
         ranged = [
             item
             for item in commands["source"]
@@ -753,6 +1153,10 @@ def test_translation_precedes_reviewed_guides_and_uses_local_glossary(
             and "--text-only" in item["argv"]
             for item in translated["parts"]
         )
+        assert all(
+            item["host_request_id"].startswith("translation-")
+            for item in translated["parts"]
+        )
     assert tasks.runtime_environments
     assert {
         item["AC_DOCUMENT_CACHE"] for item in tasks.runtime_environments
@@ -773,7 +1177,7 @@ def test_translation_precedes_reviewed_guides_and_uses_local_glossary(
     planned_chapters = plan_source_chapters(document)
     translation_indexes = []
     for chapter in planned_chapters:
-        artifact_root = f"translation/chapters/{chapter.chapter_id}"
+        artifact_root = f"translation/chapters-v2/{chapter.chapter_id}"
         translation_index_ref = run_store.find(
             f"{artifact_root}/model-index"
         )
