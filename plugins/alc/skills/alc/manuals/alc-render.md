@@ -95,11 +95,28 @@ alc-render compose \
 binds the exact source and block anchors. Compose fails closed on another
 source, unknown anchors, or non-empty metadata glossary instead of overwriting
 either input.
+When a legacy or externally composed glossary definition contains disallowed
+control characters, the Reader localizes recovery to that row. It removes
+bounded ANSI SGR style sequences, reconstructs deterministic truncated Unicode
+escapes, removes stray separator controls, and marks only irrecoverable symbols
+with `?` while preserving the remaining definition for reading, speech, and
+export. The legacy entry stays read-only.
+Glossary tooltips render definitions with the same CommonMark and KaTeX path as
+the glossary table. Translated-term propagation skips legacy definitions with
+forbidden controls before parsing them and continues saving healthy revisions.
 
 A Layer outside `publication/` is rejected even when its contents are valid.
 Do not move only a Layer while leaving its referenced revisions elsewhere.
 A Companion layer is optional: source-only and source-plus-translation
 publications can both be rendered and exported as standalone HTML.
+`alc.companion.delivery_ledger.v1` is validated when present: every source unit
+must be accounted for, each degradation must be explicit, and the ledger report
+must match the publication profile. The Reader exposes one compact,
+keyboard-accessible floating quality panel with category counts and uses a
+subtle target-lane edge for source-text fallback. The panel can be dismissed
+for the current page and is excluded from print and browser-exported HTML while
+the machine ledger remains embedded. It does not repeat prose badges after
+affected blocks or expose internal error paths and stack details.
 
 ## Read Command Results
 

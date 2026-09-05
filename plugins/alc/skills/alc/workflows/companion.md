@@ -104,6 +104,8 @@ alc-companion build <source-path> \
   --approx-term-count <estimate> \
   --user-intent '<intent>' \
   --provider <provider> \
+  --model <model> \
+  --effort <effort> \
   --host-authority <host-authority> \
   --workers <workers>
 ```
@@ -124,6 +126,26 @@ technical readiness error. Provider-specific model resolution still belongs
 to the durable build and is frozen in its recipe. For `resume`, read the exact
 frozen provider/model from `status` and include them in the host-tool
 `justification`; never alter the recipe.
+
+Before starting a new model-backed build, resolve and freeze both the exact
+model and effort, then announce them once in commentary without waiting for a
+reply. This is a non-blocking parameter disclosure, not an approval checkpoint.
+When neither value was supplied by the user and the Codex defaults resolve to
+Luna plus medium effort, use this exact wording:
+
+> 当前伴读将使用默认模型 `gpt-5.6-luna + effort medium` 进行。如需调整，可在请求中指定模型和 effort；本次将按上述参数继续执行。
+
+When the user supplied either value, use this pattern with the fully resolved
+values:
+
+> 当前伴读将按用户自定义模型 `gpt-5.6-terra + effort high` 进行，并继续自动执行。
+
+Pass the exact resolved model with `--model` and the resolved effort with
+`--effort`. A user may override only the model, only the effort, or both; the
+other value keeps its default. Do not call it an
+"internal model", do not ask for confirmation, and do not delay the build after
+the announcement. Once the run is created, its model and effort are immutable
+for ordinary resume.
 
 When this Skill runs inside Codex Desktop, execute the outer model-backed
 `alc-companion build` or `alc-companion resume` command with host execution
@@ -167,6 +189,21 @@ creates the durable recipe. Read the frozen values from status and keep them
 for every retry and resume. Never switch providers, create a fallback run, or
 start another project root because a build is slow, paused, or failed; that is
 a separate material action requiring explicit user authorization.
+When the command tool yields a running execution handle, keep waiting on that
+same handle until the build command returns. `status` is an observation surface,
+not a replacement owner for the running process. Do not end the Codex task or
+claim delivery while the selected Companion run remains nonterminal; either
+wait for its terminal command result or report a user-requested explicit stop.
+In Codex Desktop, a command result carrying `session_id` must be followed with
+`write_stdin` polls on that exact session; a result carrying a running cell ID
+must be followed with the matching cell wait operation. Commentary-only waiting,
+process-list checks, and repeated `status` calls do not keep ownership of the
+build. A final answer while public status remains `running` violates this
+workflow even if a partial Reader exists.
+If the original execution handle is no longer available, attach exactly once
+with `alc-companion wait --project-dir <project-dir> --poll-seconds 15` and wait
+on that command's handle until it returns. Do not replace terminal waiting with
+repeated `status` calls.
 If the selected project genuinely needs a different source or recipe, obtain
 that authorization and pass `--new-lineage`; never use it for ordinary retry
 or recovery.
@@ -288,9 +325,32 @@ Block translation identity failures are not exceptional pauses: after the
 bounded automatic retry, ALC reconstructs structured source math and links as
 identity-preserving Markdown, retains that affected block, and continues.
 Final bounded-unit reassembly applies the same per-block fallback. Review
-failures retain the validated pre-review translation. Inspect
-`data.progress.translation_fallbacks` and the final fragment provenance; do not
-claim that fallback text is a completed translation.
+failures retain the validated pre-review translation. Glossary definitions with
+disallowed control characters are retried once and then omitted per entry so
+the remaining build continues. Inspect `data.progress.translation_fallbacks`
+and the final fragment provenance; do not claim that fallback text is a
+completed translation.
+Companion also validates every persisted translation revision before building
+the per-chapter guide input. If one legacy revision contains unclosed Markdown
+display math, use source text for that guide part, omit only the unsafe overlay,
+and record `translation_omitted`; do not patch the authoritative source or start
+a new lineage merely to bypass the bad revision.
+A completed publication includes a machine-verifiable delivery ledger. It must
+account for every source unit and identify each local fallback; validation
+rejects silent degradation. If optional interactive Reader admission fails
+after a valid publication, ALC may deliver a static, no-JavaScript source-only
+Reader. It does not use this fallback for invalid source identity, permission,
+lineage, durable state, or a tampered ledger.
+If provider transport, timeout, rate-limit, quota, unavailability, or an open
+circuit prevents one translation window, bounded recovery preserves that
+window as source and continues. A successful later window resets the streak;
+only two consecutive failed windows source-preserve the remaining
+model-dependent windows. Status and the final ledger expose a sanitized
+provider failure diagnostic. Guide failure still omits only the unavailable
+guide. Static source-only delivery is reserved for failure before a usable
+overlay exists. Authentication,
+host-authority, request/schema, source-identity, lineage, durable-state, and
+publication-integrity failures still stop without a misleading Reader.
 
 ```bash
 alc-companion resume --project-dir <project-dir> \
