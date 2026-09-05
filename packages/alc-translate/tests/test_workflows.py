@@ -319,6 +319,58 @@ class MalformedTextSlotTasks(TextSlotOnlyTasks):
         )
 
 
+class EmptySemanticTextTasks(TextSlotOnlyTasks):
+    def __init__(self, *, always_invalid: bool = False) -> None:
+        super().__init__()
+        self.always_invalid = always_invalid
+
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        outcome = super().execute_or_resume(
+            context, request, input=input, options=options
+        )
+        contract, payload = _prompt(request.prompt)
+        if contract != TRANSLATION_PROMPT_VERSION:
+            return outcome
+        assert isinstance(outcome, LLMCompleted)
+        should_blank = self.always_invalid or len(self.translation_blocks) == 1
+        if not should_blank:
+            return outcome
+        value = dict(outcome.value)
+        translations = {
+            block_id: {"text_slots": dict(item["text_slots"])}
+            for block_id, item in value["translations"].items()
+        }
+        for block in payload["blocks"]:
+            source_text = "".join(
+                str(label.get("text", ""))
+                for part in block["content"]["parts"]
+                for label in (
+                    part.get("parts", ())
+                    if part["kind"] == "link"
+                    else (part,)
+                )
+                if label["kind"] == "text_slot"
+            )
+            if "Reference Author" not in source_text:
+                continue
+            block_id = str(block["block_id"])
+            translations[block_id]["text_slots"] = {
+                slot_id: ""
+                for slot_id in translations[block_id]["text_slots"]
+            }
+        return LLMCompleted(
+            {
+                "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+                "translations": translations,
+            },
+            outcome.provider,
+            outcome.model,
+            outcome.session,
+            outcome.usage,
+            outcome.warnings,
+        )
+
+
 class ControlGlossaryTasks:
     def __init__(
         self,
@@ -1148,6 +1200,83 @@ def test_workflow_uses_text_slots_and_reinserts_formula_locally(
         == {"type": "string", "const": TEXT_SLOT_RESULT_SCHEMA}
         for schema in tasks.output_schemas
     )
+
+
+@pytest.mark.parametrize("always_invalid", [False, True])
+def test_empty_semantic_text_gets_scoped_retry_then_source_fallback(
+    tmp_path: Path, always_invalid: bool
+) -> None:
+    markdown = tmp_path / "empty-semantic-text.md"
+    markdown.write_text(
+        "# Coverage\n\n"
+        "Reference Author wrote [Paper title](https://example.test/paper).\n\n"
+        "Neighbor remains translated.\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "empty-semantic-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    tasks = EmptySemanticTextTasks(always_invalid=always_invalid)
+    context = _context(tmp_path, f"empty-semantic-{always_invalid}")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    assert [len(window) for window in tasks.translation_blocks] == [3, 1]
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    reference = next(
+        item for item in revisions if "example.test/paper" in item.markdown_body
+    )
+    neighbor = next(
+        item
+        for item in revisions
+        if "Neighbor remains translated" in item.markdown_body
+    )
+    assert "translation_fallback" not in neighbor.provenance
+    if always_invalid:
+        assert reference.markdown_body.strip() == (
+            "Reference Author wrote "
+            "[Paper title](https://example.test/paper)."
+        )
+        assert reference.provenance["translation_fallback"]["kind"] == "source_text"
+        assert any(
+            "translation_coverage_invalid" in event["data"]["reason_codes"]
+            for event in context.events.read_all()
+            if event["event"] == "translation_fallback"
+        )
+    else:
+        assert reference.markdown_body.startswith("slot-translated:")
+        assert "translation_fallback" not in reference.provenance
 
 
 @pytest.mark.parametrize(

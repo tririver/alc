@@ -152,6 +152,43 @@ def test_text_slot_assembly_rejects_missing_unknown_and_unsafe_slots() -> None:
     assert unsafe.value.code == "translation_text_slot_invalid"
 
 
+def test_text_slot_assembly_rejects_bibliography_shell_without_prose() -> None:
+    block = {
+        "block_id": "bibliography-empty-shell",
+        "ordinal": 36,
+        "kind": "list",
+        "locator": {"source_id": "bib.bib36"},
+        "payload": {
+            "ordered": False,
+            "items": [
+                {
+                    "text": (
+                        "[36] A. Author. "
+                        "[Paper title](https://doi.org/10.1000/example)."
+                    )
+                }
+            ],
+        },
+    }
+    slots = {slot_id: "" for slot_id in text_slot_ids(block)}
+
+    with pytest.raises(ProtectedAtomError) as raised:
+        assemble_text_slot_translation(block, slots)
+
+    assert raised.value.code == "translation_coverage_invalid"
+    assert raised.value.details["source_lexical_characters"] > 0
+    assert raised.value.details["translated_lexical_characters"] == 0
+
+
+def test_text_slot_assembly_allows_nonlexical_structure_only_source() -> None:
+    block = _paragraph(r"$x$ 123.")
+    slots = {slot_id: "" for slot_id in text_slot_ids(block)}
+
+    rendered, _parts = assemble_text_slot_translation(block, slots)
+
+    assert rendered == "$x$"
+
+
 def test_model_assembly_restores_missing_atoms_when_text_slots_are_exact() -> None:
     block = _paragraph("Before $x$ and [the label](https://example.test/a).")
     plan = protected_atom_plan(block)

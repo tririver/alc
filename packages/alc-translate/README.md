@@ -172,7 +172,10 @@ assembly. Historical protected-atom candidates remain readable through the
 explicit v1 compatibility path.
 
 Assembled units are also checked as standalone Markdown before they become
-accepted artifacts. Unclosed `$$`, `\[`, or supported display-math environments
+accepted artifacts. If a source unit contains human-readable lexical text, a
+model result whose text slots collectively contain no lexical text is rejected
+even when caller-owned numbering or atoms keep the Markdown structurally
+non-empty. Unclosed `$$`, `\[`, or supported display-math environments
 are model-output errors: they receive the same bounded semantic retry and then
 fall back only for the affected source unit. Adjacent inline formula spans are
 canonicalized only in downstream model views so their touching `$` delimiters

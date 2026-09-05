@@ -386,6 +386,17 @@ def assemble_protected_translation(
             },
         )
     _validate_part_kinds(normalized, expected)
+    source_lexical_characters = _text_part_lexical_character_count(plan["parts"])
+    translated_lexical_characters = _text_part_lexical_character_count(normalized)
+    if source_lexical_characters and not translated_lexical_characters:
+        raise ProtectedAtomError(
+            "translation_coverage_invalid",
+            f"translation omitted all meaningful text for {plan['block_id']}",
+            {
+                "source_lexical_characters": source_lexical_characters,
+                "translated_lexical_characters": translated_lexical_characters,
+            },
+        )
     rendered = _render_parts(normalized, expected)
     if not rendered.strip():
         raise ProtectedAtomError(
@@ -608,6 +619,24 @@ def _part_atom_ids(parts: Sequence[Mapping[str, Any]]) -> list[str]:
         if kind in {"atom", "link"}:
             atom_ids.append(str(part["atom_id"]))
     return atom_ids
+
+
+def _text_part_lexical_character_count(
+    parts: Sequence[Mapping[str, Any]],
+) -> int:
+    """Count human-readable letters without inspecting protected payloads."""
+
+    count = 0
+    for part in parts:
+        kind = part.get("kind")
+        if kind == "text":
+            count += sum(
+                character.isalpha()
+                for character in str(part.get("text", ""))
+            )
+        elif kind == "link":
+            count += _text_part_lexical_character_count(part.get("parts", ()))
+    return count
 
 
 def _validate_part_kinds(
