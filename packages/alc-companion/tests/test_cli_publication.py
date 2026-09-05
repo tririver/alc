@@ -10,6 +10,7 @@ from ac_jobs import (
     CommandResult,
     CommandStatus,
     ResumeReason,
+    RunBusyError,
     RunSnapshot,
     RunStatus,
 )
@@ -136,6 +137,67 @@ def test_status_does_not_advertise_stale_html(
     )
 
 
+def test_status_reports_validated_static_fallback_as_source_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = CompanionProjectPaths.open(tmp_path / "project")
+    paths.select_run("run")
+    publication_path = paths.publication_workspace("run") / "publication.json"
+    publication_path.parent.mkdir(parents=True)
+    publication_path.write_text("{}", encoding="utf-8")
+    paths.delivery_html.write_text(
+        '<html data-alc-source-only="true"></html>', encoding="utf-8"
+    )
+    publication = SimpleNamespace(
+        publication_digest="a" * 64,
+        reader_profile={
+            "translation_mode": "enabled",
+            "delivery_mode": "bilingual",
+            "delivery_ledger": {"delivery_grade": "complete", "issues": []},
+        },
+    )
+    service = _Service(paths.jobs_root, publication)
+    validated: list[Path] = []
+
+    monkeypatch.setattr(
+        cli.CompanionProjectPaths, "load", lambda _value: paths
+    )
+    monkeypatch.setattr(cli, "CompanionService", lambda _root: service)
+    monkeypatch.setattr(
+        cli,
+        "command_result_from_snapshot",
+        lambda *_args, **_kwargs: CommandResult(CommandStatus.COMPLETED),
+    )
+    monkeypatch.setattr(cli, "snapshot_data", lambda _snapshot: {})
+    monkeypatch.setattr(
+        cli, "validate_publication_workspace", lambda _path: ()
+    )
+    monkeypatch.setattr(
+        cli,
+        "read_publication_workspace_state",
+        lambda _path: _state(publication),
+    )
+    monkeypatch.setattr(
+        cli,
+        "validate_source_only_html",
+        lambda _publication, path: validated.append(Path(path)),
+    )
+    monkeypatch.setattr(
+        cli,
+        "validate_standalone_html",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("static fallback must not use the interactive validator")
+        ),
+    )
+
+    result = cli._status(SimpleNamespace(project_dir=str(paths.root)))
+
+    assert validated == [paths.delivery_html]
+    assert result.data["delivery_grade"] == "source_only"
+    assert result.data["delivery_mode"] == "source_only"
+    assert result.data["workspace_html_consistent"] is True
+
+
 def test_status_never_acquires_the_delivery_write_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -183,6 +245,9 @@ def test_wait_emits_heartbeats_until_terminal_status(
                 snapshot=SimpleNamespace(status=next(statuses))
             )
 
+        def resume(self, _run_id: str) -> object:
+            raise RunBusyError("lease is held")
+
         def progress(self, _run_id: str) -> dict[str, object]:
             return {
                 "phase": "translation",
@@ -212,6 +277,113 @@ def test_wait_emits_heartbeats_until_terminal_status(
         "status": "running",
         "total_units": 8,
     }
+
+
+def test_wait_recovers_an_orphaned_running_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = CompanionProjectPaths.open(tmp_path / "project")
+    paths.select_run("run")
+    recovered: list[str] = []
+
+    class WaitService:
+        def __init__(self) -> None:
+            self.status = RunStatus.RUNNING
+
+        def inspect(self, _run_id: str) -> object:
+            return SimpleNamespace(
+                snapshot=SimpleNamespace(status=self.status)
+            )
+
+        def resume(self, run_id: str) -> object:
+            recovered.append(run_id)
+            self.status = RunStatus.SUCCEEDED
+            return SimpleNamespace(status=self.status)
+
+        def progress(self, _run_id: str) -> dict[str, object]:
+            raise AssertionError("orphan recovery should run before another heartbeat")
+
+    terminal = CommandResult(CommandStatus.COMPLETED, data={"terminal": True})
+    service = WaitService()
+    monkeypatch.setattr(cli.CompanionProjectPaths, "load", lambda _value: paths)
+    monkeypatch.setattr(cli, "CompanionService", lambda _root: service)
+    monkeypatch.setattr(cli, "_status_locked", lambda _paths: terminal)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+
+    result = cli._wait(
+        SimpleNamespace(project_dir=str(paths.root), poll_seconds=0.25)
+    )
+
+    assert result is terminal
+    assert recovered == ["run"]
+
+
+def test_wait_observes_an_actively_owned_running_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = CompanionProjectPaths.open(tmp_path / "project")
+    paths.select_run("run")
+    statuses = iter((RunStatus.RUNNING, RunStatus.SUCCEEDED))
+    resume_attempts: list[str] = []
+
+    class WaitService:
+        def inspect(self, _run_id: str) -> object:
+            return SimpleNamespace(
+                snapshot=SimpleNamespace(status=next(statuses))
+            )
+
+        def resume(self, run_id: str) -> object:
+            resume_attempts.append(run_id)
+            raise RunBusyError("lease is held")
+
+        def progress(self, _run_id: str) -> dict[str, object]:
+            return {
+                "phase": "translation",
+                "completed_units": 3,
+                "total_units": 8,
+                "last_progress_at": "2026-09-04T00:00:00Z",
+            }
+
+    terminal = CommandResult(CommandStatus.COMPLETED, data={"terminal": True})
+    monkeypatch.setattr(cli.CompanionProjectPaths, "load", lambda _value: paths)
+    monkeypatch.setattr(cli, "CompanionService", lambda _root: WaitService())
+    monkeypatch.setattr(cli, "_status_locked", lambda _paths: terminal)
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+
+    result = cli._wait(
+        SimpleNamespace(project_dir=str(paths.root), poll_seconds=0.25)
+    )
+
+    assert result is terminal
+    assert resume_attempts == ["run"]
+
+
+def test_wait_does_not_recover_a_terminal_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = CompanionProjectPaths.open(tmp_path / "project")
+    paths.select_run("run")
+
+    class WaitService:
+        def inspect(self, _run_id: str) -> object:
+            return SimpleNamespace(
+                snapshot=SimpleNamespace(status=RunStatus.SUCCEEDED)
+            )
+
+        def resume(self, _run_id: str) -> object:
+            raise AssertionError("terminal attempts must not be resumed")
+
+    terminal = CommandResult(CommandStatus.COMPLETED, data={"terminal": True})
+    monkeypatch.setattr(cli.CompanionProjectPaths, "load", lambda _value: paths)
+    monkeypatch.setattr(cli, "CompanionService", lambda _root: WaitService())
+    monkeypatch.setattr(cli, "_status_locked", lambda _paths: terminal)
+
+    result = cli._wait(
+        SimpleNamespace(project_dir=str(paths.root), poll_seconds=0.25)
+    )
+
+    assert result is terminal
 
 
 def test_build_refuses_implicit_selected_lineage_replacement(

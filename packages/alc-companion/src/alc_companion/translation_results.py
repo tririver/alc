@@ -74,9 +74,11 @@ def load_translation_selection(
             "chapter translation refers to an unknown source block"
         ) from exc
     expected = tuple(
-        block.block_id for block in ordered_blocks if not _non_language_figure(block)
+        block.block_id for block in ordered_blocks if not is_non_language_block(block)
     )
-    expected_notes = _source_notes_for_owners(source, set(expected))
+    expected_notes = _source_notes_for_owners(
+        source, {block.block_id for block in ordered_blocks}
+    )
     notes_by_id = {
         note_id: owner_block_id for note_id, owner_block_id in expected_notes
     }
@@ -184,7 +186,7 @@ def load_translation_selection(
             "block_id": block.block_id,
             "text": (
                 "\ufffc"
-                if _non_language_figure(block)
+                if is_non_language_block(block)
                 else (
                     model_source_block_view(block)
                     if block.block_id in invalid_block_ids
@@ -202,12 +204,21 @@ def load_translation_selection(
     )
 
 
-def _non_language_figure(block: RichBlock) -> bool:
-    return (
-        block.kind is RichBlockKind.FIGURE
-        and not str(block.payload["caption"]).strip()
-        and not str(block.payload["alt_text"]).strip()
-    )
+def is_non_language_block(block: RichBlock) -> bool:
+    """Return whether a block has no ALC translation surface.
+
+    This matches alc-translate's structural-media contract: an uncaptioned
+    table and a figure without caption or alt text remain source-only.
+    """
+
+    if block.kind is RichBlockKind.FIGURE:
+        return not (
+            str(block.payload.get("caption", "")).strip()
+            or str(block.payload.get("alt_text", "")).strip()
+        )
+    if block.kind is RichBlockKind.TABLE:
+        return not str(block.payload.get("caption", "")).strip()
+    return False
 
 
 def _source_note_id(revision: FragmentRevision) -> str | None:
@@ -260,5 +271,6 @@ def _source_notes_for_owners(
 __all__ = [
     "CompanionTranslationResultError",
     "ValidatedTranslationSelection",
+    "is_non_language_block",
     "load_translation_selection",
 ]

@@ -189,10 +189,18 @@ long-running build, use:
 alc-companion wait --project-dir local/example --poll-seconds 15
 ```
 
-The command emits progress heartbeats on stderr and returns one final JSON
-status only after the durable run reaches a terminal state. Delivery results
+The command emits progress heartbeats on stderr and returns one JSON status
+when the durable run reaches a terminal state or an actionable pause. For a `RUNNING`
+snapshot it resumes the same run to recover an orphaned execution; an active
+owner's lease remains authoritative, so `wait` continues observing without
+starting or taking over another run. Delivery results
 expose `delivery_mode` (`bilingual`, `partial_bilingual`, `source_only`, or
-`source_language`) alongside the canonical ledger `delivery_grade`.
+`source_language`) alongside the canonical ledger `delivery_grade`. When a
+validated interactive-admission fallback produced static source-only HTML,
+subsequent status reads report that actual source-only delivery rather than the
+pre-fallback publication grade.
+An actionable pause is not a final delivery; inspect its resume descriptor and
+continue the same lineage.
 `build` refuses to replace a different selected source or recipe unless
 `--new-lineage` is explicit; that flag is not a retry mechanism.
 After an explicit render, use `data.delivery.html`; an empty delivery with

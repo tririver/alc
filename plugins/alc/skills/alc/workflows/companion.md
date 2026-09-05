@@ -190,10 +190,11 @@ for every retry and resume. Never switch providers, create a fallback run, or
 start another project root because a build is slow, paused, or failed; that is
 a separate material action requiring explicit user authorization.
 When the command tool yields a running execution handle, keep waiting on that
-same handle until the build command returns. `status` is an observation surface,
-not a replacement owner for the running process. Do not end the Codex task or
-claim delivery while the selected Companion run remains nonterminal; either
-wait for its terminal command result or report a user-requested explicit stop.
+same handle until the build command returns a terminal result or an actionable
+pause. `status` is an observation surface, not a replacement owner for the
+running process. Do not end the Codex task or claim delivery while the selected
+Companion run remains `PENDING` or `RUNNING`; wait for a terminal result or a
+pause that can be handled through the same lineage's resume descriptor.
 In Codex Desktop, a command result carrying `session_id` must be followed with
 `write_stdin` polls on that exact session; a result carrying a running cell ID
 must be followed with the matching cell wait operation. Commentary-only waiting,
@@ -204,6 +205,10 @@ If the original execution handle is no longer available, attach exactly once
 with `alc-companion wait --project-dir <project-dir> --poll-seconds 15` and wait
 on that command's handle until it returns. Do not replace terminal waiting with
 repeated `status` calls.
+The wait attachment resumes only the same durable run when a `RUNNING`
+execution is orphaned; an active execution lease keeps it observation-only.
+It returns when the run is terminal or reaches an actionable pause; handle the
+pause through the same lineage rather than treating it as final delivery.
 If the selected project genuinely needs a different source or recipe, obtain
 that authorization and pass `--new-lineage`; never use it for ordinary retry
 or recovery.

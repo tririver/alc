@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import alc_companion.publication as publication_module
@@ -32,7 +33,10 @@ from alc_companion.reviewed_supplements import (
     reviewed_source_inventory_digest,
 )
 from alc_companion.source_planning import plan_source_chapters
-from alc_companion.translation_results import load_translation_selection
+from alc_companion.translation_results import (
+    CompanionTranslationResultError,
+    load_translation_selection,
+)
 from alc_render import (
     AnchorKind,
     FragmentAnchor,
@@ -74,6 +78,45 @@ def _illustrated_source(tmp_path: Path):
         encoding="utf-8",
     )
     service = AcDocumentService(cache_root=tmp_path / "paper")
+    artifact = service.import_source(source_path)
+    return RichDocumentParserService(service.repository).parse_source(artifact)
+
+
+def _captionless_table_source(tmp_path: Path):
+    source_path = tmp_path / "captionless-table.md"
+    source_path.write_text(
+        "# Measurements\n\n"
+        "| Quantity | Value |\n"
+        "| --- | --- |\n"
+        "| Mass | 42 |\n",
+        encoding="utf-8",
+    )
+    service = AcDocumentService(cache_root=tmp_path / "table-paper")
+    artifact = service.import_source(source_path)
+    return RichDocumentParserService(service.repository).parse_source(artifact)
+
+
+def _captionless_table_cell_note_source(tmp_path: Path):
+    source_path = tmp_path / "captionless-table-note.html"
+    source_path.write_text(
+        """
+        <article>
+          <h1>Measurements</h1>
+          <table id="T1">
+            <tr><th>Quantity</th><th>Value</th></tr>
+            <tr><td>Mass<span class="ltx_note ltx_role_footnote" id="footnote1">
+              <sup class="ltx_note_mark">1</sup><span class="ltx_note_outer">
+                <span class="ltx_note_content"><sup class="ltx_note_mark">1</sup>
+                  Cell note body.
+                </span>
+              </span>
+            </span></td><td>42</td></tr>
+          </table>
+        </article>
+        """,
+        encoding="utf-8",
+    )
+    service = AcDocumentService(cache_root=tmp_path / "table-note-paper")
     artifact = service.import_source(source_path)
     return RichDocumentParserService(service.repository).parse_source(artifact)
 
@@ -243,6 +286,210 @@ def test_publication_uses_atomic_overlays_and_materializes_directly(
             incomplete,
             tmp_path / "incomplete",
         )
+
+
+def test_captionless_table_omission_preserves_source_through_publication(
+    tmp_path: Path,
+) -> None:
+    source = _captionless_table_source(tmp_path)
+    chapter = plan_source_chapters(source)[0]
+    table = next(block for block in source.blocks if block.kind.value == "table")
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("captionless-table", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+    translation = _translation_result(
+        context, source, omitted_block_ids=frozenset({table.block_id})
+    )
+
+    selection = load_translation_selection(
+        context,
+        translation.to_document(),
+        source=source,
+        block_ids=chapter.block_ids,
+        target_language="zh-CN",
+    )
+
+    assert all(
+        revision.anchor.target_id != table.block_id
+        for revision in selection.revisions
+    )
+    assert next(
+        record for record in selection.view_records if record["block_id"] == table.block_id
+    ) == {"block_id": table.block_id, "text": "\ufffc"}
+
+    published = publish_companion(
+        context,
+        source=source,
+        title="Measurements",
+        authors=(),
+        source_language="en",
+        target_language="zh-CN",
+        translation_mode="enabled",
+        reader_labels={},
+        chapters=(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "block_ids": list(chapter.block_ids),
+                "display_anchor_block_id": chapter.display_anchor_block_id,
+                "section_block_ids": list(chapter.section_block_ids),
+                "section_titles": list(chapter.section_titles),
+                "section_levels": list(chapter.section_levels),
+                "translation_result": translation.to_document(),
+                "learning_units": [],
+            },
+        ),
+        glossary=(),
+        bibliography=(),
+        document_cache_root=tmp_path / "table-paper",
+    )
+
+    assert next(
+        block
+        for block in published.publication.source_document.blocks
+        if block.block_id == table.block_id
+    ) == table
+    translation_stage = next(
+        item
+        for item in published.publication.reader_profile["delivery_ledger"]["stages"]
+        if item["stage"] == "translation"
+    )
+    assert translation_stage == {
+        "stage": "translation",
+        "status": "complete",
+        "expected": len(source.blocks) - 1,
+        "produced": len(source.blocks) - 1,
+        "accounted": len(source.blocks) - 1,
+    }
+
+
+def test_captioned_table_still_requires_translation_revision(
+    tmp_path: Path,
+) -> None:
+    source = _captionless_table_source(tmp_path)
+    table = next(block for block in source.blocks if block.kind.value == "table")
+    source = replace(
+        source,
+        blocks=tuple(
+            replace(block, payload={**block.payload, "caption": "Measurements"})
+            if block.block_id == table.block_id
+            else block
+            for block in source.blocks
+        ),
+    )
+    chapter = plan_source_chapters(source)[0]
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("captioned-table", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+    translation = _translation_result(
+        context, source, omitted_block_ids=frozenset({table.block_id})
+    )
+
+    with pytest.raises(
+        ValueError, match="did not exactly cover the chapter source order"
+    ):
+        load_translation_selection(
+            context,
+            translation.to_document(),
+            source=source,
+            block_ids=chapter.block_ids,
+            target_language="zh-CN",
+        )
+
+
+def test_captionless_table_cell_note_remains_selected_and_accounted(
+    tmp_path: Path,
+) -> None:
+    source = _captionless_table_cell_note_source(tmp_path)
+    chapter = plan_source_chapters(source)[0]
+    table = next(block for block in source.blocks if block.kind.value == "table")
+    notes = source.metadata["source_notes"]["notes"]
+    assert len(notes) == 1
+    note = notes[0]
+    assert note["owner_block_id"] == table.block_id
+    repository = RunRepository(tmp_path / "jobs")
+    snapshot = repository.create(
+        RunSpec("captionless-table-note", "handler", {"input": "test"})
+    )
+    context = RunContext(repository, snapshot, resume_input=None)
+    translation = _translation_result(
+        context,
+        source,
+        omitted_block_ids=frozenset({table.block_id}),
+        source_note_ids=frozenset({str(note["note_id"])}),
+    )
+
+    selection = load_translation_selection(
+        context,
+        translation.to_document(),
+        source=source,
+        block_ids=chapter.block_ids,
+        target_language="zh-CN",
+    )
+
+    note_revision = next(
+        revision
+        for revision in selection.revisions
+        if revision.provenance.get("source_note_translation", {}).get("note_id")
+        == note["note_id"]
+    )
+    assert note_revision.anchor.target_id == table.block_id
+
+    with pytest.raises(
+        CompanionTranslationResultError,
+        match="revision artifact is invalid",
+    ):
+        load_translation_selection(
+            context,
+            translation.to_document(),
+            source=source,
+            block_ids=(chapter.block_ids[0],),
+            target_language="zh-CN",
+        )
+
+    published = publish_companion(
+        context,
+        source=source,
+        title="Measurements",
+        authors=(),
+        source_language="en",
+        target_language="zh-CN",
+        translation_mode="enabled",
+        reader_labels={},
+        chapters=(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "block_ids": list(chapter.block_ids),
+                "display_anchor_block_id": chapter.display_anchor_block_id,
+                "section_block_ids": list(chapter.section_block_ids),
+                "section_titles": list(chapter.section_titles),
+                "section_levels": list(chapter.section_levels),
+                "translation_result": translation.to_document(),
+                "learning_units": [],
+            },
+        ),
+        glossary=(),
+        bibliography=(),
+        document_cache_root=tmp_path / "table-note-paper",
+    )
+
+    translation_stage = next(
+        item
+        for item in published.publication.reader_profile["delivery_ledger"]["stages"]
+        if item["stage"] == "translation"
+    )
+    assert translation_stage == {
+        "stage": "translation",
+        "status": "complete",
+        "expected": len(source.blocks),
+        "produced": len(source.blocks),
+        "accounted": len(source.blocks),
+    }
 
 
 def test_materialization_validates_resource_size_bytes(tmp_path: Path) -> None:
@@ -1019,11 +1266,15 @@ def _translation_result(
     source,
     *,
     malformed_ordinal: int | None = None,
+    omitted_block_ids: frozenset[str] = frozenset(),
+    source_note_ids: frozenset[str] = frozenset(),
 ) -> TranslationResult:
     source_identity = source_identity_from_rich_document(source)
     references = []
     artifacts = []
     for block in source.blocks:
+        if block.block_id in omitted_block_ids:
+            continue
         text = (
             str(block.payload["text"])
             if block.kind.value == "code"
@@ -1057,6 +1308,46 @@ def _translation_result(
         artifact = context.artifacts.publish_bytes(
             f"translation-input/{revision.fragment_id}",
             payload,
+            media_type="text/markdown",
+        )
+        references.append(reference)
+        artifacts.append(TranslationRevisionArtifact(reference, artifact))
+    source_notes = source.metadata.get("source_notes", {}).get("notes", ())
+    blocks = {block.block_id: block for block in source.blocks}
+    for note in source_notes:
+        note_id = str(note["note_id"])
+        if note_id not in source_note_ids:
+            continue
+        owner = blocks[str(note["owner_block_id"])]
+        revision = FragmentRevision(
+            source=source_identity,
+            fragment_id=f"translation-publication-note-{note_id}",
+            revision=1,
+            parent_semantic_digest=None,
+            anchor=FragmentAnchor(
+                AnchorKind.BLOCK,
+                owner.block_id,
+                (anchor_block_from_rich_block(owner),),
+            ),
+            priority=10,
+            role="translation",
+            language="zh-CN",
+            title=None,
+            citation_ids=(),
+            provenance={
+                "producer": "alc-translate",
+                "source_note_translation": {
+                    "schema_version": "alc.render.source_note_translation.v1",
+                    "note_id": note_id,
+                },
+            },
+            markdown_body="译注。\n",
+        )
+        relative = f"fragments/{fragment_revision_filename(revision)}"
+        reference = fragment_revision_ref(relative, revision)
+        artifact = context.artifacts.publish_bytes(
+            f"translation-input/{revision.fragment_id}",
+            encode_fragment_revision(revision).encode("utf-8"),
             media_type="text/markdown",
         )
         references.append(reference)

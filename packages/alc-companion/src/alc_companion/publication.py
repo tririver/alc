@@ -56,6 +56,7 @@ from .reviewed_supplements import (
 )
 from .translation_results import (
     CompanionTranslationResultError,
+    is_non_language_block,
     load_translation_selection,
 )
 
@@ -1094,11 +1095,7 @@ def _expected_translation_units(
     for chapter in chapters:
         for block_id in _string_list(chapter.get("block_ids"), "chapter block IDs"):
             block = _block(blocks, block_id)
-            if (
-                block.kind is RichBlockKind.FIGURE
-                and not str(block.payload.get("caption") or "").strip()
-                and not str(block.payload.get("alt_text") or "").strip()
-            ):
+            if is_non_language_block(block):
                 continue
             expected += 1
     source_notes = source.metadata.get("source_notes")

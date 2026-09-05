@@ -25,6 +25,7 @@ from ac_jobs import (
     CommandRun,
     CommandStatus,
     CommandWarning,
+    RunBusyError,
     RunStatus,
     command_result_from_snapshot,
     command_result_json,
@@ -563,12 +564,7 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
             and profile.get("build_state")
             == "provider_source_only"
         )
-        data["delivery_grade"] = _delivery_grade(
-            publication, source_only=source_only_publication
-        )
-        data["delivery_mode"] = _delivery_mode(
-            publication, source_only=source_only_publication
-        )
+        source_only_delivery = source_only_publication
         workspace = paths.publication_workspace(run_id)
         validated_artifacts: list[CommandArtifact] = []
         try:
@@ -610,6 +606,7 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
                 html_text = paths.delivery_html.read_text(encoding="utf-8")
                 if 'data-alc-source-only="true"' in html_text:
                     validate_source_only_html(publication, paths.delivery_html)
+                    source_only_delivery = True
                 else:
                     validate_standalone_html(
                         publication,
@@ -620,6 +617,7 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
                             else state.selected_revision_digests
                         ),
                     )
+                    source_only_delivery = False
                 data["workspace_html_consistent"] = True
                 validated_artifacts.append(
                     CommandArtifact(
@@ -635,6 +633,12 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
                 )
         else:
             data["workspace_html_consistent"] = False
+        data["delivery_grade"] = _delivery_grade(
+            publication, source_only=source_only_delivery
+        )
+        data["delivery_mode"] = _delivery_mode(
+            publication, source_only=source_only_delivery
+        )
         artifacts = tuple(validated_artifacts)
     return CommandResult(
         base.status,
@@ -661,6 +665,13 @@ def _wait(args: argparse.Namespace) -> CommandResult:
         snapshot = service.inspect(run_id).snapshot
         if snapshot.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
             return _status_locked(paths)
+        if snapshot.status is RunStatus.RUNNING:
+            try:
+                service.resume(run_id)
+            except RunBusyError:
+                pass
+            else:
+                continue
         progress = service.progress(run_id)
         heartbeat = {
             "event": "alc.companion.wait",
@@ -1090,15 +1101,15 @@ def _edition_data(state: Any, review_ids: tuple[str, ...]) -> dict[str, Any]:
 def _delivery_grade(publication: Any, *, source_only: bool) -> str:
     """Read an optional v1 ledger while retaining legacy publication support."""
 
+    if source_only:
+        return "source_only"
     profile = getattr(publication, "reader_profile", {})
     if not isinstance(profile, Mapping):
-        return "source_only" if source_only else "complete"
+        return "complete"
     ledger = profile.get("delivery_ledger")
     if not isinstance(ledger, Mapping):
-        return "source_only" if source_only else "complete"
+        return "complete"
     grade = ledger.get("delivery_grade")
-    if source_only and grade == "degraded":
-        return "source_only"
     return grade if grade in {"complete", "degraded", "source_only"} else "complete"
 
 

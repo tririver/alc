@@ -181,12 +181,16 @@ Reader availability, translation fallback counts/reasons, and one normalized
 `next_action`.
 
 `status` is lock-free and read-only. To remain attached until the selected run
-is terminal, use `alc-companion wait --project-dir <project-dir>`; it emits
-periodic stderr heartbeats and returns the same final status envelope.
+leaves `PENDING` or `RUNNING`, use
+`alc-companion wait --project-dir <project-dir>`; it emits periodic stderr
+heartbeats and returns a terminal status or an actionable pause.
 Inside Codex Desktop, retain and poll the command tool's exact running handle.
 If that handle is lost, start one `alc-companion wait` attachment and retain its
-handle through terminal status. A partial Reader or a `running` status is not a
-valid final delivery.
+handle until it returns a terminal status or actionable pause. `wait` resumes
+the same durable run when its `RUNNING` execution is orphaned; while an active
+owner still holds the lease it remains observation-only. A partial Reader or a
+`running` status is not a valid final delivery. An actionable pause must be
+handled through its resume descriptor on the same lineage.
 
 ## Resume, Render, and Validate
 
@@ -253,7 +257,9 @@ Do not treat provider authentication, authority, request/schema,
 source-identity, lineage, durable-state, or publication-integrity errors as a
 fallback opportunity.
 CLI results also expose `delivery_mode`; `delivery_grade` always comes from the
-same validated ledger used by the Reader.
+same validated ledger used by the Reader. A validated static source-only HTML
+fallback overrides the pre-fallback publication grade in subsequent status
+results.
 
 `build` refuses to replace a different selected source/recipe by default. Use
 `--new-lineage` only after an explicit decision to start a genuinely different
