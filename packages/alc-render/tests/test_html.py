@@ -24,6 +24,7 @@ from ac_document import (
 )
 
 from alc_render import (
+    DeliveryLedgerError,
     encode_glossary_revision,
     encode_fragment_revision,
     FragmentAnchor,
@@ -42,9 +43,13 @@ from alc_render import (
     publication_edition_digest,
     read_publication_workspace_state,
     source_identity_from_rich_document,
+    render_source_only_html,
+    validate_source_only_html,
 )
+from alc_render.delivery_ledger import validate_delivery_ledger
 from alc_render.html import (
     HTMLRenderError,
+    InteractiveReaderAdmissionError,
     _extract_json_script,
     _extract_reader_payload,
     _legacy_bibliography_targets,
@@ -55,6 +60,8 @@ from alc_render.html import (
     _validate_source_note_translations,
     _validate_fragment_glossary_mentions,
     render_publication_html,
+    render_html,
+    validate_publication_workspace,
     validate_standalone_html,
 )
 from alc_render.standalone_html import _split_reader_payload
@@ -1117,6 +1124,262 @@ def _workspace(
     return publication_path, publication, second
 
 
+def test_delivery_ledger_rejects_silent_or_unaccounted_delivery(
+    tmp_path: Path,
+) -> None:
+    _path, publication, _revision = _workspace(tmp_path)
+    source_count = len(publication.source_document.blocks)
+    ledger = {
+        "schema_version": "alc.companion.delivery_ledger.v1",
+        "delivery_grade": "complete",
+        "stages": [
+            {
+                "stage": "source",
+                "status": "complete",
+                "expected": source_count,
+                "produced": source_count,
+                "accounted": source_count,
+            },
+            *[
+                {
+                    "stage": stage,
+                    "status": "skipped",
+                    "expected": 0,
+                    "produced": 0,
+                    "accounted": 0,
+                }
+                for stage in (
+                    "translation",
+                    "guides",
+                    "glossary",
+                    "editorial",
+                    "resources",
+                    "render",
+                )
+            ],
+        ],
+        "issues": [],
+        "unaccounted_source_units": 0,
+    }
+    assert validate_delivery_ledger(ledger, source_unit_count=source_count) == ledger
+    with pytest.raises(DeliveryLedgerError, match="unaccounted"):
+        validate_delivery_ledger(
+            {**ledger, "unaccounted_source_units": 1},
+            source_unit_count=source_count,
+        )
+    with pytest.raises(DeliveryLedgerError, match="hides degradation"):
+        validate_delivery_ledger(
+            {
+                **ledger,
+                "issues": [
+                    {
+                        "issue_id": "translation-block-paragraph",
+                        "category": "translation_source_text",
+                        "scope": "block-paragraph",
+                        "fallback": "source_text",
+                        "affected_count": 1,
+                        "source_preserved": True,
+                        "retry": "bounded_retry_exhausted",
+                        "evidence": "identity mismatch",
+                    }
+                ],
+            },
+            source_unit_count=source_count,
+        )
+    deficit = {
+        **ledger,
+        "delivery_grade": "degraded",
+        "stages": [
+            *ledger["stages"][:2],
+            {
+                "stage": "guides",
+                "status": "degraded",
+                "expected": 1,
+                "produced": 0,
+                "accounted": 1,
+            },
+            *ledger["stages"][3:],
+        ],
+        "issues": [],
+    }
+    with pytest.raises(DeliveryLedgerError, match="deficit"):
+        validate_delivery_ledger(deficit, source_unit_count=source_count)
+    assert validate_delivery_ledger(
+        {
+            **deficit,
+            "issues": [
+                {
+                    "issue_id": "guide-omitted-chapter-1",
+                    "category": "guide_evaluated_omitted",
+                    "scope": "chapter-1",
+                    "fallback": "source_and_translation_only",
+                    "affected_count": 1,
+                    "source_preserved": True,
+                    "retry": "not_semantic_retry",
+                    "evidence": "no guide units were accepted",
+                }
+            ],
+        },
+        source_unit_count=source_count,
+    )["delivery_grade"] == "degraded"
+
+
+def test_source_only_reader_is_static_and_preserves_source_units(
+    tmp_path: Path,
+) -> None:
+    _path, publication, _revision = _workspace(tmp_path)
+    output = tmp_path / "source-only.html"
+    rendered = render_source_only_html(publication, output)
+    assert rendered.html_path == output
+    assert 'data-alc-source-only="true"' in output.read_text(encoding="utf-8")
+    assert "<script" not in output.read_text(encoding="utf-8").lower()
+    validate_source_only_html(publication, output)
+    ledger = html_module._source_only_html_ledger(
+        output.read_text(encoding="utf-8"),
+        source_unit_count=len(publication.source_document.blocks),
+    )
+    assert ledger["delivery_grade"] == "source_only"
+    assert any(
+        item["category"] == "render_source_only" for item in ledger["issues"]
+    )
+
+
+def test_source_only_reader_rejects_noncanonical_ledger_and_block_tampering(
+    tmp_path: Path,
+) -> None:
+    _path, publication, _revision = _workspace(tmp_path)
+    output = tmp_path / "source-only.html"
+    render_source_only_html(publication, output)
+    original = output.read_text(encoding="utf-8")
+    output.write_text(
+        original.replace("render_source_only", "render_tampered", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(HTMLRenderError, match="invalid|not canonical"):
+        validate_source_only_html(publication, output)
+    output.write_text(
+        original.replace("data-alc-source-block-id=", "data-alc-source-block-id-tampered=", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(HTMLRenderError, match="source block count"):
+        validate_source_only_html(publication, output)
+
+
+def test_source_only_ledger_only_covers_new_stage_deficits(tmp_path: Path) -> None:
+    _path, publication, _revision = _workspace(tmp_path)
+    source_count = len(publication.source_document.blocks)
+    stages = [
+        {
+            "stage": "source",
+            "status": "complete",
+            "expected": source_count,
+            "produced": source_count,
+            "accounted": source_count,
+        },
+        {
+            "stage": "translation",
+            "status": "degraded",
+            "expected": 2,
+            "produced": 1,
+            "accounted": 2,
+        },
+        {
+            "stage": "guides",
+            "status": "degraded",
+            "expected": 1,
+            "produced": 0,
+            "accounted": 1,
+        },
+        {
+            "stage": "glossary",
+            "status": "degraded",
+            "expected": 2,
+            "produced": 1,
+            "accounted": 2,
+        },
+        *[
+            {
+                "stage": stage,
+                "status": "skipped" if stage == "editorial" else "degraded",
+                "expected": 0 if stage == "editorial" else 2,
+                "produced": 0 if stage == "editorial" else 1,
+                "accounted": 0 if stage == "editorial" else 2,
+            }
+            for stage in ("editorial", "resources")
+        ],
+        {
+            "stage": "render",
+            "status": "skipped",
+            "expected": 0,
+            "produced": 0,
+            "accounted": 0,
+        },
+    ]
+    issues = [
+        {
+            "issue_id": f"{stage}-omitted",
+            "category": (
+                "guide_evaluated_omitted" if stage == "guides"
+                else f"{stage.removesuffix('s')}_omitted"
+            ),
+            "scope": stage,
+            "fallback": "source_only",
+            "affected_count": 1,
+            "source_preserved": True,
+            "retry": "not_semantic_retry",
+            "evidence": "pre-render deficit",
+        }
+        for stage in ("translation", "guides", "glossary", "resources")
+    ]
+    value = replace(
+        publication,
+        reader_profile={
+            "delivery_ledger": {
+                "schema_version": "alc.companion.delivery_ledger.v1",
+                "delivery_grade": "degraded",
+                "stages": stages,
+                "issues": issues,
+                "unaccounted_source_units": 0,
+            }
+        },
+    )
+    ledger = html_module._source_only_delivery_ledger(value)
+    assert validate_delivery_ledger(ledger, source_unit_count=source_count) == ledger
+    translation = next(item for item in ledger["stages"] if item["stage"] == "translation")
+    translation_issues = [
+        item for item in ledger["issues"] if item["category"].startswith("translation_")
+    ]
+    assert translation["expected"] - translation["produced"] == sum(
+        item["affected_count"] for item in translation_issues
+    )
+
+
+def test_integrity_errors_are_not_source_only_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _path, publication, _revision = _workspace(tmp_path)
+
+    def broken_overlays(*_args, **_kwargs):
+        raise HTMLRenderError("overlay revision is invalid")
+
+    monkeypatch.setattr(html_module, "_load_revisions", broken_overlays)
+    with pytest.raises(HTMLRenderError) as failure:
+        render_html(publication, tmp_path / "reader.html", project_root=tmp_path)
+    assert not isinstance(failure.value, InteractiveReaderAdmissionError)
+
+    publication_path, resource_publication, _revision = _workspace(
+        tmp_path / "resource", asset_payload=b"asset"
+    )
+    (publication_path.parent / "source-assets" / "figure.png").unlink()
+    with pytest.raises(HTMLRenderError) as failure:
+        render_html(
+            resource_publication,
+            tmp_path / "resource" / "reader.html",
+            project_root=publication_path.parent,
+        )
+    assert not isinstance(failure.value, InteractiveReaderAdmissionError)
+
+
 def _payload(html: str) -> dict[str, object]:
     return dict(_extract_reader_payload(html))
 
@@ -1790,6 +2053,28 @@ def test_rendered_html_warnings_include_glossary_diagnostics(
     assert any("malformed_glossary_revision" in item for item in result.warnings)
 
 
+def test_unsafe_glossary_definition_warns_but_reader_still_renders(
+    tmp_path: Path,
+) -> None:
+    publication_path, publication, _first = _workspace(tmp_path)
+    entry = dict(publication.glossary[0])
+    entry["definition"] = "unsafe\x00definition"
+    write_publication(
+        publication_path,
+        replace(publication, glossary=(entry,)),
+    )
+
+    result = render_publication_html(publication_path, tmp_path / "reader.html")
+    warning = (
+        "1 glossary entry contains disallowed control characters; "
+        "the Reader will recover usable definition content per entry"
+    )
+
+    assert result.warnings == (warning,)
+    assert validate_publication_workspace(publication_path) == (warning,)
+    assert result.html_path.is_file()
+
+
 def test_legacy_glossary_json_history_remains_loadable(tmp_path: Path) -> None:
     publication_path, publication, _selected = _workspace(tmp_path)
     base = dict(publication.glossary[0])
@@ -2405,6 +2690,7 @@ var body = "浏览器中的最新版 [@ref-1]。";
     assert 'data-alc-reader-scale="115"' in completed.stdout
     assert 'data-alc-reader-line-height="1.8"' in completed.stdout
     assert 'data-alc-reader-width="85"' in completed.stdout
+    assert 'data-alc-export-snapshot="true"' in completed.stdout
     assert "--alc-font-scale:1.15" in completed.stdout
     assert "--alc-reader-line-height:1.8" in completed.stdout
     assert "--alc-reader-width:81.6rem" in completed.stdout
@@ -2519,6 +2805,7 @@ def test_reader_structural_alias_registry_and_markdown_degradation() -> None:
     buildSourceInternalLinkIndex: buildSourceInternalLinkIndex,
     degradeLegacyInternalMarkdownChunk: degradeLegacyInternalMarkdownChunk,
     displayEquationLabel: displayEquationLabel,
+    legacyStructuralReference: legacyStructuralReference,
     legacyStructuralTarget: legacyStructuralTarget,
     listPathMarkers: listPathMarkers,
     exportListOwnedMarkdown: exportListOwnedMarkdown,
@@ -2576,6 +2863,10 @@ assert(helpers.legacyStructuralTarget("#S4%2EF2"), "encoded alias");
 assert(helpers.legacyStructuralTarget("#S4.T8.3.2"), "nested alias target");
 assert(helpers.legacyStructuralTarget("#footnote5"), "source note alias target");
 assert(!helpers.legacyStructuralTarget("#s4.F2"), "case sensitivity");
+assert(helpers.legacyStructuralReference("#S7.F16"), "unmapped figure reference");
+assert(helpers.legacyStructuralReference("#S4%2EF2"), "encoded structural reference");
+assert(!helpers.legacyStructuralReference("#footnote5"), "source note is not structural syntax");
+assert(!helpers.legacyStructuralReference("#s4.F2"), "reference case sensitivity");
 var bibliography = {
   blockId: "block-references",
   aliases: new Map([["bib.bib1", "source-reference-block-references-1"]]),

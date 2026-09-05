@@ -494,6 +494,9 @@
       originalTerm: "原文术语",
       translatedTerm: traditional ? "譯文" : "译文",
       definition: "释义",
+      glossaryDefinitionRecovered: traditional ?
+        "原始釋義含損壞符號，已保留可恢復內容" :
+        "原始释义含损坏符号，已保留可恢复内容",
       editGlossary: "编辑术语",
       glossaryEditor: "编辑术语",
       glossarySourceReadOnly: "原文（不可修改）",
@@ -657,6 +660,8 @@
       originalTerm: "Original term",
       translatedTerm: "Translation",
       definition: "Definition",
+      glossaryDefinitionRecovered:
+        "The original definition contained damaged symbols; recoverable content is shown",
       editGlossary: "Edit glossary term",
       glossaryEditor: "Edit glossary term",
       glossarySourceReadOnly: "Source (read-only)",
@@ -1528,10 +1533,78 @@
     return wrapper;
   }
 
-  function renderGlossaryDefinition(markdown) {
-    var rendered = renderMarkdown(markdown);
+  function renderGlossaryDefinition(markdown, options) {
+    var recovered = glossaryDefinitionHasForbiddenControl(markdown);
+    var rendered = renderMarkdown(
+      recovered ? recoverLegacyGlossaryDefinition(markdown) : markdown,
+      null,
+      options
+    );
     rendered.classList.add("alc-glossary-definition-markdown");
+    if (recovered) {
+      rendered.classList.add("alc-glossary-definition-recovered");
+      rendered.setAttribute("role", "status");
+      rendered.setAttribute("title", labels().glossaryDefinitionRecovered);
+    }
     return rendered;
+  }
+
+  function glossaryTranslatedTermMarkup(value) {
+    var text = String(value || "");
+    var hasInlineMath = /\$[^$\r\n]+\$/.test(text) ||
+      /\\\([^\r\n]+\\\)/.test(text);
+    if (!hasInlineMath) return null;
+    return state.md.renderInline(text, {
+      citationNumbers: citationNumbers(),
+      citationTargets: citationTargets()
+    });
+  }
+
+  function appendGlossaryTranslatedTerm(root, value) {
+    var text = String(value || "");
+    var markup = glossaryTranslatedTermMarkup(text);
+    if (markup === null) {
+      root.textContent = text;
+      return false;
+    }
+    var recovered = element(
+      "span", "alc-glossary-translated-term-recovered"
+    );
+    recovered.innerHTML = markup;
+    removeVisibleHtmlTags(recovered);
+    root.appendChild(recovered);
+    return true;
+  }
+
+  function glossaryDefinitionHasForbiddenControl(value) {
+    return /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(
+      String(value || "")
+    );
+  }
+
+  function recoverLegacyGlossaryDefinition(value) {
+    return String(value || "")
+      .replace(
+        /(?:\u001b\[|\u009b)[0-9:;]{0,32}m/g,
+        ""
+      )
+      .replace(
+        /([\u0001-\u0008\u000b\u000c\u000e-\u001f])([0-9a-f]{2})(?![0-9a-f])/gi,
+        function (_match, highByte, suffix) {
+          return String.fromCodePoint(
+            highByte.charCodeAt(0) * 256 + parseInt(suffix, 16)
+          );
+        }
+      )
+      .replace(/\u001d/g, "")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "?");
+  }
+
+  function glossaryDefinitionPlainText(value) {
+    return markdownPlainText(
+      glossaryDefinitionHasForbiddenControl(value) ?
+        recoverLegacyGlossaryDefinition(value) : value || ""
+    );
   }
 
   function markdownPlainText(markdown) {
@@ -1643,6 +1716,12 @@
 
   function glossaryEntryIsEditable(entry) {
     if (!glossaryEntryHasEditableShape(entry)) return false;
+    if (
+      glossaryDefinitionHasForbiddenControl(entry.definition) ||
+      glossaryDefinitionHasForbiddenControl(
+        entry[glossaryTranslatedKey(entry)]
+      )
+    ) return false;
     try {
       validateIntegerJson(entry, "glossary entry");
       return true;
@@ -2741,6 +2820,8 @@
     header.appendChild(heading);
     decorateGlossary(heading, "source");
     decorateGlossary(heading, "target");
+    var delivery = renderDeliverySummary();
+    if (delivery) header.appendChild(delivery);
     if (titlePromotion) {
       var translatedTitle = renderFragment(titlePromotion.fragment);
       translatedTitle.classList.add("alc-translated-title");
@@ -2759,6 +2840,108 @@
     });
     if (!frontMatter.length && Array.isArray(profile.authors) && profile.authors.length) {
       header.appendChild(element("p", "alc-authors", profile.authors.join(", ")));
+    }
+  }
+
+  function deliveryLedger() {
+    var profile = state.payload && state.payload.publication &&
+      state.payload.publication.reader_profile || {};
+    var ledger = state.payload && state.payload.delivery_ledger ||
+      profile.delivery_ledger;
+    if (!ledger || ledger.schema_version !== "alc.companion.delivery_ledger.v1" ||
+      !Array.isArray(ledger.issues)) return null;
+    return ledger;
+  }
+
+  function renderDeliverySummary() {
+    var ledger = deliveryLedger();
+    if (
+      !ledger || ledger.delivery_grade === "complete" ||
+      document.body.dataset.alcExportSnapshot === "true"
+    ) return null;
+    var chinese = targetLanguage().toLowerCase().indexOf("zh") === 0;
+    var counts = new Map();
+    ledger.issues.forEach(function (issue) {
+      var category = String(issue && issue.category || "other");
+      counts.set(category, (counts.get(category) || 0) + 1);
+    });
+    var panel = element("aside", "alc-delivery-summary");
+    panel.dataset.deliveryGrade = ledger.delivery_grade;
+    panel.dataset.deliveryIssueCount = String(ledger.issues.length);
+    panel.setAttribute("aria-labelledby", "alc-delivery-summary-title");
+    var header = element("header", "alc-delivery-summary-header");
+    var title = element(
+      "h2", "alc-delivery-summary-title",
+      chinese ? "质量状态" : "Quality status"
+    );
+    title.id = "alc-delivery-summary-title";
+    header.appendChild(title);
+    var close = iconButton(
+      "alc-delivery-summary-close", "", labels().close
+    );
+    close.innerHTML = speechIcon("close");
+    close.addEventListener("click", function () {
+      panel.hidden = true;
+    });
+    header.appendChild(close);
+    panel.appendChild(header);
+    panel.appendChild(element(
+      "p", "",
+      chinese ?
+        "部分内容采用了安全降级；原文和完整审计记录均已保留。" :
+        "Some content used a safe fallback; source and the complete audit record are preserved."
+    ));
+    var categoryLabels = new Map([
+      ["translation_source_text", chinese ? "处保留原文" : "source-text fallbacks"],
+      ["translation_review_skipped", chinese ? "处使用审阅前译文" : "pre-review translations"],
+      ["glossary_omitted", chinese ? "个术语未显示" : "omitted glossary terms"]
+    ]);
+    var list = element("ul", "alc-delivery-summary-list");
+    var known = 0;
+    categoryLabels.forEach(function (label, category) {
+      var count = counts.get(category) || 0;
+      if (!count) return;
+      known += count;
+      list.appendChild(element("li", "", String(count) + " " + label));
+    });
+    var other = ledger.issues.length - known;
+    if (other > 0) {
+      list.appendChild(element(
+        "li", "", String(other) + " " +
+          (chinese ? "项其他降级" : "other fallback items")
+      ));
+    }
+    panel.appendChild(list);
+    return panel;
+  }
+
+  function deliveryIssueForBlock(blockId) {
+    var ledger = deliveryLedger();
+    if (!ledger) return null;
+    var direct = ledger.issues.find(function (item) {
+      return item && item.scope === blockId;
+    });
+    if (direct) return direct;
+    var blocks = state.payload.publication.source_document.blocks || [];
+    var index = blocks.findIndex(function (item) { return item.block_id === blockId; });
+    var outline = state.payload.publication.outline || [];
+    var chapter = outline.find(function (item) {
+      return item && item.level === 1 && index >= item.block_start && index < item.block_end;
+    });
+    return chapter ? ledger.issues.find(function (item) {
+      return item && item.scope === chapter.section_id;
+    }) || null : null;
+  }
+
+  function markDeliveryState(row, blockId) {
+    var issue = deliveryIssueForBlock(blockId);
+    if (!issue) return;
+    row.dataset.deliveryCategory = String(issue.category || "fallback");
+    if (
+      issue.source_preserved === true &&
+      String(issue.category).indexOf("translation_") === 0
+    ) {
+      row.classList.add("alc-source-text-fallback");
     }
   }
 
@@ -3501,7 +3684,9 @@
     if (!root || typeof root.querySelectorAll !== "function") return;
     Array.from(root.querySelectorAll('a[href^="#"]')).filter(
       function (link) {
-        return legacyStructuralTarget(link.getAttribute("href"));
+        var target = link.getAttribute("href");
+        return legacyStructuralReference(target) ||
+          legacyStructuralTarget(target);
       }
     ).forEach(
       function (link) {
@@ -3621,6 +3806,11 @@
     var alias = hashTargetId(String(target || ""));
     return state.sourceStructuralIndex.aliases.has(alias) ||
       state.sourceNoteIndex.aliases.has(alias);
+  }
+
+  function legacyStructuralReference(target) {
+    var alias = hashTargetId(String(target || ""));
+    return /^S[0-9]+(?:[.][A-Za-z][A-Za-z0-9_-]*)*$/.test(alias);
   }
 
   function sourceTitle(documentValue) {
@@ -4326,6 +4516,7 @@
       full.forEach(function (item) { fullRows.appendChild(renderFragment(item)); });
       row.appendChild(fullRows);
     }
+    markDeliveryState(row, block.block_id);
     var noteButton = iconButton(
       "alc-note-button alc-icon-button", "+", labels().addNote
     );
@@ -4483,6 +4674,16 @@
     card.classList.add("alc-translation-table-card");
   }
 
+  function tableCaptionPrecedesContent(caption) {
+    var next = caption && caption.nextElementSibling;
+    if (!next) return false;
+    if (next.tagName === "TABLE") return true;
+    return Boolean(
+      next.classList && next.classList.contains("alc-table-scroll") &&
+      next.querySelector && next.querySelector(":scope > table")
+    );
+  }
+
   function syncParallelTableCaptionAlignment(lanes, block) {
     var tableCaptionText = (block.payload || {}).caption;
     if (typeof tableCaptionText !== "string" || !tableCaptionText.trim()) {
@@ -4491,12 +4692,16 @@
     var presentation = sourceCaptionPresentation(
       state.payload.publication.source_document, block.block_id
     );
-    if (!presentation || presentation.placement !== "before_content") return;
     var captions = Array.from(lanes.querySelectorAll(
       ":scope > .alc-source-card .alc-table-caption, " +
       ":scope > .alc-fragment[data-role=\"translation\"] .alc-table-caption"
     ));
     if (captions.length < 2) return;
+    if (presentation) {
+      if (presentation.placement !== "before_content") return;
+    } else if (!captions.every(tableCaptionPrecedesContent)) {
+      return;
+    }
     lanes.classList.add("alc-parallel-table-caption-before");
     var width = null;
     var frame = null;
@@ -6284,7 +6489,8 @@
       applyFragmentAppearance(card, visual.role, visual.appearance);
     }
     var header = element("header", "alc-fragment-header");
-    var title = visual.title ? element("h4", "", visual.title) : element("span");
+    var title = visual.title ?
+      element("h4", "", plainFragmentTitle(visual.title)) : element("span");
     decorateGlossary(title, "target");
     header.appendChild(title);
     var actions = element("div", "alc-fragment-actions");
@@ -7518,9 +7724,17 @@
   function fragmentSpeechText(fragment) {
     var content = renderMarkdown(fragment.markdown_body, fragment);
     return normalizeSpeechText([
-      fragment.title || "",
+      plainFragmentTitle(fragment.title),
       speechTextFromNode(content)
     ].filter(Boolean).join("\n"));
+  }
+
+  function plainFragmentTitle(value) {
+    return String(value || "")
+      .replace(/(?<!\\)\$(?!\$)([^$\n]+?)(?<!\\)\$(?!\$)/g, "$1")
+      .replace(/\\\((.+?)\\\)/g, "$1")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   function glossarySpeechText(entry) {
@@ -7529,7 +7743,7 @@
     ).trim();
     return normalizeSpeechText([
       translated,
-      markdownPlainText(entry.definition || "")
+      glossaryDefinitionPlainText(entry.definition || "")
     ].filter(Boolean).join("\n"));
   }
 
@@ -8168,11 +8382,12 @@
     decorateGlossary(original, "source");
     row.appendChild(original);
 
-    var translated = element(
-      "dd", "alc-glossary-translation",
-      entry.translated_term || entry.translation || ""
+    var translated = element("dd", "alc-glossary-translation");
+    var recoveredTranslatedTerm = appendGlossaryTranslatedTerm(
+      translated, entry.translated_term || entry.translation || ""
     );
     decorateGlossary(translated, "target");
+    if (recoveredTranslatedTerm) typeset(translated);
     row.appendChild(translated);
     var definition = element("dd", "alc-glossary-definition");
     definition.appendChild(renderGlossaryDefinition(entry.definition || ""));
@@ -8382,9 +8597,13 @@
       }
       var term = element("span", "glossary-term", value.slice(match.start, match.end));
       term.tabIndex = 0;
+      term._alcGlossaryEntries = match.entries.map(function (item) {
+        return item.entry;
+      });
       term.dataset.glossaryTooltip = tooltipText(
-        match.entries.map(function (item) { return item.entry; })
+        term._alcGlossaryEntries
       );
+      term.setAttribute("aria-describedby", "alc-tooltip");
       fragment.appendChild(term);
       cursor = match.end;
     });
@@ -8400,13 +8619,58 @@
 
   function tooltipText(entries) {
     var strings = labels();
-    return entries.map(function (entry) {
-      return strings.originalTerm + ": " + (entry.term || entry.source_term || "") +
+    return glossaryTooltipModels(entries).map(function (entry) {
+      return strings.originalTerm + ": " + entry.source +
         "\n" + strings.translatedTerm + ": " +
-        (entry.translated_term || entry.translation || "") +
+        entry.translated +
         "\n" + strings.definition + ": " +
-        markdownPlainText(entry.definition || "");
+        glossaryDefinitionPlainText(entry.definition);
     }).join("\n\n");
+  }
+
+  function glossaryTooltipModels(entries) {
+    return (entries || []).map(function (entry) {
+      return {
+        source: String(entry.term || entry.source_term || ""),
+        translated: String(
+          entry.translated_term || entry.translation || ""
+        ),
+        definition: String(entry.definition || "")
+      };
+    });
+  }
+
+  function renderGlossaryTooltip(entries) {
+    var strings = labels();
+    var content = document.createDocumentFragment();
+    glossaryTooltipModels(entries).forEach(function (entry) {
+      var group = element("section", "alc-tooltip-entry");
+      var source = element("div", "alc-tooltip-line");
+      source.appendChild(element(
+        "strong", "alc-tooltip-label", strings.originalTerm + ": "
+      ));
+      source.appendChild(document.createTextNode(entry.source));
+      group.appendChild(source);
+      var translated = element("div", "alc-tooltip-line");
+      translated.appendChild(element(
+        "strong", "alc-tooltip-label", strings.translatedTerm + ": "
+      ));
+      var recoveredTranslatedTerm = appendGlossaryTranslatedTerm(
+        translated, entry.translated
+      );
+      if (recoveredTranslatedTerm) typeset(translated);
+      group.appendChild(translated);
+      var definition = element("div", "alc-tooltip-definition");
+      definition.appendChild(element(
+        "strong", "alc-tooltip-label", strings.definition + ":"
+      ));
+      definition.appendChild(renderGlossaryDefinition(
+        entry.definition, {decorateGlossary: false}
+      ));
+      group.appendChild(definition);
+      content.appendChild(group);
+    });
+    return content;
   }
 
   function katexTex(value) {
@@ -8505,6 +8769,32 @@
     return String(value || "").replace(/\\mbox\b/g, "\\text");
   }
 
+  function repairLatexmlProjection(value) {
+    return repairUnicodeCodePointCommands(value)
+      .replace(/\\penalty(?![A-Za-z@])/g, "")
+      .replace(
+        /\\color\s*\[\s*rgb\s*\]\s*\{\s*0(?:\.0+)?\s*,\s*0(?:\.0+)?\s*,\s*0(?:\.0+)?\s*\}/g,
+        ""
+      );
+  }
+
+  function repairUnicodeCodePointCommands(value) {
+    return String(value || "").replace(
+      /\\unicode\s*\{\s*[xX]([0-9A-Fa-f]{1,6})\s*\}/g,
+      function (match, hexadecimal) {
+        var codePoint = Number.parseInt(hexadecimal, 16);
+        if (
+          !Number.isInteger(codePoint) || codePoint < 0xa0 ||
+          codePoint > 0x10ffff ||
+          (codePoint >= 0xd800 && codePoint <= 0xdfff)
+        ) return match;
+        var character = String.fromCodePoint(codePoint);
+        if (!/^[\p{L}\p{M}\p{N}\p{P}\p{S}]$/u.test(character)) return match;
+        return "\\text{" + character + "}";
+      }
+    );
+  }
+
   function repairArrayEnvironment(value) {
     var tex = String(value || "").replace(
       /\\begin\s*\{array\}\s*\[\s*\]\s*/g,
@@ -8520,15 +8810,21 @@
 
   function katexCandidates(value) {
     var primary = katexTex(value);
-    var repairedMathShifts = katexTex(repairOldStyleMathShifts(value));
+    var latexmlProjection = repairLatexmlProjection(value);
+    var repairedLatexml = katexTex(latexmlProjection);
+    var repairedMathShifts = katexTex(
+      repairOldStyleMathShifts(latexmlProjection)
+    );
     var repairedTextBoxes = katexTex(
-      repairTextBoxes(repairOldStyleMathShifts(value))
+      repairTextBoxes(repairOldStyleMathShifts(latexmlProjection))
     );
     // Repair a stripped array before generic bare-ampersand handling wraps it
     // as an aligned equation.
     var repairedArrays = katexTex(
       repairArrayEnvironment(
-        repairTextBoxes(repairOldStyleMathShifts(value))
+        repairTextBoxes(
+          repairOldStyleMathShifts(latexmlProjection)
+        )
       )
     );
     var repaired = repairMatrixShorthand(repairedArrays);
@@ -8540,6 +8836,7 @@
       .replace(/\\right\b/g, "\\bigr");
     return [
       primary,
+      repairedLatexml,
       repairedMathShifts,
       repairedTextBoxes,
       repairedArrays,
@@ -8981,14 +9278,19 @@
     var active = null;
     function close() {
       tooltip.hidden = true;
-      tooltip.textContent = "";
+      tooltip.replaceChildren();
       active = null;
     }
     function open(term) {
       var content = term && term.dataset.glossaryTooltip;
-      if (!content) return;
+      var entries = term && term._alcGlossaryEntries;
+      if ((!entries || !entries.length) && !content) return;
       active = term;
-      tooltip.textContent = content;
+      if (entries && entries.length) {
+        tooltip.replaceChildren(renderGlossaryTooltip(entries));
+      } else {
+        tooltip.textContent = content;
+      }
       tooltip.hidden = false;
       var termRect = term.getBoundingClientRect();
       var tipRect = tooltip.getBoundingClientRect();
@@ -9053,6 +9355,7 @@
     if (body) {
       delete body.dataset.alcRenderReady;
       delete body.dataset.alcRenderComplete;
+      body.dataset.alcExportSnapshot = "true";
       body.classList.remove("alc-speech-dock-open");
     }
     state.exportHtmlTemplate = "<!doctype html>\n" + root.outerHTML;
@@ -10189,8 +10492,10 @@
       var translated = String(
         entry.translated_term || entry.translation || ""
       ).trim();
+      var rawDefinition = entry.definition || "";
       var definition = canonicalizeLegacyDisplayMath(
-        entry.definition || ""
+        glossaryDefinitionHasForbiddenControl(rawDefinition) ?
+          recoverLegacyGlossaryDefinition(rawDefinition) : rawDefinition
       ).trim();
       definition = rewriteMarkdownResourceTargets(definition, resourcePaths);
       var title = [source, translated].filter(Boolean).filter(function (
@@ -11364,7 +11669,13 @@
     if (!pattern.test(state.exportHtmlTemplate)) {
       throw new Error(labels().exportUnavailable);
     }
-    return state.exportHtmlTemplate.replace(
+    var template = state.exportHtmlTemplate;
+    if (!/\bdata-alc-export-snapshot=/.test(template)) {
+      template = template.replace(
+        /<body\b/i, '<body data-alc-export-snapshot="true"'
+      );
+    }
+    return template.replace(
       /<script[^>]*class=["']alc-render-reader-(?:chunk|resource)["'][^>]*>[\s\S]*?<\/script>/gi,
       ""
     ).replace(pattern, function (_match, open, close) {
@@ -13100,6 +13411,10 @@
       var peerEntryId = glossaryEntryId(peer);
       if (!peerEntryId || peerEntryId === draft.entryId ||
         typeof peer.definition !== "string") continue;
+      if (glossaryDefinitionHasForbiddenControl(peer.definition)) {
+        skipped += 1;
+        continue;
+      }
       var definitionMentions = glossaryDefinitionMentionRanges(
         peer.definition, previousSurface
       );

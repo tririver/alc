@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
-from html import escape
+from html import escape, unescape
 from html.parser import HTMLParser
 from importlib.resources import files
 import json
@@ -33,6 +33,7 @@ from .contracts import (
     publication_to_document,
     source_identity_to_document,
 )
+from .delivery_ledger import DeliveryLedgerError, delivery_ledger_from_profile
 from .glossary import (
     GLOSSARY_MENTIONS_SCHEMA,
     GLOSSARY_REVISION_DIRECTORY,
@@ -48,7 +49,12 @@ from .glossary import (
     resolve_glossary_revisions,
     validate_glossary_revision,
 )
-from .markdown import extract_markdown_citation_ids, read_fragment_revision
+from .markdown import (
+    block_text_to_markdown,
+    extract_markdown_citation_ids,
+    read_fragment_revision,
+)
+from ._io import atomic_write_bytes
 from .resolver import (
     RevisionDiagnostic,
     resolve_fragment_revision_files,
@@ -96,6 +102,10 @@ _SOURCE_NOTE_TRANSLATION_SCHEMA = "alc.render.source_note_translation.v1"
 
 class HTMLRenderError(RuntimeError):
     """A publication cannot be rendered as a verified standalone HTML file."""
+
+
+class InteractiveReaderAdmissionError(HTMLRenderError):
+    """Only optional interactive Reader admission may use source-only delivery."""
 
 
 @dataclass(frozen=True)
@@ -184,6 +194,7 @@ def render_publication_html(
         publication = read_publication(source_path)
     except RenderWorkspaceError as exc:
         raise HTMLRenderError(str(exc)) from exc
+    _validate_delivery_ledger(publication)
     return render_html(
         publication,
         output_path,
@@ -202,6 +213,7 @@ def read_publication_workspace_state(
         publication = read_publication(source_path)
     except RenderWorkspaceError as exc:
         raise HTMLRenderError(str(exc)) from exc
+    _validate_delivery_ledger(publication)
     base_revisions, _base_selected, _base_diagnostics = _load_revisions(
         publication, source_path.parent
     )
@@ -245,10 +257,16 @@ def render_html(
 
     if not isinstance(publication, Publication):
         raise TypeError("publication must be a Publication")
+    _validate_delivery_ledger(publication)
     root = Path(project_root).resolve()
     if not root.is_dir():
         raise HTMLRenderError(f"publication project root is missing: {root}")
     output = Path(output_path).resolve()
+    resources = _embedded_resources(
+        publication,
+        root=root,
+        asset_loader=asset_loader,
+    )
     base_revisions, _base_selected, _base_diagnostics = _load_revisions(
         publication, root
     )
@@ -259,10 +277,10 @@ def render_html(
         publication, root, additional_paths=batch_paths
     )
     _validate_selected(publication, selected)
-    resources = _embedded_resources(
+    final_ledger = _standard_delivery_ledger(
         publication,
-        root=root,
-        asset_loader=asset_loader,
+        selected=selected,
+        resources=resources,
     )
     payload = _reader_payload(
         publication,
@@ -274,6 +292,7 @@ def render_html(
             item.semantic_digest for item in selected_glossary
         ),
         diagnostics=diagnostics + glossary_diagnostics,
+        delivery_ledger=final_ledger,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -281,15 +300,19 @@ def render_html(
     ) as raw:
         bundle = Path(raw)
         assets = bundle / "assets"
-        _copy_web_assets(assets)
-        index = bundle / "index.html"
-        index.write_text(_html_shell(publication, payload), encoding="utf-8")
         try:
+            _copy_web_assets(assets)
+            index = bundle / "index.html"
+            index.write_text(_html_shell(publication, payload), encoding="utf-8")
             write_standalone_html(index, output)
-        except StandaloneHtmlError as exc:
-            raise HTMLRenderError(str(exc)) from exc
+        except (OSError, StandaloneHtmlError) as exc:
+            raise InteractiveReaderAdmissionError(
+                "interactive Reader shell could not be admitted"
+            ) from exc
+    if final_ledger is not None:
+        _write_final_delivery_ledger(output, final_ledger)
     validate_standalone_html(publication, output)
-    warnings = tuple(
+    warnings = _glossary_content_warnings(publication) + tuple(
         _diagnostic_text(item)
         for item in (*diagnostics, *glossary_diagnostics)
     )
@@ -319,7 +342,472 @@ def validate_publication_workspace(
         root=Path(publication_path).resolve().parent,
         asset_loader=asset_loader,
     )
-    return tuple(_diagnostic_text(item) for item in state.diagnostics)
+    return _glossary_content_warnings(state.publication) + tuple(
+        _diagnostic_text(item) for item in state.diagnostics
+    )
+
+
+def render_source_only_html(
+    publication: Publication,
+    output_path: str | Path,
+) -> RenderedHTML:
+    """Emit the bounded static fallback when optional Reader admission fails."""
+
+    if not isinstance(publication, Publication):
+        raise TypeError("publication must be a Publication")
+    _validate_delivery_ledger(publication)
+    output = Path(output_path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    profile = publication.reader_profile
+    title = str(
+        profile.get("title")
+        or publication.labels.get("untitled_document")
+        or _source_title(publication.source_document)
+        or "Untitled document"
+    )
+    language = str(profile.get("source_language") or "und")
+    source_blocks = _source_only_blocks(publication)
+    source_markup = "\n".join(
+        "<section class=\"alc-source-only-block\" "
+        f"data-alc-source-block-id=\"{escape(item['block_id'], quote=True)}\" "
+        f"data-alc-source-block-sha256=\"{item['content_sha256']}\">"
+        f"<pre>{escape(item['markdown'])}</pre></section>"
+        for item in source_blocks
+    )
+    encoded_source_manifest = escape(
+        json.dumps(
+            [
+                {
+                    "block_id": item["block_id"],
+                    "ordinal": item["ordinal"],
+                    "content_sha256": item["content_sha256"],
+                }
+                for item in source_blocks
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    ledger = _source_only_delivery_ledger(publication)
+    encoded_ledger = escape(
+        json.dumps(
+            ledger, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    )
+    document = f"""<!doctype html>
+<html lang=\"{escape(language, quote=True)}\">
+<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<title>{escape(title)}</title></head>
+<body data-alc-source-only=\"true\" data-delivery-grade=\"{ledger['delivery_grade']}\"><main>
+<h1>{escape(title)}</h1><p role=\"status\">Source-only Reader: interactive overlays are unavailable; every source unit is preserved below.</p>
+{source_markup}</main><template id=\"alc-delivery-ledger\">{encoded_ledger}</template><template id=\"alc-source-manifest\">{encoded_source_manifest}</template></body></html>"""
+    atomic_write_bytes(output, document.encode("utf-8"))
+    _write_final_delivery_ledger(output, ledger)
+    validate_source_only_html(publication, output)
+    return RenderedHTML(
+        publication_digest=publication.publication_digest,
+        html_path=output,
+        selected_revision_digests=(),
+        warnings=("Reader rendered as a source-only static fallback.",),
+    )
+
+
+def validate_source_only_html(
+    publication: Publication, html_path: str | Path
+) -> None:
+    _validate_delivery_ledger(publication)
+    try:
+        value = Path(html_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise HTMLRenderError("source-only Reader is unreadable") from exc
+    if 'data-alc-source-only="true"' not in value or "<script" in value.lower():
+        raise HTMLRenderError("source-only Reader is not a static safe fallback")
+    ledger = _source_only_html_ledger(
+        value, source_unit_count=len(publication.source_document.blocks)
+    )
+    if ledger != _source_only_delivery_ledger(publication):
+        raise HTMLRenderError("source-only Reader delivery ledger is not canonical")
+    _validate_final_delivery_ledger_file(html_path, ledger)
+    if ledger["delivery_grade"] != "source_only" or (
+        'data-delivery-grade="source_only"' not in value
+    ):
+        raise HTMLRenderError("source-only Reader delivery grade is inconsistent")
+    _validate_source_only_blocks(publication, value)
+
+
+def _validate_delivery_ledger(publication: Publication) -> None:
+    try:
+        delivery_ledger_from_profile(
+            publication.reader_profile,
+            source_unit_count=len(publication.source_document.blocks),
+        )
+    except DeliveryLedgerError as exc:
+        raise HTMLRenderError(str(exc)) from exc
+
+
+def _source_only_delivery_ledger(publication: Publication) -> dict[str, Any]:
+    base = delivery_ledger_from_profile(
+        publication.reader_profile,
+        source_unit_count=len(publication.source_document.blocks),
+    )
+    if base is None:
+        base = {
+            "schema_version": "alc.companion.delivery_ledger.v1",
+            "delivery_grade": "complete",
+            "stages": [
+                {
+                    "stage": "source",
+                    "status": "complete",
+                    "expected": len(publication.source_document.blocks),
+                    "produced": len(publication.source_document.blocks),
+                    "accounted": len(publication.source_document.blocks),
+                },
+                *[
+                    {
+                        "stage": stage,
+                        "status": "skipped",
+                        "expected": 0,
+                        "produced": 0,
+                        "accounted": 0,
+                    }
+                    for stage in (
+                        "translation",
+                        "guides",
+                        "glossary",
+                        "editorial",
+                        "resources",
+                        "render",
+                    )
+                ],
+            ],
+            "issues": [],
+            "unaccounted_source_units": 0,
+        }
+    ledger = json.loads(json.dumps(base, ensure_ascii=False))
+    for stage in ledger["stages"]:
+        if stage["stage"] == "source":
+            stage["status"] = "source_only"
+        elif stage["stage"] != "render" and stage["status"] != "skipped":
+            previously_produced = stage["produced"]
+            if stage["expected"] == 0:
+                stage["status"] = "skipped"
+            else:
+                stage["status"] = "source_only"
+                stage["produced"] = 0
+                if previously_produced > 0:
+                    ledger["issues"].append(
+                        {
+                            "issue_id": (
+                                f"render-source-only-{stage['stage']}"
+                            ),
+                            "category": (
+                                f"{stage['stage'].removesuffix('s')}_source_only"
+                            ),
+                            "scope": stage["stage"],
+                            "fallback": "static_source_only",
+                            "affected_count": previously_produced,
+                            "source_preserved": True,
+                            "retry": "not_semantic_retry",
+                            "evidence": "interactive Reader admission failed",
+                        }
+                    )
+    render = next(
+        (item for item in ledger["stages"] if item["stage"] == "render"),
+        None,
+    )
+    if render is None:
+        ledger["stages"].append(
+            {
+                "stage": "render",
+                "status": "source_only",
+                "expected": 1,
+                "produced": 1,
+                "accounted": 1,
+            }
+        )
+    else:
+        render.update(status="source_only", expected=1, produced=1, accounted=1)
+    ledger["issues"] = [
+        item
+        for item in ledger["issues"]
+        if item.get("issue_id") != "render-source-only"
+    ]
+    ledger["issues"].append(
+        {
+            "issue_id": "render-source-only",
+            "category": "render_source_only",
+            "scope": "reader",
+            "fallback": "static_source_only",
+            "affected_count": 1,
+            "source_preserved": True,
+            "retry": "not_semantic_retry",
+            "evidence": "interactive Reader admission failed",
+        }
+    )
+    ledger["delivery_grade"] = "source_only"
+    try:
+        return delivery_ledger_from_profile(
+            {"delivery_ledger": ledger},
+            source_unit_count=len(publication.source_document.blocks),
+        ) or {}
+    except DeliveryLedgerError as exc:
+        raise HTMLRenderError("source-only delivery ledger is invalid") from exc
+
+
+def _standard_delivery_ledger(
+    publication: Publication,
+    *,
+    selected: Sequence[FragmentRevision],
+    resources: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    base = delivery_ledger_from_profile(
+        publication.reader_profile,
+        source_unit_count=len(publication.source_document.blocks),
+    )
+    if base is None:
+        return None
+    ledger = json.loads(json.dumps(base, ensure_ascii=False))
+    selected_guides = {
+        str(item.provenance["chapter_id"])
+        for item in selected
+        if item.role in {"guide", "companion"}
+        and isinstance(item.provenance.get("chapter_id"), str)
+    }
+    produced = {
+        "source": len(publication.source_document.blocks),
+        "translation": sum(item.role == "translation" for item in selected),
+        "guides": len(selected_guides),
+        "glossary": len(publication.glossary),
+        "editorial": int(
+            isinstance(publication.reader_profile.get("editorial_review"), Mapping)
+        ),
+        "resources": len(resources),
+        "render": 1,
+    }
+    for stage in ledger["stages"]:
+        name = stage["stage"]
+        if name == "render":
+            stage.update(status="complete", expected=1, produced=1, accounted=1)
+            continue
+        actual = produced[name]
+        stage["produced"] = actual
+        if stage["expected"] == 0:
+            stage["status"] = "skipped"
+        elif actual == stage["expected"]:
+            stage["status"] = (
+                "degraded"
+                if any(
+                    _delivery_issue_stage(item["category"]) == name
+                    for item in ledger["issues"]
+                )
+                else "complete"
+            )
+        else:
+            stage["status"] = "degraded"
+    ledger["delivery_grade"] = (
+        "degraded"
+        if ledger["issues"] or any(
+            item["status"] == "degraded" for item in ledger["stages"]
+        )
+        else "complete"
+    )
+    try:
+        return delivery_ledger_from_profile(
+            {"delivery_ledger": ledger},
+            source_unit_count=len(publication.source_document.blocks),
+        )
+    except DeliveryLedgerError as exc:
+        raise HTMLRenderError("standard Reader delivery ledger is invalid") from exc
+
+
+def _final_delivery_ledger_path(html_path: str | Path) -> Path:
+    path = Path(html_path)
+    return path.with_name(path.stem + ".delivery-ledger.json")
+
+
+def _write_final_delivery_ledger(
+    html_path: str | Path, ledger: Mapping[str, Any]
+) -> None:
+    atomic_write_bytes(
+        _final_delivery_ledger_path(html_path),
+        (json.dumps(ledger, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
+    )
+
+
+def _validate_final_delivery_ledger_file(
+    html_path: str | Path, ledger: Mapping[str, Any]
+) -> None:
+    path = _final_delivery_ledger_path(html_path)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise HTMLRenderError("final delivery ledger report is unreadable") from exc
+    if value != ledger:
+        raise HTMLRenderError("final delivery ledger report is inconsistent")
+
+
+def _validate_standard_final_delivery_ledger(
+    publication: Publication,
+    payload: Mapping[str, Any],
+    *,
+    selected: Sequence[FragmentRevision],
+    html_path: Path,
+) -> None:
+    expected = _standard_delivery_ledger(
+        publication,
+        selected=selected,
+        resources=payload.get("resources")
+        if isinstance(payload.get("resources"), Sequence)
+        else (),
+    )
+    actual = payload.get("delivery_ledger")
+    if expected is None:
+        if actual is not None:
+            raise HTMLRenderError("standalone HTML has an unexpected delivery ledger")
+        return
+    if actual != expected:
+        raise HTMLRenderError("standalone HTML final delivery ledger is inconsistent")
+    _validate_final_delivery_ledger_file(html_path, expected)
+
+
+def _delivery_issue_stage(category: str) -> str | None:
+    if category.startswith("translation_"):
+        return "translation"
+    if category.startswith("guide_"):
+        return "guides"
+    if category.startswith("glossary_"):
+        return "glossary"
+    if category.startswith("editorial_"):
+        return "editorial"
+    if category.startswith("resource_"):
+        return "resources"
+    if category.startswith("render_"):
+        return "render"
+    return None
+
+
+def _source_only_html_ledger(
+    value: str, *, source_unit_count: int
+) -> dict[str, Any]:
+    try:
+        raw = _source_only_template_json(value, "alc-delivery-ledger")
+        if not isinstance(raw, Mapping):
+            raise TypeError
+        return delivery_ledger_from_profile(
+            {"delivery_ledger": raw}, source_unit_count=source_unit_count
+        ) or {}
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTMLRenderError("source-only Reader delivery ledger is invalid") from exc
+
+
+def _source_only_template_json(value: str, identifier: str) -> Any:
+    match = re.search(
+        rf'<template id="{re.escape(identifier)}">(?P<value>.*?)</template>',
+        value,
+        re.DOTALL,
+    )
+    if match is None:
+        raise HTMLRenderError(f"source-only Reader has no {identifier}")
+    try:
+        return json.loads(unescape(match.group("value")))
+    except json.JSONDecodeError as exc:
+        raise HTMLRenderError(f"source-only Reader {identifier} is invalid") from exc
+
+
+def _source_only_markdown(block: Any) -> str:
+    payload = block.payload
+    if block.kind is RichBlockKind.LIST:
+        text = "\n".join(str(item.get("text", "")) for item in payload["items"])
+    elif block.kind is RichBlockKind.TABLE:
+        text = "\n".join(
+            " | ".join(str(cell) for cell in row)
+            for row in (payload["headers"], *payload["rows"])
+        )
+    elif block.kind is RichBlockKind.FIGURE:
+        text = str(payload.get("caption") or payload.get("alt_text") or "[Figure]")
+    elif block.kind is RichBlockKind.EQUATION:
+        text = str(payload.get("tex") or payload.get("text") or "")
+    else:
+        text = str(payload.get("text") or "")
+    return block_text_to_markdown(block, text).rstrip()
+
+
+def _source_only_blocks(publication: Publication) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    for block in publication.source_document.blocks:
+        markdown = _source_only_markdown(block)
+        values.append(
+            {
+                "block_id": block.block_id,
+                "ordinal": block.ordinal,
+                "markdown": markdown,
+                "content_sha256": hashlib.sha256(
+                    markdown.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    return values
+
+
+def _validate_source_only_blocks(publication: Publication, value: str) -> None:
+    manifest = _source_only_template_json(value, "alc-source-manifest")
+    expected = _source_only_blocks(publication)
+    expected_manifest = [
+        {
+            "block_id": item["block_id"],
+            "ordinal": item["ordinal"],
+            "content_sha256": item["content_sha256"],
+        }
+        for item in expected
+    ]
+    if manifest != expected_manifest:
+        raise HTMLRenderError("source-only Reader source manifest is invalid")
+    matches = list(
+        re.finditer(
+            r'<section class="alc-source-only-block" '
+            r'data-alc-source-block-id="(?P<id>[^"]*)" '
+            r'data-alc-source-block-sha256="(?P<digest>[0-9a-f]{64})">'
+            r"<pre>(?P<markdown>.*?)</pre></section>",
+            value,
+            re.DOTALL,
+        )
+    )
+    if len(matches) != len(expected):
+        raise HTMLRenderError("source-only Reader source block count is invalid")
+    for expected_block, match in zip(expected, matches, strict=True):
+        markdown = unescape(match.group("markdown"))
+        if (
+            unescape(match.group("id")) != expected_block["block_id"]
+            or match.group("digest") != expected_block["content_sha256"]
+            or hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+            != expected_block["content_sha256"]
+        ):
+            raise HTMLRenderError("source-only Reader source block is invalid")
+
+
+def _glossary_content_warnings(publication: Publication) -> tuple[str, ...]:
+    count = sum(
+        isinstance(entry.get("definition"), str)
+        and _has_forbidden_glossary_control(entry["definition"])
+        for entry in publication.glossary
+    )
+    if not count:
+        return ()
+    noun = "entry" if count == 1 else "entries"
+    verb = "contains" if count == 1 else "contain"
+    return (
+        f"{count} glossary {noun} {verb} disallowed control characters; "
+        "the Reader will recover usable definition content per entry",
+    )
+
+
+def _has_forbidden_glossary_control(value: str) -> bool:
+    return any(
+        (ord(character) < 0x20 and character not in {"\t", "\n", "\r"})
+        or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    )
 
 
 def validate_standalone_html(
@@ -335,6 +823,7 @@ def validate_standalone_html(
     without changing the immutable publication identity.
     """
 
+    _validate_delivery_ledger(publication)
     expected_selected = _expected_selected_revision_digests(
         expected_selected_revision_digests
     )
@@ -1167,6 +1656,10 @@ def _resource_declarations(
     for asset in publication.source_document.assets:
         source_digests.add(asset.artifact_digest)
         raw = declared.get(asset.artifact_digest, {})
+        if not raw and _source_asset_is_explicitly_unavailable(
+            publication, asset.logical_name
+        ):
+            continue
         for field, expected in (
             ("media_type", asset.media_type),
             ("logical_name", asset.logical_name),
@@ -1218,6 +1711,24 @@ def _resource_declarations(
     if len(logical_names) != len(set(logical_names)):
         raise HTMLRenderError("publication resource logical names must be unique")
     return tuple(values)
+
+
+def _source_asset_is_explicitly_unavailable(
+    publication: Publication, logical_name: str
+) -> bool:
+    ledger = delivery_ledger_from_profile(
+        publication.reader_profile,
+        source_unit_count=len(publication.source_document.blocks),
+    )
+    return bool(
+        ledger
+        and any(
+            item["category"] == "resource_unavailable"
+            and item["scope"] == logical_name
+            and item["fallback"] == "source_placeholder"
+            for item in ledger["issues"]
+        )
+    )
 
 
 def _source_note_records(document: RichDocument) -> Mapping[str, Mapping[str, Any]]:
@@ -1310,6 +1821,7 @@ def _reader_payload(
     selected_glossary_revision_digests: Sequence[str],
     resources: Sequence[Mapping[str, Any]],
     diagnostics: Sequence[RevisionDiagnostic],
+    delivery_ledger: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     _validate_source_note_translations(publication.source_document, revisions)
     entry_counts: dict[str, int] = defaultdict(int)
@@ -1365,6 +1877,11 @@ def _reader_payload(
         "glossary_base_digests": glossary_base_digests,
         "resources": list(resources),
         "diagnostics": [_diagnostic_text(item) for item in diagnostics],
+        **(
+            {"delivery_ledger": dict(delivery_ledger)}
+            if delivery_ledger is not None
+            else {}
+        ),
     }
 
 

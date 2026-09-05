@@ -106,6 +106,23 @@ translated term is invalid. Definitions support CommonMark and KaTeX with raw
 HTML disabled. Entries that contain finite non-integer JSON numbers remain
 readable but are browser read-only because Python and JavaScript do not share a
 canonical float spelling.
+The KaTeX candidate normalizer converts safe printable LaTeXML
+`\\unicode{xHEX}` code points into bounded `\\text{…}` input before declaring a
+visible math error. Existing publications whose translated-term field contains
+legacy inline-math delimiters receive a render-only inline recovery in the
+glossary and tooltip; newly generated data still treats translated terms as
+plain text.
+Legacy or externally composed definitions containing disallowed control
+characters are isolated to their glossary row. The Reader removes bounded ANSI
+SGR style sequences, reconstructs a truncated Unicode escape when deterministic,
+removes stray separator controls, marks only irrecoverable symbols with `?`,
+and keeps the recoverable definition readable, speakable, and exportable. Such
+legacy entries remain read-only.
+Term hover/focus tooltips use the same safe CommonMark and KaTeX definition
+renderer as the glossary table while keeping source and conforming translated
+labels as plain text. When a translated-term edit propagates through the Reader, legacy
+definitions with forbidden controls are left unchanged and skipped before
+Markdown parsing, so they cannot block a healthy initiating revision.
 
 Changing a translated term updates associated `translation`, `companion`, and
 `guide` Fragments. It also updates exact occurrences in the definitions of
@@ -121,6 +138,18 @@ Definition-only edits create no propagation batch. `edition_digest` remains
 Fragment-only for compatibility with `alc-companion`.
 
 ## Reader
+
+When a publication supplies `alc.companion.delivery_ledger.v1`, render and
+workspace validation reject unaccounted source units, report/profile mismatch,
+and any `complete` grade that hides a fallback. A visible Reader keeps the full
+machine ledger while presenting one keyboard-accessible floating `Quality
+status` panel. The panel can be dismissed for the current page and is excluded
+from print and browser-exported HTML; the machine ledger remains embedded. It
+does not repeat prose badges after affected blocks; source-text fallback uses
+only a subtle target-lane edge so it remains distinguishable without
+interrupting reading. If the normal optional Reader shell cannot
+be admitted, `alc-render` can emit a separate static no-JavaScript source-only
+Reader rather than silently dropping source content.
 
 The standalone Reader progressively renders large publications and completes
 all remaining chunks before print. Source and translation are parallel on wide
@@ -229,6 +258,9 @@ while its translated caption remains in the authored caption position. A
 caption-only historical Table translation still receives the authoritative
 source Table geometry instead of dropping the Table; shared caption typography,
 margin, and lane padding keep equivalent source/translation Tables aligned.
+For an older source without presentation metadata, the Reader infers only the
+direct caption-before-Table DOM relationship and applies the same height
+alignment; it does not infer semantic caption placement from text.
 Current translation producers use this caption-only Table surface directly, so
 raw pipe-delimited cell text is never rendered a second time above the mirrored
 Table.
@@ -238,8 +270,11 @@ operator breakpoints are enabled for long display equations, with horizontal
 overflow retained as the lossless fallback. A bounded semantic macro registry
 maps supported source macros such as AASTeX `\\arcdeg` to their equivalent
 KaTeX form without rewriting the stored source TeX; unknown macros still follow
-the existing visible error fallback. Content links use a distinct accessible
-link color; glossary terms keep their separate glossary affordance.
+the existing visible error fallback. LaTeXML line-breaking hints, redundant
+default-black RGB declarations, and empty array position options receive the
+same bounded defensive normalization for older RichDocuments. Content links
+use a distinct accessible link color; glossary terms keep their separate
+glossary affordance.
 
 Figure blocks with validated manifest panels render every available panel in
 authored order, including compound object/image Figures; parent navigation

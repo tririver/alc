@@ -974,6 +974,70 @@ html:lang(zh) .alc-export-panel .alc-export-action { width: 8rem; }
 .alc-book-header > .alc-translated-title .alc-fragment-meta {
   display: none;
 }
+.alc-delivery-summary {
+  position: fixed;
+  z-index: 35;
+  inset-block-start: 4.75rem;
+  inset-inline-end: 1rem;
+  width: min(22rem, calc(100vw - 2rem));
+  max-height: min(28rem, calc(100dvh - 6rem));
+  overflow: auto;
+  padding: .7rem .8rem;
+  border: 1px solid var(--alc-line);
+  border-radius: .55rem;
+  background: var(--alc-source);
+  box-shadow: 0 .55rem 1.8rem rgb(23 49 73 / 18%);
+  color: var(--alc-muted);
+  font: 500 .82rem/1.5 var(--alc-source-font);
+}
+.alc-delivery-summary[hidden] { display: none; }
+.alc-delivery-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .625rem;
+}
+.alc-delivery-summary-title {
+  margin: 0;
+  color: var(--alc-ink);
+  font: 650 .92rem/1.35 var(--alc-source-font);
+}
+.alc-delivery-summary-close {
+  display: grid;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  margin: -.5rem -.55rem -.5rem 0;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--alc-muted);
+  cursor: pointer;
+}
+.alc-delivery-summary-close:hover,
+.alc-delivery-summary-close:focus-visible {
+  background: color-mix(in srgb, var(--alc-link) 10%, transparent);
+  color: var(--alc-ink);
+}
+.alc-delivery-summary-close svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+.alc-delivery-summary > p { margin: .35rem 0 0; }
+.alc-delivery-summary-list {
+  margin: .35rem 0 0;
+  padding-inline-start: 1.2rem;
+}
+.alc-source-text-fallback [data-role="translation"] {
+  box-shadow: inset 2px 0 color-mix(in srgb, var(--alc-link) 42%, transparent);
+}
 .alc-book-header
   > .alc-translated-title.is-inline-editing
   .alc-fragment-meta {
@@ -2053,8 +2117,21 @@ img.alc-markdown-image {
   box-shadow: 0 .35rem 1.2rem rgb(23 49 73 / 18%);
   font-size: .88rem;
   line-height: 1.45;
-  white-space: pre-wrap;
+  white-space: normal;
   pointer-events: none;
+}
+.alc-tooltip-entry + .alc-tooltip-entry {
+  margin-top: .55rem;
+  padding-top: .55rem;
+  border-top: 1px solid #d4e0ea;
+}
+.alc-tooltip-line { white-space: pre-wrap; }
+.alc-tooltip-definition { margin-top: .18rem; }
+.alc-tooltip-definition > .alc-glossary-definition-markdown {
+  margin-top: .12rem;
+}
+.alc-tooltip-definition .alc-glossary-definition-markdown p {
+  margin-block: 0;
 }
 
 .alc-appendix {
@@ -2589,6 +2666,12 @@ body[data-alc-reader-edit-activation="double"]
 }
 
 @media (max-width: 899px) {
+  .alc-delivery-summary {
+    inset-block-start: 4.25rem;
+    inset-inline: .5rem;
+    width: auto;
+    max-height: min(22rem, calc(100dvh - 5rem));
+  }
   .alc-shell, .alc-shell.contents-collapsed { display: block; }
   .alc-contents {
     position: fixed;
@@ -2803,7 +2886,8 @@ body[data-alc-reader-edit-activation="double"]
   .alc-inline-actions,
   .alc-glossary-inline-header,
   .alc-dialog,
-  .alc-diagnostic { display: none !important; }
+  .alc-diagnostic,
+  .alc-delivery-summary { display: none !important; }
   .alc-glossary-inline-input,
   .alc-glossary-inline-definition { display: none !important; }
   .alc-glossary-saved-value { display: block !important; }
