@@ -57,10 +57,22 @@ def test_package_set_metadata_and_dependency_graph() -> None:
                 assert int(ac_range[2]) == int(ac_range[1]) + 1
 
 
-def test_companion_requires_html_source_export_floor() -> None:
-    assert "ac-document>=2.0.4,<3" in _project("alc-companion")[
-        "dependencies"
-    ]
+def test_packages_require_reliability_foundation_floors() -> None:
+    expected = {
+        "alc-companion": {
+            "ac-llm>=2.0.5,<3",
+            "ac-document>=2.0.5,<3",
+            "ac-proposer-reviewer>=2.0.5,<3",
+        },
+        "alc-ocr-proofread": {"ac-llm>=2.0.5,<3"},
+        "alc-render": {"ac-document>=2.0.5,<3"},
+        "alc-translate": {
+            "ac-llm>=2.0.5,<3",
+            "ac-document>=2.0.5,<3",
+        },
+    }
+    for package, dependencies in expected.items():
+        assert dependencies.issubset(_project(package)["dependencies"])
 
 
 def test_learning_packages_have_no_arc_code_dependency() -> None:
@@ -151,6 +163,9 @@ def test_runtime_source_lock_uses_full_shas() -> None:
 def test_generated_foundation_copies_match_manifest() -> None:
     manifest = json.loads((SCRIPTS / "generated-sources.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "ac.generated_sources.v1"
+    lock = json.loads((SCRIPTS / "runtime-sources.json").read_text(encoding="utf-8"))
+    foundation = next(source for source in lock["sources"] if source["id"] == "foundation")
+    assert manifest["foundation_commit"] == foundation["commit"]
     for relative, metadata in manifest["files"].items():
         path = (SCRIPTS / relative).resolve()
         assert hashlib.sha256(path.read_bytes()).hexdigest() == metadata["sha256"]

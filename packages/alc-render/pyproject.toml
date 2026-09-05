@@ -11,7 +11,7 @@ license = "MIT"
 authors = [{ name = "ALC" }]
 requires-python = ">=3.11"
 dependencies = [
-  "ac-document>=2,<3",
+  "ac-document>=2.0.5,<3",
   "Pillow>=10.1,<13",
 ]
 classifiers = [
