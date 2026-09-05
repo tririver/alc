@@ -88,6 +88,12 @@ size is `data.result.approx_count`, and its content identity is
 count is approximate and deduplicated underfill is accepted. Each entry's
 `matched_sentences` are literal source search hits for disambiguation, never
 definitions or explanations.
+Generated glossary content containing disallowed control characters is retried
+once. If the retry remains invalid, bounded ANSI SGR style sequences are removed
+and deterministically truncated Unicode code points are reconstructed before
+validation runs again. Only entries whose remaining content is unsafe or empty
+are omitted; recovered and valid entries plus the remaining translation
+workflow continue.
 
 ### 3. Translate and Inspect All Blocks
 
@@ -157,18 +163,41 @@ the exact ResumeInput JSON object or a file containing it. Completed and
 verified work is reused within the same run lineage.
 
 For model-correctable machine-output failures—changed term or block identities,
-missing coverage, or damaged formula, link, language, or review identity—ALC
-makes one fresh complete generation attempt with validation feedback. If the
-fresh result remains unusable, the step pauses with both attempts and an
-editable candidate; it never makes a third automatic attempt. Completed
-windows are reused, and an invalid review cannot replace its valid pre-review
-translation.
+missing coverage, or damaged language or review content—ALC makes one fresh
+generation attempt with exact bounded validation feedback. New translation and
+review calls return only input-dependent text-slot objects. Formulae, links,
+citations, bibliography labels, and code remain caller-owned and are
+deterministically reinserted; the model cannot omit or rewrite their IDs.
+Every source slot containing a Unicode letter or number must retain semantic
+content in that slot. A valid neighboring slot cannot hide a local omission;
+punctuation-only slots remain optional. Captionless tables and figures without
+language-bearing captions are retained programmatically, while source notes
+anchored to their cells or headers remain translatable.
+Historical protected-atom results retain their explicit compatibility path.
+Retries are scoped to invalid or missing blocks and retain valid first-response
+neighbors.
+If the scoped retry remains unusable, only the still-invalid units use source
+fallback. Completed windows are reused, and an invalid review cannot replace
+its valid pre-review translation.
+Accepted review output binds its fallback and provider evidence in the same
+immutable envelope, so an interrupted replay preserves the original audit
+classification.
+This boundary also validates assembled Markdown. An unclosed display-math
+delimiter or environment is retried as a model-output defect and then falls
+back only for that unit; it must not reach Companion as a whole-chapter parse
+failure. Touching inline formula delimiters are disambiguated locally without
+changing the caller-owned formula payload.
 
-Provider or authority failures, prerequisite binding errors, input-budget
-limits, and corrupt durable artifacts follow their typed paths and do not
-consume this semantic retry. Translation quality, scientific judgment, style,
-and other debatable choices belong to review; do not classify them as
-machine-invalid output.
+Exhausted provider transport, timeout, quota, rate-limit, unavailability, and
+open-circuit outcomes preserve the affected source window while retaining
+earlier accepted translations. The next window still runs; any successful
+window resets the failure streak. Only two consecutive failed windows preserve
+all remaining model-dependent windows. The workflow records a sanitized
+provider fallback diagnostic with provider/model, category/detail, window,
+streak, and remaining skipped-window count. Authentication, host authority,
+invalid request/schema, prerequisite binding, input-budget, explicit stop, and
+corrupt durable state keep their typed stopping paths. Translation quality,
+scientific judgment, style, and other debatable choices belong to review.
 
 Use the same project directory for every step. Durable translation state lives
 only below `<project-dir>/.alc/translate/`. Without `--document-cache-root`, document

@@ -14,6 +14,28 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from ac_document import (
+    AcDocumentService,
+    CachedDocumentError,
+    CachedDocumentStructureRef,
+    DocumentStructureCache,
+    EquationLabelReviewService,
+    PdftoppmFullPageRenderer,
+    RichBlock,
+    RichBlockKind,
+    RichDocument,
+    SourceFormat,
+    SourceOrigin,
+    SourceOriginKind,
+    SourceRepositoryError,
+    apply_visual_equation_labels,
+    cached_document_ref_to_document,
+    cached_document_structure_ref_to_document,
+    detect_suspicious_equation_labels,
+    literal_term_occurs,
+    rich_document_from_document,
+    rich_document_to_document,
+)
 from ac_jobs import (
     ArtifactRef,
     ArtifactSourceRef,
@@ -37,43 +59,25 @@ from ac_llm import (
     LLMRequest,
     LLMTaskService,
 )
-from ac_document import (
-    AcDocumentService,
-    CachedDocumentError,
-    CachedDocumentStructureRef,
-    DocumentStructureCache,
-    EquationLabelReviewService,
-    PdftoppmFullPageRenderer,
-    RichBlock,
-    RichBlockKind,
-    RichDocument,
-    SourceFormat,
-    SourceOrigin,
-    SourceOriginKind,
-    SourceRepositoryError,
-    apply_visual_equation_labels,
-    detect_suspicious_equation_labels,
-    literal_term_occurs,
-    cached_document_ref_to_document,
-    cached_document_structure_ref_to_document,
-    rich_document_from_document,
-    rich_document_to_document,
-)
 from ac_proposer_reviewer import (
+    BATCH_SCHEMA_VERSION,
     BatchFailurePolicy,
     BatchRequest,
-    ExecutionOptions as ProposerReviewerExecutionOptions,
     LoopSpec,
     ProposerFailurePolicy,
     ProposerReviewerService,
     RevisionContextMode,
     WorkerSpec,
+    decode_batch_result,
 )
-from ac_proposer_reviewer import BATCH_SCHEMA_VERSION, decode_batch_result
+from ac_proposer_reviewer import (
+    ExecutionOptions as ProposerReviewerExecutionOptions,
+)
 from alc_render import (
     HTMLRenderError,
     Publication,
     render_publication_html,
+    render_source_only_html,
     write_publication,
 )
 
@@ -127,13 +131,13 @@ from .prompts import (
     editorial_proposer_instructions,
     editorial_reviewer_instructions,
 )
-from .reader_labels import ReaderLabelError, resolve_reader_labels
-from .rich_text import RichTextError
 from .publication import (
     CompanionPublicationError,
     build_result_document,
     publish_companion,
+    publish_provider_source_only_companion,
 )
+from .reader_labels import ReaderLabelError, resolve_reader_labels
 from .request_contracts import (
     CompanionBuildRequest,
     CompanionExecutionOptions,
@@ -142,6 +146,8 @@ from .request_contracts import (
     freeze_generation_recipe,
     normalize_handler_semantic_input,
 )
+from .rich_text import RichTextError
+from .source_identity import resolve_document_identity
 from .source_planning import (
     SourceChapter,
     block_prompt_document,
@@ -149,7 +155,6 @@ from .source_planning import (
     plan_source_chapters,
     plan_structured_source_chapters,
 )
-from .source_identity import resolve_document_identity
 from .translation_adapter import (
     AlcTranslateAdapter,
     CompanionTranslationAdapter,
@@ -158,13 +163,14 @@ from .translation_results import (
     CompanionTranslationResultError,
     load_translation_selection,
 )
+
 COMPANION_BUILD_HANDLER = "alc.companion.build.v16"
 COMPANION_BUILD_DIAGNOSTICS_SCHEMA = "alc.companion.build_diagnostics.v1"
 _DIAGNOSTICS_ARTIFACT = "diagnostics/build"
 _EFFECTIVE_SOURCE_ARTIFACT = "source/effective"
 _MODEL_SOURCE_VIEW_ARTIFACT = "source/model-view"
 _MODEL_SOURCE_INDEX_ARTIFACT = "source/model-index"
-_MODEL_TRANSLATION_ROOT = "translation/chapters"
+_MODEL_TRANSLATION_ROOT = "translation/chapters-v2"
 _ORIGINAL_SOURCE_ARTIFACT = "source/original"
 _AUTHOR_IDENTITY_ARTIFACT = "identity/authors"
 _PROGRESS_PLAN_ARTIFACT = "diagnostics/progress-plan"
@@ -176,6 +182,48 @@ _EDITORIAL_VIEW_ARTIFACT = "editorial/full-text"
 _EDITORIAL_RESOLVED_ARTIFACT = "editorial/resolved-guides"
 _EDITORIAL_REPORT_ARTIFACT = "editorial/report"
 _EDITORIAL_SCOPE = "companion-editorial"
+_RECOVERABLE_GUIDE_REVIEWER_CODES = frozenset(
+    {
+        "duplicate_host_request_id",
+        "host_request_id_conflict",
+        "host_request_id_duplicate",
+        "output_invalid",
+        "reviewer_output_invalid",
+        "reviewer_semantic_audit_invalid",
+    }
+)
+_PROVIDER_SOURCE_ONLY_MARKERS = frozenset(
+    {
+        "provider_transport",
+        "transport",
+        "provider_timeout",
+        "timeout",
+        "provider_unavailable",
+        "unavailable",
+        "provider_quota",
+        "quota",
+        "provider_rate_limit",
+        "rate_limit",
+        "provider_crash_retry_exhausted",
+        "provider_circuit_open",
+    }
+)
+_PROVIDER_HARD_STOP_MARKERS = frozenset(
+    {
+        "provider_authentication",
+        "authentication",
+        "provider_invalid_request",
+        "invalid_request",
+        "invalid_schema",
+        "schema",
+        "local_io",
+        "local_io_error",
+        "permission_denied",
+        "host_authority_required",
+        "corrupt_state",
+        "stopped",
+    }
+)
 
 
 class CompanionBuildHandler:
@@ -290,6 +338,16 @@ class CompanionBuildHandler:
                 inputs=model_inputs,
             )
             if isinstance(authors_outcome, (Paused, Failed)):
+                source_only = self._provider_source_only(
+                    context,
+                    source,
+                    title=title,
+                    reader_labels=reader_labels,
+                    outcome=authors_outcome,
+                    stage="author_identity",
+                )
+                if source_only is not None:
+                    return source_only
                 return authors_outcome
             authors = authors_outcome
             blocks = {
@@ -304,10 +362,19 @@ class CompanionBuildHandler:
                 execution=self.llm_options,
                 resume_input=resume_input,
             )
-            if isinstance(language, Paused):
-                return language
-            if isinstance(language, RunError):
-                return Failed(language)
+            if isinstance(language, (Paused, RunError)):
+                source_only = self._provider_source_only(
+                    context,
+                    source,
+                    title=title,
+                    reader_labels=reader_labels,
+                    outcome=language,
+                    stage="language_detection",
+                    authors=authors,
+                )
+                if source_only is not None:
+                    return source_only
+                return language if isinstance(language, Paused) else Failed(language)
             language = mapping(language, "language result")
             translation_required = language.get("mode") == "enabled"
             if language.get("mode") not in {"enabled", "skipped"}:
@@ -341,10 +408,24 @@ class CompanionBuildHandler:
                     resume_input=resume_input,
                     **glossary_options,
                 )
-                if isinstance(glossary_outcome, Paused):
-                    return glossary_outcome
-                if isinstance(glossary_outcome, RunError):
-                    return Failed(glossary_outcome)
+                if isinstance(glossary_outcome, (Paused, RunError)):
+                    source_only = self._provider_source_only(
+                        context,
+                        source,
+                        title=title,
+                        reader_labels=reader_labels,
+                        outcome=glossary_outcome,
+                        stage="glossary",
+                        authors=authors,
+                        source_language=str(language["language_tag"]),
+                    )
+                    if source_only is not None:
+                        return source_only
+                    return (
+                        glossary_outcome
+                        if isinstance(glossary_outcome, Paused)
+                        else Failed(glossary_outcome)
+                    )
                 glossary = mapping(glossary_outcome, "glossary result")
                 _glossary_entries(glossary)
             else:
@@ -365,6 +446,18 @@ class CompanionBuildHandler:
                 model_inputs=document_inputs,
             )
             if isinstance(chapters_outcome, (Paused, Failed)):
+                source_only = self._provider_source_only(
+                    context,
+                    source,
+                    title=title,
+                    reader_labels=reader_labels,
+                    outcome=chapters_outcome,
+                    stage="chapters",
+                    authors=authors,
+                    source_language=str(language["language_tag"]),
+                )
+                if source_only is not None:
+                    return source_only
                 return chapters_outcome
 
             editorial_report = None
@@ -376,6 +469,18 @@ class CompanionBuildHandler:
                     source_inputs=document_inputs,
                 )
                 if isinstance(editorial_outcome, (Paused, Failed)):
+                    source_only = self._provider_source_only(
+                        context,
+                        source,
+                        title=title,
+                        reader_labels=reader_labels,
+                        outcome=editorial_outcome,
+                        stage="editorial",
+                        authors=authors,
+                        source_language=str(language["language_tag"]),
+                    )
+                    if source_only is not None:
+                        return source_only
                     return editorial_outcome
                 chapters_outcome, editorial_report = editorial_outcome
 
@@ -384,6 +489,10 @@ class CompanionBuildHandler:
                 if translation_required
                 else ()
             )
+            glossary_unanchored_ids = _unanchored_glossary_ids(
+                glossary, glossary_contracts
+            )
+            glossary_fallback_summary = glossary.get("fallback_summary")
             cited_ids = _first_visible_citation_ids(chapters_outcome)
             bibliography = _chapter_reference_contracts(
                 context,
@@ -393,6 +502,11 @@ class CompanionBuildHandler:
             chapters_outcome, bibliography = _canonicalize_references(
                 chapters_outcome,
                 bibliography,
+            )
+            delivery_issues = tuple(
+                dict(item["delivery_issue"])
+                for item in chapters_outcome
+                if isinstance(item.get("delivery_issue"), Mapping)
             )
             published = publish_companion(
                 context,
@@ -407,9 +521,16 @@ class CompanionBuildHandler:
                 reader_labels=reader_labels,
                 chapters=chapters_outcome,
                 glossary=glossary_contracts,
+                glossary_unanchored_ids=glossary_unanchored_ids,
+                glossary_fallback_summary=(
+                    glossary_fallback_summary
+                    if isinstance(glossary_fallback_summary, Mapping)
+                    else None
+                ),
                 bibliography=bibliography,
                 reviewed_supplements=self.request.reviewed_supplements,
                 editorial_review=editorial_report,
+                delivery_issues=delivery_issues,
                 document_cache_root=self.execution.document_cache_root,
             )
             result_ref = context.artifacts.publish_json(
@@ -435,6 +556,38 @@ class CompanionBuildHandler:
             return Failed(RunError(exc.code, str(exc)))
         except (KeyError, TypeError, ValueError) as exc:
             return Failed(RunError("companion_content_invalid", str(exc)))
+
+    def _provider_source_only(
+        self,
+        context: RunContext,
+        source: RichDocument,
+        *,
+        title: str,
+        reader_labels: Mapping[str, str],
+        outcome: Paused | Failed | RunError,
+        stage: str,
+        authors: Sequence[str] = (),
+        source_language: str = "unknown",
+    ) -> Succeeded | None:
+        reason_code = _provider_source_only_reason(outcome)
+        if reason_code is None:
+            return None
+        published = publish_provider_source_only_companion(
+            context,
+            source=source,
+            title=title,
+            authors=authors,
+            source_language=source_language,
+            target_language=self.request.target_language,
+            reader_labels=reader_labels,
+            stage=stage,
+            reason_code=reason_code,
+            document_cache_root=self.execution.document_cache_root,
+        )
+        result_ref = context.artifacts.publish_json(
+            _RESULT_ARTIFACT, build_result_document(published)
+        )
+        return Succeeded(result_ref)
 
     def _model_source_inputs(
         self,
@@ -768,6 +921,7 @@ class CompanionBuildHandler:
             "provider": self.recipe.model.provider,
             "model": self.recipe.model.model,
             "tier": self.recipe.model.tier,
+            "effort": self.recipe.model.reasoning_effort,
             "translation_required": translation_required,
             "chapters": [
                 {
@@ -854,7 +1008,10 @@ class CompanionBuildHandler:
                 asset_loader=load_asset,
             )
         except (HTMLRenderError, OSError):
-            html_path.unlink(missing_ok=True)
+            try:
+                render_source_only_html(publication, html_path)
+            except (HTMLRenderError, OSError):
+                html_path.unlink(missing_ok=True)
 
     def _prepare_source(
         self,
@@ -1287,7 +1444,7 @@ class CompanionBuildHandler:
                         BATCH_SCHEMA_VERSION,
                         "companion-chapter-guides",
                         tuple(guide_loops),
-                        BatchFailurePolicy.FAIL_FAST,
+                        BatchFailurePolicy.COLLECT,
                         guide_model_inputs,
                     ),
                     options=ProposerReviewerExecutionOptions(
@@ -1328,40 +1485,65 @@ class CompanionBuildHandler:
                             f"missing guide result for {chapter_id}",
                         )
                     )
-                if loop_result.error is not None:
-                    return Failed(loop_result.error)
-                proposal = mapping(
-                    loop_result.final_proposals.get("guide-proposer"),
-                    f"final guide proposal for {chapter_id}",
-                )
                 chapter = by_chapter[chapter_id]
+                delivery_issue: dict[str, Any] | None = None
+                proposal_value = loop_result.final_proposals.get("guide-proposer")
+                if loop_result.error is not None:
+                    delivery_issue = _recoverable_guide_delivery_issue(
+                        loop_result.error, chapter_id=chapter_id
+                    )
+                    if delivery_issue is None:
+                        return Failed(loop_result.error)
+                    proposal = (
+                        dict(proposal_value)
+                        if isinstance(proposal_value, Mapping)
+                        else {
+                            "chapter_guide": None,
+                            "section_guides": [],
+                            "companions": [],
+                            "references": [],
+                        }
+                    )
+                    if not isinstance(proposal_value, Mapping):
+                        delivery_issue["category"] = "guide_evaluated_omitted"
+                        delivery_issue["fallback"] = "source_and_translation_only"
+                        delivery_issue["source_preserved"] = True
+                else:
+                    proposal = mapping(
+                        proposal_value,
+                        f"final guide proposal for {chapter_id}",
+                    )
                 program_candidate = self._augment_chapter_candidate(
                     chapter, proposal
                 )
-                proposal_companions = mapping_list(
-                    proposal.get("companions"),
-                    f"final guide companions for {chapter_id}",
-                )
-                proposal_sections = mapping_list(
-                    proposal.get("section_guides"),
-                    f"final guide section guides for {chapter_id}",
-                )
-                program_companions = tuple(
-                    item
-                    for item in mapping_list(
-                        program_candidate.get("companions"),
-                        f"augmented guide companions for {chapter_id}",
+                if delivery_issue is None:
+                    proposal_companions = mapping_list(
+                        proposal.get("companions"),
+                        f"final guide companions for {chapter_id}",
                     )
-                    if item not in proposal_companions
-                )
-                program_sections = tuple(
-                    item
-                    for item in mapping_list(
-                        program_candidate.get("section_guides"),
-                        f"augmented guide section guides for {chapter_id}",
+                    proposal_sections = mapping_list(
+                        proposal.get("section_guides"),
+                        f"final guide section guides for {chapter_id}",
                     )
-                    if item not in proposal_sections
-                )
+                    program_companions = tuple(
+                        item
+                        for item in mapping_list(
+                            program_candidate.get("companions"),
+                            f"augmented guide companions for {chapter_id}",
+                        )
+                        if item not in proposal_companions
+                    )
+                    program_sections = tuple(
+                        item
+                        for item in mapping_list(
+                            program_candidate.get("section_guides"),
+                            f"augmented guide section guides for {chapter_id}",
+                        )
+                        if item not in proposal_sections
+                    )
+                else:
+                    program_companions = ()
+                    program_sections = ()
                 candidate_id = f"chapters/{chapter_id}/guide-final.json"
                 candidate_path = context.working.find_candidate(candidate_id)
                 if candidate_path is None:
@@ -1383,14 +1565,15 @@ class CompanionBuildHandler:
                             )
                         )
                 try:
-                    validate_chapter_guide_review_audit(
-                        loop_result.final_review,
-                        proposal=candidate,
-                        part_count=len(chapter.block_ids),
-                        section_count=len(chapter.section_block_ids),
-                        program_companions=program_companions,
-                        program_section_guides=program_sections,
-                    )
+                    if delivery_issue is None:
+                        validate_chapter_guide_review_audit(
+                            loop_result.final_review,
+                            proposal=candidate,
+                            part_count=len(chapter.block_ids),
+                            section_count=len(chapter.section_block_ids),
+                            program_companions=program_companions,
+                            program_section_guides=program_sections,
+                        )
                     accepted_guide = validate_chapter_guide(
                         candidate,
                         chapter_id=chapter_id,
@@ -1401,19 +1584,72 @@ class CompanionBuildHandler:
                         section_block_ids=chapter.section_block_ids,
                     )
                 except CompanionContentError as exc:
-                    return Failed(
-                        RunError(
-                            exc.code,
-                            str(exc),
+                    if delivery_issue is not None:
+                        delivery_issue["category"] = "guide_evaluated_omitted"
+                        delivery_issue["fallback"] = "source_and_translation_only"
+                        delivery_issue["source_preserved"] = True
+                        delivery_issue["evidence"] = (
+                            "reviewer infrastructure failure left no admissible "
+                            "guide proposal"
+                        )
+                        candidate = self._augment_chapter_candidate(
+                            chapter,
                             {
-                                "candidate_path": str(candidate_path),
-                                "chapter_id": chapter_id,
+                                "chapter_guide": None,
+                                "section_guides": [],
+                                "companions": [],
+                                "references": [],
                             },
                         )
-                    )
+                        candidate_path = context.working.write_candidate_json(
+                            candidate_id, candidate
+                        )
+                        try:
+                            accepted_guide = validate_chapter_guide(
+                                candidate,
+                                chapter_id=chapter_id,
+                                block_ids=chapter.block_ids,
+                                chapter_anchor_block_id=(
+                                    chapter.display_anchor_block_id
+                                ),
+                                section_block_ids=chapter.section_block_ids,
+                            )
+                        except CompanionContentError:
+                            return Failed(
+                                RunError(
+                                    "chapter_guide_fallback_invalid",
+                                    "program-owned empty guide is invalid",
+                                    {"chapter_id": chapter_id},
+                                )
+                            )
+                    else:
+                        return Failed(
+                            RunError(
+                                exc.code,
+                                str(exc),
+                                {
+                                    "candidate_path": str(candidate_path),
+                                    "chapter_id": chapter_id,
+                                },
+                            )
+                        )
                 artifact_id = f"chapters/{chapter_id}/guide-accepted"
+                if delivery_issue is not None and not accepted_guide["learning_units"]:
+                    delivery_issue["category"] = "guide_evaluated_omitted"
+                    delivery_issue["fallback"] = "source_and_translation_only"
+                    delivery_issue["source_preserved"] = True
                 context.artifacts.publish_json(artifact_id, accepted_guide)
-                completed_results[f"guide-{chapter_id}"] = accepted_guide
+                if delivery_issue is not None:
+                    context.artifacts.publish_json(
+                        f"chapters/{chapter_id}/guide-delivery",
+                        delivery_issue,
+                    )
+                    completed_results[f"guide-{chapter_id}"] = {
+                        **accepted_guide,
+                        "delivery_issue": delivery_issue,
+                    }
+                else:
+                    completed_results[f"guide-{chapter_id}"] = accepted_guide
 
         joined = self._publish_completed_chapters(
             context,
@@ -1705,10 +1941,12 @@ class CompanionBuildHandler:
                 "section_block_ids": list(chapter.section_block_ids),
                 "section_titles": list(chapter.section_titles),
                 "section_levels": list(chapter.section_levels),
+                "guide_expected": chapter.generate_guide,
                 "translation_result": translation_result,
                 "learning_units": mapping_list(
                     guide["learning_units"], "learning units"
                 ),
+                "delivery_issue": guide.get("delivery_issue"),
             }
             accepted_id = f"chapters/{chapter.chapter_id}/accepted"
             existing = (
@@ -1812,6 +2050,7 @@ def _chapter_source_commands(
                     f"part-{part_number}",
                     argv,
                     part_numbers=[part_number],
+                    host_request_namespace="source",
                 )
             )
     section_starts = [
@@ -1842,6 +2081,7 @@ def _chapter_source_commands(
                     part_numbers=list(
                         range(start_index + 1, end_index + 1)
                     ),
+                    host_request_namespace="source",
                 )
             )
     lines = [
@@ -1859,6 +2099,7 @@ def _chapter_source_commands(
                     max(item[1] for item in lines),
                 ),
                 part_numbers=list(range(1, len(access) + 1)),
+                host_request_namespace="source",
             )
         )
     toc_argv = [
@@ -1876,6 +2117,7 @@ def _chapter_source_commands(
             _command(
                 "table-of-contents",
                 toc_argv,
+                host_request_namespace="source",
             ),
             _command(
                 "search-current-title",
@@ -1889,6 +2131,7 @@ def _chapter_source_commands(
                     "--term",
                     chapter.title,
                 ],
+                host_request_namespace="source",
             ),
         )
     )
@@ -1906,6 +2149,7 @@ def _chapter_source_commands(
                 "--term",
                 query,
             ],
+            host_request_namespace="source",
         )
 
     return {
@@ -2020,6 +2264,7 @@ def _chapter_translation_commands(
                 f"part-{part_number}",
                 translated_range(start, end),
                 part_numbers=[part_number],
+                host_request_namespace="translation",
             )
         )
     section_starts = [
@@ -2048,6 +2293,7 @@ def _chapter_translation_commands(
                 part_numbers=list(
                     range(start_index + 1, end_index + 1)
                 ),
+                host_request_namespace="translation",
             )
         )
     if access:
@@ -2059,6 +2305,7 @@ def _chapter_translation_commands(
                     max(int(item["line_end"]) for item in access),
                 ),
                 part_numbers=list(range(1, len(access) + 1)),
+                host_request_namespace="translation",
             )
         )
     return {
@@ -2081,9 +2328,12 @@ def _command(
     argv: Sequence[str],
     *,
     part_numbers: Sequence[int] = (),
+    host_request_namespace: str = "command",
 ) -> dict[str, Any]:
+    host_request_id = f"{host_request_namespace}-{command_id}"
     return {
         "command_id": command_id,
+        "host_request_id": host_request_id,
         "argv": list(argv),
         "shell": shlex.join(argv),
         "part_numbers": list(part_numbers),
@@ -2143,6 +2393,107 @@ def _publish_editorial_resolution(context: RunContext, resolution: Any) -> None:
             raise EditorialReviewError(
                 f"frozen {artifact_id} differs from the current editorial result"
             )
+
+
+def _recoverable_guide_delivery_issue(
+    error: RunError, *, chapter_id: str
+) -> dict[str, Any] | None:
+    """Return typed guide-local degradation when source delivery stays safe."""
+
+    provider_reason = _provider_source_only_reason(error)
+    if provider_reason is not None:
+        return {
+            "issue_id": f"guide-provider-{chapter_id}",
+            "category": "guide_evaluated_omitted",
+            "scope": chapter_id,
+            "fallback": "source_and_translation_only",
+            "affected_count": 1,
+            "source_preserved": True,
+            "retry": "bounded_retry_exhausted",
+            "evidence": provider_reason,
+        }
+
+    causes = error.details.get("causes")
+    typed_reviewer_failure = error.code in _RECOVERABLE_GUIDE_REVIEWER_CODES or (
+        isinstance(causes, Sequence)
+        and not isinstance(causes, (str, bytes, bytearray))
+        and any(
+            isinstance(cause, Mapping)
+            and cause.get("worker_id") == "guide-reviewer"
+            and cause.get("code") in _RECOVERABLE_GUIDE_REVIEWER_CODES
+            for cause in causes
+        )
+    )
+    if not typed_reviewer_failure:
+        return None
+    return {
+        "issue_id": f"guide-review-{chapter_id}",
+        "category": "guide_review_skipped",
+        "scope": chapter_id,
+        "fallback": "validated_proposal",
+        "affected_count": 1,
+        "source_preserved": False,
+        "retry": "not_semantic_retry",
+        "evidence": error.code,
+    }
+
+
+def _provider_source_only_reason(
+    outcome: Paused | Failed | RunError,
+) -> str | None:
+    """Return one typed exhausted-provider reason, never a text guess."""
+
+    markers: set[str] = set()
+    details: Mapping[str, Any]
+    if isinstance(outcome, Paused):
+        details = outcome.awaiting.details
+    elif isinstance(outcome, Failed):
+        markers.add(outcome.error.code)
+        details = outcome.error.details
+    else:
+        markers.add(outcome.code)
+        details = outcome.details
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                if key in {
+                    "code",
+                    "category",
+                    "ac_error_code",
+                    "detail_code",
+                } and isinstance(child, str):
+                    markers.add(child)
+                if key in {"causes", "details", "provider_failure"}:
+                    collect(child)
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for child in value:
+                collect(child)
+
+    collect(details)
+    if markers & _PROVIDER_HARD_STOP_MARKERS:
+        return None
+    if not markers & _PROVIDER_SOURCE_ONLY_MARKERS:
+        return None
+    for reason in (
+        "provider_circuit_open",
+        "provider_crash_retry_exhausted",
+        "provider_timeout",
+        "provider_transport",
+        "provider_unavailable",
+        "provider_quota",
+        "provider_rate_limit",
+        "timeout",
+        "transport",
+        "unavailable",
+        "quota",
+        "rate_limit",
+    ):
+        if reason in markers:
+            return reason
+    return None
 
 
 def _chapter_reference_contracts(
@@ -2427,6 +2778,27 @@ def _glossary_contracts(
     return tuple(values)
 
 
+def _unanchored_glossary_ids(
+    glossary: Mapping[str, Any],
+    published: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    published_ids = {str(item.get("entry_id") or "") for item in published}
+    values: list[str] = []
+    for entry in _glossary_entries(glossary):
+        term_id = entry.get("term_id")
+        if not isinstance(term_id, str) or not term_id:
+            raise CompanionContentError(
+                "glossary_identity_invalid", "glossary entry has no term ID"
+            )
+        if term_id not in published_ids:
+            values.append(term_id)
+    if len(set(values)) != len(values):
+        raise CompanionContentError(
+            "glossary_identity_invalid", "glossary term IDs repeat"
+        )
+    return tuple(values)
+
+
 def _source_block_document(source: Any, block: Any) -> dict[str, Any]:
     return block_prompt_document(
         block,
@@ -2505,7 +2877,9 @@ def _companion_llm_options(
         executable_name = (
             "ac-document.exe" if os.name == "nt" else "ac-document"
         )
-        candidate = Path(sys.executable).resolve().parent / executable_name
+        # A venv Python is commonly a symlink. Resolving it points at the
+        # system interpreter and loses the sibling console scripts in venv/bin.
+        candidate = Path(sys.executable).parent / executable_name
         if candidate.is_file():
             command = str(candidate)
     if command is not None:

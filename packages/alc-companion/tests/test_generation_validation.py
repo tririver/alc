@@ -35,6 +35,30 @@ def test_chapter_guide_preserves_literal_latex_commands() -> None:
     assert guide["learning_units"][0]["content_markdown"] == markdown
 
 
+def test_chapter_guide_normalizes_inline_math_delimiters_in_title() -> None:
+    guide = validate_chapter_guide(
+        {
+            "chapter_guide": None,
+            "section_guides": [],
+            "companions": [
+                {
+                    "after_part": 1,
+                    "title": "追踪 $ℛ³$ 与 \\(\\beta/H\\) 的来源",
+                    "content_markdown": "解释相互作用的来源。",
+                }
+            ],
+            "references": [],
+        },
+        chapter_id="chapter-1",
+        block_ids=("block-1",),
+        chapter_anchor_block_id="block-1",
+    )
+
+    assert guide["learning_units"][0]["title"] == (
+        "追踪 ℛ³ 与 \\beta/H 的来源"
+    )
+
+
 def test_rich_text_parser_does_not_decode_literal_backslash_n() -> None:
     tokens = parse_markdown(r"before\nafter \(\nu_e\)")
 

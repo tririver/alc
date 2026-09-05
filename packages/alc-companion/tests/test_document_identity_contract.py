@@ -90,6 +90,26 @@ def test_current_request_and_recipe_round_trip_only(tmp_path: Path) -> None:
     assert decode_generation_recipe(recipe_document) == recipe
 
 
+def test_generation_recipe_round_trips_reasoning_effort_and_accepts_legacy_model() -> None:
+    recipe = CompanionGenerationRecipe(
+        model=ModelSelection(
+            provider="codex",
+            model="gpt-5.6-terra",
+            reasoning_effort="high",
+        )
+    )
+    document = encode_generation_recipe(recipe)
+
+    assert document["model"]["reasoning_effort"] == "high"
+    assert decode_generation_recipe(document) == recipe
+
+    legacy = encode_generation_recipe(
+        replace(recipe, model=ModelSelection("codex", "gpt-5.6-terra"))
+    )
+    assert "reasoning_effort" not in legacy["model"]
+    assert decode_generation_recipe(legacy).model.reasoning_effort is None
+
+
 def test_html_source_bundle_binding_has_a_distinct_durable_request_contract(
     tmp_path: Path,
 ) -> None:

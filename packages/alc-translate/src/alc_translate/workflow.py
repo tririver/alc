@@ -5,11 +5,13 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 
+from ac_document import RichBlockKind, literal_term_occurs, rich_block_to_document
 from ac_jobs import (
     ArtifactRef,
     Awaiting,
@@ -25,6 +27,7 @@ from ac_jobs import (
     encode_artifact_ref,
 )
 from ac_llm import (
+    RESUME_SCHEMA_VERSION,
     JsonOutput,
     LLMCompleted,
     LLMExecutionOptions,
@@ -34,14 +37,12 @@ from ac_llm import (
     LLMStopped,
     LLMTaskService,
     ModelSelection,
-    RESUME_SCHEMA_VERSION,
     ResumeInput,
     awaiting_from_pause,
     decode_resume_input,
     execute_or_resume_matching,
     run_error_from_failure,
 )
-from ac_document import RichBlockKind, literal_term_occurs, rich_block_to_document
 from alc_render import (
     AnchorKind,
     FragmentAnchor,
@@ -52,19 +53,36 @@ from alc_render import (
     block_text_to_markdown,
     decode_fragment_revision,
     encode_fragment_revision,
-    fragment_revision_storage_path,
     fragment_revision_ref,
     fragment_revision_ref_from_document,
     fragment_revision_ref_to_document,
+    fragment_revision_storage_path,
     layer_from_document,
     layer_to_document,
-    source_identity_from_rich_document,
     normalize_markdown,
+    source_identity_from_rich_document,
 )
 
+from .atoms import (
+    PROTECTED_ATOM_RESULT_SCHEMA,
+    TEXT_SLOT_RESULT_SCHEMA,
+    ProtectedAtomError,
+    assemble_model_protected_translation,
+    assemble_protected_translation,
+    assemble_text_slot_translation,
+    protected_atom_ids,
+    protected_atom_part_groups,
+    protected_atom_subplan,
+    protected_result_document,
+    source_protected_parts,
+    text_slot_prompt_block,
+    text_slot_values_from_parts,
+)
 from .contracts import (
+    GLOSSARY_FALLBACK_SUMMARY_SCHEMA,
     GLOSSARY_RESULT_SCHEMA,
     LANGUAGE_RESULT_SCHEMA,
+    LEGACY_GLOSSARY_RESULT_SCHEMA,
     TRANSLATION_RESULT_SCHEMA,
     TranslationSource,
 )
@@ -73,14 +91,16 @@ from .prompts import (
     GLOSSARY_SCHEMA,
     LANGUAGE_PROMPT_VERSION,
     LANGUAGE_SCHEMA,
+    PROTECTED_ATOM_REVIEW_RESULT_SCHEMA,
     REVIEW_PROMPT_VERSION,
-    REVIEW_SCHEMA,
+    TEXT_SLOT_REVIEW_RESULT_SCHEMA,
     TRANSLATION_PROMPT_VERSION,
-    TRANSLATION_SCHEMA,
     glossary_prompt,
     language_prompt,
     review_prompt,
+    review_schema,
     translation_prompt,
+    translation_schema,
 )
 from .source import (
     STRUCTURAL_FIGURE_PLACEHOLDER,
@@ -89,18 +109,70 @@ from .source import (
     deterministic_language_samples,
     formula_identity_diagnostics,
     prompt_block,
+    restore_translation_identity,
     same_primary_language,
     source_blocks,
     source_note_blocks,
     source_note_link_markdown,
-    restore_translation_identity,
-    translation_text_groups,
     validate_translation_text,
 )
 
-
 REVIEW_SUPERVISION_SCHEMA = "alc.translate.review_supervision.v1"
 OUTPUT_SUPERVISION_SCHEMA = "alc.translate.output_supervision.v1"
+REVIEW_ACCEPTED_WINDOW_SCHEMA = "alc.translate.review_accepted_window.v1"
+_TRANSLATION_FALLBACK_DIAGNOSTIC_SCHEMA = (
+    "alc.translate.fallback_diagnostic.v1"
+)
+_TRANSLATION_PROVIDER_FALLBACK_DIAGNOSTIC_SCHEMA = (
+    "alc.translate.provider_fallback_diagnostic.v1"
+)
+_PROVIDER_FALLBACK_MARKERS = frozenset(
+    {
+        "provider_transport",
+        "transport",
+        "provider_timeout",
+        "timeout",
+        "provider_unavailable",
+        "unavailable",
+        "provider_quota",
+        "quota",
+        "provider_rate_limit",
+        "rate_limit",
+        "provider_crash_retry_exhausted",
+        "provider_circuit_open",
+    }
+)
+_PROVIDER_HARD_STOP_MARKERS = frozenset(
+    {
+        "provider_authentication",
+        "authentication",
+        "provider_invalid_request",
+        "invalid_request",
+        "invalid_schema",
+        "schema",
+        "local_io",
+        "local_io_error",
+        "permission_denied",
+        "host_authority_required",
+        "corrupt_state",
+        "stopped",
+    }
+)
+_PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT = 2
+_PROVIDER_FALLBACK_REASON_ORDER = (
+    "provider_circuit_open",
+    "provider_crash_retry_exhausted",
+    "provider_timeout",
+    "provider_transport",
+    "provider_unavailable",
+    "provider_quota",
+    "provider_rate_limit",
+    "timeout",
+    "transport",
+    "unavailable",
+    "quota",
+    "rate_limit",
+)
 
 
 class KeywordProvider(Protocol):
@@ -199,6 +271,88 @@ class LanguageResult:
 
 
 @dataclass(frozen=True)
+class GlossaryFallbackSummary:
+    """Closed public accounting for recovered or omitted glossary entries."""
+
+    recovered_term_ids: tuple[str, ...] = ()
+    dropped_term_ids: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    schema_version: str = GLOSSARY_FALLBACK_SUMMARY_SCHEMA
+
+    def __post_init__(self) -> None:
+        if self.schema_version != GLOSSARY_FALLBACK_SUMMARY_SCHEMA:
+            raise ValueError("unsupported glossary fallback summary schema")
+        values = (
+            ("recovered_term_ids", self.recovered_term_ids),
+            ("dropped_term_ids", self.dropped_term_ids),
+            ("reason_codes", self.reason_codes),
+        )
+        for name, items in values:
+            if isinstance(items, (str, bytes)) or not isinstance(
+                items, Sequence
+            ):
+                raise TypeError(f"{name} must be a string sequence")
+            normalized = tuple(items)
+            if (
+                any(not isinstance(item, str) or not item for item in normalized)
+                or len(set(normalized)) != len(normalized)
+            ):
+                raise ValueError(f"{name} must contain unique non-empty strings")
+            object.__setattr__(self, name, normalized)
+        if set(self.recovered_term_ids) & set(self.dropped_term_ids):
+            raise ValueError("glossary fallback term IDs cannot overlap")
+        if (
+            bool(self.recovered_term_ids or self.dropped_term_ids)
+            != bool(self.reason_codes)
+        ):
+            raise ValueError(
+                "glossary fallback reasons must be present exactly for fallbacks"
+            )
+
+    @property
+    def is_empty(self) -> bool:
+        return not (
+            self.recovered_term_ids
+            or self.dropped_term_ids
+            or self.reason_codes
+        )
+
+    def to_document(self) -> dict[str, JsonValue]:
+        return {
+            "schema_version": self.schema_version,
+            "recovered_term_ids": list(self.recovered_term_ids),
+            "dropped_term_ids": list(self.dropped_term_ids),
+            "reason_codes": list(self.reason_codes),
+        }
+
+    @classmethod
+    def from_document(cls, value: Any) -> GlossaryFallbackSummary:
+        document = _object(value, "glossary fallback summary")
+        _require_fields(
+            document,
+            {
+                "schema_version",
+                "recovered_term_ids",
+                "dropped_term_ids",
+                "reason_codes",
+            },
+            "glossary fallback summary",
+        )
+        return cls(
+            recovered_term_ids=_string_items(
+                document["recovered_term_ids"], "recovered glossary term IDs"
+            ),
+            dropped_term_ids=_string_items(
+                document["dropped_term_ids"], "dropped glossary term IDs"
+            ),
+            reason_codes=_string_items(
+                document["reason_codes"], "glossary fallback reason codes"
+            ),
+            schema_version=_string(document, "schema_version"),
+        )
+
+
+@dataclass(frozen=True)
 class GlossaryResult:
     document_digest: str
     source_digest: str
@@ -207,6 +361,9 @@ class GlossaryResult:
     inventory_digest: str
     entries: tuple[Mapping[str, JsonValue], ...]
     schema_version: str = GLOSSARY_RESULT_SCHEMA
+    fallback_summary: GlossaryFallbackSummary = dataclasses.field(
+        default_factory=GlossaryFallbackSummary
+    )
 
     def __post_init__(self) -> None:
         if self.schema_version != GLOSSARY_RESULT_SCHEMA:
@@ -229,6 +386,13 @@ class GlossaryResult:
             raise ValueError("glossary identity is invalid")
         entries = tuple(dict(item) for item in self.entries)
         _validate_glossary_entries(entries)
+        if not isinstance(self.fallback_summary, GlossaryFallbackSummary):
+            raise TypeError("fallback_summary must be a GlossaryFallbackSummary")
+        entry_ids = {str(item["term_id"]) for item in entries}
+        if not set(self.fallback_summary.recovered_term_ids).issubset(entry_ids):
+            raise ValueError("recovered glossary fallback entries are absent")
+        if entry_ids & set(self.fallback_summary.dropped_term_ids):
+            raise ValueError("dropped glossary fallback entries are present")
         object.__setattr__(self, "entries", entries)
 
     def to_document(self) -> dict[str, JsonValue]:
@@ -240,23 +404,31 @@ class GlossaryResult:
             "approx_count": self.approx_count,
             "inventory_digest": self.inventory_digest,
             "entries": [dict(item) for item in self.entries],
+            "fallback_summary": self.fallback_summary.to_document(),
         }
 
     @classmethod
-    def from_document(cls, value: Mapping[str, Any]) -> "GlossaryResult":
-        _require_fields(
-            value,
-            {
-                "schema_version",
-                "document_digest",
-                "source_digest",
-                "target_language",
-                "approx_count",
-                "inventory_digest",
-                "entries",
-            },
-            "glossary result",
-        )
+    def from_document(cls, value: Mapping[str, Any]) -> GlossaryResult:
+        schema_version = _string(value, "schema_version")
+        fields = {
+            "schema_version",
+            "document_digest",
+            "source_digest",
+            "target_language",
+            "approx_count",
+            "inventory_digest",
+            "entries",
+        }
+        if schema_version == GLOSSARY_RESULT_SCHEMA:
+            _require_fields(value, {*fields, "fallback_summary"}, "glossary result")
+            fallback_summary = GlossaryFallbackSummary.from_document(
+                value["fallback_summary"]
+            )
+        elif schema_version == LEGACY_GLOSSARY_RESULT_SCHEMA:
+            _require_fields(value, fields, "legacy glossary result")
+            fallback_summary = GlossaryFallbackSummary()
+        else:
+            raise ValueError("unsupported glossary result schema")
         entries = _mapping_list(value["entries"], "glossary entries")
         return cls(
             document_digest=_string(value, "document_digest"),
@@ -265,7 +437,7 @@ class GlossaryResult:
             approx_count=_integer(value, "approx_count"),
             inventory_digest=_string(value, "inventory_digest"),
             entries=tuple(entries),
-            schema_version=_string(value, "schema_version"),
+            fallback_summary=fallback_summary,
         )
 
 
@@ -491,9 +663,23 @@ class TranslationWorkflowService:
         artifact_id = f"{artifact_prefix}/result"
         existing = context.artifacts.find(artifact_id)
         if existing is not None:
-            return GlossaryResult.from_document(
-                _read_json_artifact(context, existing, "glossary result")
+            document = _read_json_artifact(
+                context, existing, "glossary result"
             )
+            result = GlossaryResult.from_document(document)
+            if document.get("schema_version") == LEGACY_GLOSSARY_RESULT_SCHEMA:
+                result = dataclasses.replace(
+                    result,
+                    fallback_summary=_load_legacy_glossary_fallback_summary(
+                        context,
+                        source=source,
+                        approx_count=approx_count,
+                        target_language=target_language,
+                        term_input_budget_bytes=term_input_budget_bytes,
+                        artifact_prefix=artifact_prefix,
+                    ),
+                )
+            return result
         inventory_id = f"{artifact_prefix}/keyword-inventory"
         inventory_ref = context.artifacts.find(inventory_id)
         if inventory_ref is None:
@@ -556,6 +742,7 @@ class TranslationWorkflowService:
         entries: list[dict[str, JsonValue]] = []
         for ordinal, window in enumerate(windows):
             window_id = f"{artifact_prefix}/windows/{ordinal:04d}"
+            fallback_id = f"{artifact_prefix}/fallbacks/{ordinal:04d}"
             candidate_id = f"glossary/{window_id}.json"
             candidate_path = context.working.find_candidate(candidate_id)
             window_ref = context.artifacts.find(window_id)
@@ -588,7 +775,7 @@ class TranslationWorkflowService:
                     self.task_service,
                     context,
                     request,
-                    validator=lambda value: _validated_glossary_document(
+                    validator=lambda value, window=window: _validated_glossary_document(
                         value, window
                     ),
                     candidate_id=candidate_id,
@@ -599,6 +786,33 @@ class TranslationWorkflowService:
                 if isinstance(generated, (Paused, RunError)):
                     return generated
                 if isinstance(generated, _InvalidGeneratedOutput):
+                    if generated.error.code in {
+                        "glossary_control_character_invalid",
+                        "glossary_translation_math_markup_invalid",
+                    }:
+                        try:
+                            fallback, recovered_term_ids, dropped_term_ids = (
+                                _salvaged_glossary_fallback(
+                                    generated.candidate, window
+                                )
+                            )
+                        except TranslationWorkflowError as exc:
+                            return _output_supervision(
+                                context,
+                                artifact_prefix=artifact_prefix,
+                                stage=f"glossary-{ordinal:04d}",
+                                error=exc,
+                                candidate_path=generated.candidate_path,
+                            )
+                        _publish_glossary_fallback(
+                            context,
+                            fallback_id,
+                            recovered_term_ids=recovered_term_ids,
+                            dropped_term_ids=dropped_term_ids,
+                            reason_codes=[generated.error.code],
+                        )
+                        entries.extend(fallback)
+                        continue
                     return _output_supervision(
                         context,
                         artifact_prefix=artifact_prefix,
@@ -616,6 +830,27 @@ class TranslationWorkflowService:
                 error_path = candidate_path or (
                     context.run_directory / window_ref.relative_path
                 )
+                if exc.code in {
+                    "glossary_control_character_invalid",
+                    "glossary_translation_math_markup_invalid",
+                }:
+                    try:
+                        fallback, recovered_term_ids, dropped_term_ids = (
+                            _salvaged_glossary_fallback(
+                                window_output, window
+                            )
+                        )
+                    except TranslationWorkflowError as fallback_error:
+                        return _candidate_run_error(fallback_error, error_path)
+                    _publish_glossary_fallback(
+                        context,
+                        fallback_id,
+                        recovered_term_ids=recovered_term_ids,
+                        dropped_term_ids=dropped_term_ids,
+                        reason_codes=[exc.code],
+                    )
+                    entries.extend(fallback)
+                    continue
                 return _candidate_run_error(exc, error_path)
         result = GlossaryResult(
             document_digest=source.document_digest,
@@ -624,6 +859,12 @@ class TranslationWorkflowService:
             approx_count=approx_count,
             inventory_digest=_string(inventory, "inventory_digest"),
             entries=tuple(entries),
+            fallback_summary=_load_glossary_fallback_summary(
+                context,
+                terms=terms,
+                window_count=len(windows),
+                artifact_prefix=artifact_prefix,
+            ),
         )
         context.artifacts.publish_json(artifact_id, result.to_document())
         return result
@@ -701,8 +942,10 @@ class TranslationWorkflowService:
             )
         except TranslationWorkflowError as exc:
             return RunError(exc.code, str(exc))
-        translations: list[dict[str, str]] = []
+        translations: list[dict[str, Any]] = []
         fallback_units: dict[str, str] = {}
+        consecutive_provider_window_failures = 0
+        global_provider_fallback_reason: str | None = None
         accepted_documents: dict[int, Mapping[str, Any]] = {}
         for accepted_ordinal in range(len(model_units)):
             accepted_id = (
@@ -724,15 +967,39 @@ class TranslationWorkflowService:
             accepted_id = f"{artifact_prefix}/windows/{ordinal:04d}/accepted"
             fallback_id = f"{artifact_prefix}/windows/{ordinal:04d}/fallback"
             accepted_doc = accepted_documents.get(ordinal)
+            if (
+                accepted_doc is None
+                and global_provider_fallback_reason is not None
+            ):
+                fallback, source_fallback_ids = _persist_source_fallback_window(
+                    context,
+                    window,
+                    accepted_id=accepted_id,
+                    fallback_id=fallback_id,
+                    reason_code=global_provider_fallback_reason,
+                )
+                fallback_units.update(
+                    (block_id, "source_text")
+                    for block_id in source_fallback_ids
+                )
+                translations.extend(fallback)
+                continue
             if accepted_doc is not None:
+                (
+                    accepted_payload,
+                    accepted_fallback_document,
+                    accepted_provider_document,
+                ) = _unpack_review_accepted_window(accepted_doc)
                 try:
-                    accepted = _validate_accepted_window(accepted_doc, window)
+                    accepted = _validate_accepted_window(
+                        accepted_payload, window
+                    )
                 except TranslationWorkflowError as exc:
                     if exc.code == "translation_coverage_invalid":
                         return RunError(exc.code, str(exc))
                     fallback, source_fallback_ids = (
                         _salvaged_translation_fallback(
-                            window, candidate=accepted_doc
+                            window, candidate=accepted_payload
                         )
                     )
                     _publish_translation_fallback(
@@ -747,11 +1014,40 @@ class TranslationWorkflowService:
                         for block_id in source_fallback_ids
                     )
                     translations.extend(fallback)
+                    consecutive_provider_window_failures = 0
                     continue
-                _load_translation_fallback(
-                    context, fallback_id, fallback_units
-                )
+                if accepted_fallback_document is None:
+                    fallback_reason_codes = _load_translation_fallback(
+                        context, fallback_id, fallback_units
+                    )
+                else:
+                    fallback_reason_codes = _apply_translation_fallback_document(
+                        accepted_fallback_document, fallback_units
+                    )
+                    _publish_translation_fallback_document(
+                        context, fallback_id, accepted_fallback_document
+                    )
+                if accepted_provider_document is not None:
+                    _publish_translation_provider_failure_document(
+                        context,
+                        f"{fallback_id}-provider",
+                        accepted_provider_document,
+                    )
                 translations.extend(accepted)
+                replayed_provider_reason = _provider_reason_from_codes(
+                    fallback_reason_codes
+                )
+                if replayed_provider_reason is None:
+                    consecutive_provider_window_failures = 0
+                else:
+                    consecutive_provider_window_failures += 1
+                    if (
+                        consecutive_provider_window_failures
+                        >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                    ):
+                        global_provider_fallback_reason = (
+                            replayed_provider_reason
+                        )
                 continue
             candidate_id = f"translation/{draft_id}.json"
             candidate_path = context.working.find_candidate(candidate_id)
@@ -761,6 +1057,9 @@ class TranslationWorkflowService:
                     context, draft_ref, "translation draft"
                 )
             else:
+                prompt_blocks = [
+                    text_slot_prompt_block(item) for item in window
+                ]
                 request = LLMRequest(
                     _task_id(
                         "translation",
@@ -777,31 +1076,145 @@ class TranslationWorkflowService:
                         },
                     ),
                     translation_prompt(
-                        blocks=[prompt_block(item) for item in window],
+                        blocks=prompt_blocks,
                         glossary=_window_glossary(window, glossary.entries),
                         target_language=target_language,
                         language_result=language.to_document(),
                         window_ordinal=ordinal,
                     ),
-                    JsonOutput(TRANSLATION_SCHEMA, repair="format"),
+                    JsonOutput(
+                        translation_schema(prompt_blocks), repair="format"
+                    ),
                     model,
                 )
                 generated = _validated_generation(
                     self.task_service,
                     context,
                     request,
-                    validator=lambda value: _validated_draft_document(
-                        value, window
+                    validator=(
+                        lambda value, window=window: (
+                            _validated_protected_draft_document(value, window)
+                        )
                     ),
                     candidate_id=candidate_id,
                     resume_input=resume_input,
                     options=execution,
                     stopped_message="block translation stopped",
+                    retry_request_factory=(
+                        lambda original, error, candidate, window=window,
+                        window_ordinal=ordinal: (
+                            _protected_translation_retry_request(
+                                original,
+                                error,
+                                candidate,
+                                window,
+                                glossary=_window_glossary(
+                                    window, glossary.entries
+                                ),
+                                target_language=target_language,
+                                language=language,
+                                window_ordinal=window_ordinal,
+                            )
+                        )
+                    ),
+                    retry_candidate_merger=(
+                        lambda first, second, window=window: (
+                            _merge_protected_translation_candidates(
+                                first, second, window
+                            )
+                        )
+                    ),
                 )
                 if isinstance(generated, Paused):
-                    return generated
+                    provider_reason = _provider_fallback_reason(generated)
+                    if provider_reason is None:
+                        return generated
+                    consecutive_provider_window_failures += 1
+                    if (
+                        consecutive_provider_window_failures
+                        >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                    ):
+                        global_provider_fallback_reason = provider_reason
+                    _publish_translation_provider_failure(
+                        context,
+                        f"{fallback_id}-provider",
+                        outcome=generated,
+                        model=model,
+                        reason_code=provider_reason,
+                        stage="translation",
+                        window_ordinal=ordinal,
+                        consecutive_window_failures=(
+                            consecutive_provider_window_failures
+                        ),
+                        global_fallback_triggered=(
+                            global_provider_fallback_reason is not None
+                        ),
+                        remaining_windows_skipped=(
+                            len(windows) - ordinal - 1
+                            if global_provider_fallback_reason is not None
+                            else 0
+                        ),
+                    )
+                    fallback, source_fallback_ids = (
+                        _persist_source_fallback_window(
+                            context,
+                            window,
+                            accepted_id=accepted_id,
+                            fallback_id=fallback_id,
+                            reason_code=provider_reason,
+                        )
+                    )
+                    fallback_units.update(
+                        (block_id, "source_text")
+                        for block_id in source_fallback_ids
+                    )
+                    translations.extend(fallback)
+                    continue
                 if isinstance(generated, RunError):
-                    return generated
+                    provider_reason = _provider_fallback_reason(generated)
+                    if provider_reason is None:
+                        return generated
+                    consecutive_provider_window_failures += 1
+                    if (
+                        consecutive_provider_window_failures
+                        >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                    ):
+                        global_provider_fallback_reason = provider_reason
+                    _publish_translation_provider_failure(
+                        context,
+                        f"{fallback_id}-provider",
+                        outcome=generated,
+                        model=model,
+                        reason_code=provider_reason,
+                        stage="translation",
+                        window_ordinal=ordinal,
+                        consecutive_window_failures=(
+                            consecutive_provider_window_failures
+                        ),
+                        global_fallback_triggered=(
+                            global_provider_fallback_reason is not None
+                        ),
+                        remaining_windows_skipped=(
+                            len(windows) - ordinal - 1
+                            if global_provider_fallback_reason is not None
+                            else 0
+                        ),
+                    )
+                    fallback, source_fallback_ids = (
+                        _persist_source_fallback_window(
+                            context,
+                            window,
+                            accepted_id=accepted_id,
+                            fallback_id=fallback_id,
+                            reason_code=provider_reason,
+                        )
+                    )
+                    fallback_units.update(
+                        (block_id, "source_text")
+                        for block_id in source_fallback_ids
+                    )
+                    translations.extend(fallback)
+                    continue
                 if isinstance(generated, _InvalidGeneratedOutput):
                     fallback, source_fallback_ids = (
                         _salvaged_translation_fallback(
@@ -820,12 +1233,17 @@ class TranslationWorkflowService:
                         for block_id in source_fallback_ids
                     )
                     context.artifacts.publish_json(
-                        accepted_id, {"translations": fallback}
+                        accepted_id, _translation_result_document(fallback)
                     )
                     translations.extend(fallback)
                     continue
                 draft_doc = generated
                 context.artifacts.publish_json(draft_id, draft_doc)
+            # A draft artifact proves provider delivery for this window. A
+            # later review failure may count the window again below.
+            consecutive_provider_window_failures = 0
+            window_provider_failure_reason: str | None = None
+            window_provider_failure_document: dict[str, Any] | None = None
             try:
                 draft = _validate_draft_window(draft_doc, window)
             except TranslationWorkflowError as exc:
@@ -846,7 +1264,39 @@ class TranslationWorkflowService:
                     for block_id in source_fallback_ids
                 )
                 context.artifacts.publish_json(
-                    accepted_id, {"translations": fallback}
+                    accepted_id, _translation_result_document(fallback)
+                )
+                translations.extend(fallback)
+                continue
+            if any(
+                item.get("schema_version") != PROTECTED_ATOM_RESULT_SCHEMA
+                for item in draft
+            ):
+                # Drafts were never accepted model artifacts. Replay a valid
+                # pre-v13 draft only as explicit legacy input, skip a new
+                # protected-atom review, and record that review did not run.
+                fallback, source_fallback_ids = _salvaged_translation_fallback(
+                    window, candidate=draft_doc
+                )
+                legacy_ids = [str(item["block_id"]) for item in window]
+                _publish_translation_fallback(
+                    context,
+                    fallback_id,
+                    source_text_block_ids=source_fallback_ids,
+                    review_skipped_block_ids=legacy_ids,
+                    reason_codes=["translation_legacy_draft_replay"],
+                )
+                fallback_units.update(
+                    (block_id, "source_text")
+                    for block_id in source_fallback_ids
+                )
+                fallback_units.update(
+                    (block_id, "review_skipped")
+                    for block_id in legacy_ids
+                    if block_id not in source_fallback_ids
+                )
+                context.artifacts.publish_json(
+                    accepted_id, _translation_result_document(fallback)
                 )
                 translations.extend(fallback)
                 continue
@@ -886,8 +1336,15 @@ class TranslationWorkflowService:
                                 "accepted translation review subwindow",
                             )
                             try:
+                                (
+                                    review_accepted_payload,
+                                    review_fallback_document,
+                                    review_provider_document,
+                                ) = _unpack_review_accepted_window(
+                                    review_accepted_doc
+                                )
                                 accepted_review = _validate_accepted_window(
-                                    review_accepted_doc,
+                                    review_accepted_payload,
                                     review_blocks,
                                 )
                             except TranslationWorkflowError as exc:
@@ -903,20 +1360,56 @@ class TranslationWorkflowService:
                                     for block_id in review_ids
                                 )
                             else:
+                                if review_fallback_document is not None:
+                                    review_reason_codes.extend(
+                                        _apply_translation_fallback_document(
+                                            review_fallback_document,
+                                            fallback_units,
+                                        )
+                                    )
+                                    review_skipped_ids.extend(
+                                        _translation_fallback_entries(
+                                            review_fallback_document
+                                        )[1]
+                                    )
+                                if review_provider_document is not None:
+                                    window_provider_failure_document = (
+                                        review_provider_document
+                                    )
+                                    window_provider_failure_reason = str(
+                                        review_provider_document["reason_code"]
+                                    )
                                 reviewed.extend(accepted_review)
                             continue
-                    review_text = review_prompt(
-                        blocks=[prompt_block(item) for item in review_blocks],
-                        translations=review_draft,
-                        glossary=_window_glossary(
-                            review_blocks, glossary.entries
-                        ),
-                        target_language=target_language,
-                        window_ordinal=ordinal,
-                    )
                     review_error: tuple[str, str] | None = None
                     reviewed_window: list[dict[str, str]] | None = None
-                    if len(review_text.encode("utf-8")) > input_budget_bytes:
+                    model_review_blocks = [
+                        text_slot_prompt_block(item)
+                        for item in review_blocks
+                    ]
+                    try:
+                        review_translations = [
+                            _review_text_slot_projection(block, item)
+                            for block, item in zip(
+                                review_blocks, review_draft, strict=True
+                            )
+                        ]
+                    except TranslationWorkflowError as exc:
+                        review_error = (exc.code, str(exc))
+                        review_text = ""
+                    else:
+                        review_text = review_prompt(
+                            blocks=model_review_blocks,
+                            translations=review_translations,
+                            glossary=_window_glossary(
+                                review_blocks, glossary.entries
+                            ),
+                            target_language=target_language,
+                            window_ordinal=ordinal,
+                        )
+                    if review_error is not None:
+                        pass
+                    elif len(review_text.encode("utf-8")) > input_budget_bytes:
                         block_id = review_blocks[0].get(
                             "block_id", "<unknown>"
                         )
@@ -944,7 +1437,10 @@ class TranslationWorkflowService:
                         review_request = LLMRequest(
                             _task_id("translation-review", task_identity),
                             review_text,
-                            JsonOutput(REVIEW_SCHEMA, repair="format"),
+                            JsonOutput(
+                                review_schema(model_review_blocks),
+                                repair="format",
+                            ),
                             model,
                         )
                         review_candidate = (
@@ -962,7 +1458,7 @@ class TranslationWorkflowService:
                             context,
                             review_request,
                             validator=lambda value, draft=review_draft,
-                            blocks=review_blocks: _apply_review(
+                            blocks=review_blocks: _apply_text_slot_review(
                                 value, draft, blocks
                             ),
                             candidate_id=review_candidate,
@@ -970,10 +1466,43 @@ class TranslationWorkflowService:
                             options=execution,
                             stopped_message="translation review stopped",
                         )
-                        if isinstance(review_generated, Paused):
-                            return review_generated
-                        if isinstance(review_generated, RunError):
-                            return review_generated
+                        if isinstance(review_generated, (Paused, RunError)):
+                            provider_reason = _provider_fallback_reason(
+                                review_generated
+                            )
+                            if provider_reason is None:
+                                return review_generated
+                            window_provider_failure_reason = provider_reason
+                            window_provider_failure_document = (
+                                _translation_provider_failure_document(
+                                    outcome=review_generated,
+                                    model=model,
+                                    reason_code=provider_reason,
+                                    stage="review",
+                                    window_ordinal=ordinal,
+                                    consecutive_window_failures=(
+                                        consecutive_provider_window_failures
+                                        + 1
+                                    ),
+                                    global_fallback_triggered=(
+                                        consecutive_provider_window_failures
+                                        + 1
+                                        >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                                    ),
+                                    remaining_windows_skipped=(
+                                        len(windows) - ordinal - 1
+                                        if consecutive_provider_window_failures
+                                        + 1
+                                        >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                                        else 0
+                                    ),
+                                )
+                            )
+                            review_error = (
+                                provider_reason,
+                                "translation review provider delivery is "
+                                "unavailable",
+                            )
                         elif isinstance(
                             review_generated, _InvalidGeneratedOutput
                         ):
@@ -996,22 +1525,64 @@ class TranslationWorkflowService:
                         )
                     assert reviewed_window is not None
                     if split_review:
+                        review_fallback_document = (
+                            _translation_fallback_document(
+                                source_text_block_ids=[],
+                                review_skipped_block_ids=review_ids,
+                                reason_codes=review_reason_codes[-1:],
+                            )
+                            if review_error is not None
+                            else None
+                        )
                         context.artifacts.publish_json(
                             review_accepted_id,
-                            {"translations": reviewed_window},
+                            _review_accepted_window_document(
+                                _translation_result_document(reviewed_window),
+                                fallback_document=review_fallback_document,
+                                provider_failure_document=(
+                                    window_provider_failure_document
+                                    if review_error is not None
+                                    else None
+                                ),
+                            ),
                         )
                     reviewed.extend(reviewed_window)
-            accepted_doc = {"translations": reviewed}
-            context.artifacts.publish_json(accepted_id, accepted_doc)
-            if review_skipped_ids:
-                _publish_translation_fallback(
-                    context,
-                    fallback_id,
+            fallback_document = (
+                _translation_fallback_document(
                     source_text_block_ids=[],
                     review_skipped_block_ids=review_skipped_ids,
                     reason_codes=review_reason_codes,
                 )
+                if review_skipped_ids
+                else None
+            )
+            accepted_doc = _review_accepted_window_document(
+                _translation_result_document(reviewed),
+                fallback_document=fallback_document,
+                provider_failure_document=window_provider_failure_document,
+            )
+            context.artifacts.publish_json(accepted_id, accepted_doc)
+            if review_skipped_ids:
+                assert fallback_document is not None
+                _publish_translation_fallback_document(
+                    context, fallback_id, fallback_document
+                )
             translations.extend(reviewed)
+            if window_provider_failure_reason is not None:
+                consecutive_provider_window_failures += 1
+                if (
+                    consecutive_provider_window_failures
+                    >= _PROVIDER_CONSECUTIVE_WINDOW_FAILURE_LIMIT
+                ):
+                    global_provider_fallback_reason = (
+                        window_provider_failure_reason
+                    )
+                assert window_provider_failure_document is not None
+                _publish_translation_provider_failure_document(
+                    context,
+                    f"{fallback_id}-provider",
+                    window_provider_failure_document,
+                )
         (
             collapsed_translations,
             post_collapse_fallback_ids,
@@ -1039,6 +1610,9 @@ class TranslationWorkflowService:
             units,
             collapsed_translations,
         )
+        protected_atom_block_ids = _protected_original_block_ids(
+            unit_plans, translations
+        )
         result = _publish_translation_result(
             context,
             source,
@@ -1049,6 +1623,7 @@ class TranslationWorkflowService:
             artifact_prefix=artifact_prefix,
             coverage=coverage,
             fallback_kinds=fallback_blocks,
+            protected_atom_block_ids=protected_atom_block_ids,
         )
         _validate_translation_result(
             context,
@@ -1102,6 +1677,14 @@ def _validated_generation(
     resume_input: ResumeInput | None,
     options: LLMExecutionOptions,
     stopped_message: str,
+    retry_request_factory: Callable[
+        [LLMRequest, TranslationWorkflowError, Mapping[str, Any]], LLMRequest
+    ]
+    | None = None,
+    retry_candidate_merger: Callable[
+        [Mapping[str, Any], Any], Mapping[str, Any]
+    ]
+    | None = None,
 ) -> Any | Paused | RunError | _InvalidGeneratedOutput:
     """Retry one model-correctable identity/coverage failure, then pause."""
 
@@ -1115,6 +1698,7 @@ def _validated_generation(
 
     first_candidate_id = _attempt_candidate_id(candidate_id)
     first_candidate_path = context.working.find_candidate(first_candidate_id)
+    first_candidate: Mapping[str, Any] | None = None
     feedback: TranslationWorkflowError | None = None
     if first_candidate_path is not None:
         first_candidate = context.working.read_candidate_json(first_candidate_id)
@@ -1129,7 +1713,11 @@ def _validated_generation(
 
     attempt = 2 if feedback is not None else 1
     current_request = (
-        _semantic_retry_request(request, feedback)
+        (
+            retry_request_factory(request, feedback, first_candidate)
+            if retry_request_factory is not None and first_candidate is not None
+            else _semantic_retry_request(request, feedback)
+        )
         if feedback is not None
         else request
     )
@@ -1148,24 +1736,41 @@ def _validated_generation(
         if isinstance(outcome, LLMStopped):
             raise StoppedError(stopped_message)
         assert isinstance(outcome, LLMCompleted)
+        candidate_value = outcome.value
+        if (
+            attempt == 2
+            and first_candidate is not None
+            and retry_candidate_merger is not None
+        ):
+            candidate_value = retry_candidate_merger(
+                first_candidate, candidate_value
+            )
         try:
-            validated = validator(outcome.value)
+            validated = validator(candidate_value)
         except TranslationWorkflowError as exc:
-            document = _generated_candidate_document(outcome.value)
+            document = _generated_candidate_document(candidate_value)
             if attempt == 1:
                 context.working.write_candidate_json(
                     first_candidate_id, document
                 )
+                first_candidate = document
                 feedback = exc
                 attempt = 2
-                current_request = _semantic_retry_request(request, exc)
+                current_request = (
+                    retry_request_factory(request, exc, document)
+                    if retry_request_factory is not None
+                    else _semantic_retry_request(request, exc)
+                )
                 continue
             path = context.working.write_candidate_json(
                 candidate_id, document
             )
             return _InvalidGeneratedOutput(exc, path, document)
+        persisted = (
+            validated if isinstance(validated, Mapping) else candidate_value
+        )
         context.working.write_candidate_json(
-            candidate_id, _generated_candidate_document(outcome.value)
+            candidate_id, _generated_candidate_document(persisted)
         )
         return validated
 
@@ -1180,15 +1785,25 @@ def _semantic_retry_request(
     request: LLMRequest, error: TranslationWorkflowError
 ) -> LLMRequest:
     message = str(error)
+    details = json.dumps(
+        error.details,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     bounded_message = message[:500]
-    error_digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
+    bounded_details = details[:1500]
+    error_digest = hashlib.sha256(
+        f"{message}\n{details}".encode()
+    ).hexdigest()
     prompt = request.prompt
     marker = "\n\nInput JSON:\n"
     if marker in prompt:
         prefix, payload = prompt.split(marker, 1)
         prompt = (
             f"{prefix}\n\nRetry after a machine-checkable output-contract "
-            f"failure ({error.code}): {bounded_message}. Generate the "
+            f"failure ({error.code}): {bounded_message}. Exact diagnostics: "
+            f"{bounded_details}. Generate the "
             "complete output "
             "again; do not narrow or change the scientific content."
             f"{marker}{payload}"
@@ -1196,7 +1811,8 @@ def _semantic_retry_request(
     else:
         prompt = (
             f"{prompt}\n\nRetry after a machine-checkable output-contract "
-            f"failure ({error.code}): {bounded_message}. Generate the "
+            f"failure ({error.code}): {bounded_message}. Exact diagnostics: "
+            f"{bounded_details}. Generate the "
             "complete output "
             "again; do not narrow or change the scientific content."
         )
@@ -1336,6 +1952,56 @@ _GLOSSARY_ENTRY_FIELDS = {
     "preferred_translation",
     "target_definition",
 }
+_ALLOWED_GLOSSARY_CONTROL_CHARACTERS = frozenset({"\t", "\n", "\r"})
+_ANSI_SGR_RE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-9:;]{0,32}m"
+)
+_TRUNCATED_UNICODE_RE = re.compile(
+    r"(?P<high>[\x01-\x08\x0b\x0c\x0e-\x1f])"
+    r"(?P<suffix>[0-9a-f]{2})(?![0-9a-f])",
+    re.IGNORECASE,
+)
+_GLOSSARY_TRANSLATED_TERM_MATH_MARKERS = (
+    "$",
+    r"\(",
+    r"\)",
+    r"\[",
+    r"\]",
+)
+
+
+def _has_forbidden_glossary_control(value: str) -> bool:
+    return any(
+        (
+            ord(character) < 0x20
+            and character not in _ALLOWED_GLOSSARY_CONTROL_CHARACTERS
+        )
+        or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    )
+
+
+def _has_glossary_translated_term_math_markup(value: str) -> bool:
+    return any(
+        marker in value
+        for marker in _GLOSSARY_TRANSLATED_TERM_MATH_MARKERS
+    )
+
+
+def _recover_glossary_control_text(value: str) -> str:
+    """Remove terminal controls and reconstruct deterministic Unicode damage."""
+
+    without_terminal_controls = _ANSI_SGR_RE.sub("", value)
+
+    def reconstruct(match: re.Match[str]) -> str:
+        return chr(
+            ord(match.group("high")) * 0x100
+            + int(match.group("suffix"), 16)
+        )
+
+    return _TRUNCATED_UNICODE_RE.sub(
+        reconstruct, without_terminal_controls
+    )
 
 
 def _keyword_inventory_document(value: Any) -> dict[str, JsonValue]:
@@ -1548,6 +2214,21 @@ def _validate_glossary_window(
                 "glossary_content_invalid",
                 "glossary translations and target definitions must be non-empty",
             )
+        if _has_forbidden_glossary_control(
+            entry["preferred_translation"]
+        ) or _has_forbidden_glossary_control(entry["target_definition"]):
+            raise TranslationWorkflowError(
+                "glossary_control_character_invalid",
+                "glossary translations and target definitions cannot contain "
+                "control characters",
+            )
+        if _has_glossary_translated_term_math_markup(
+            entry["preferred_translation"]
+        ):
+            raise TranslationWorkflowError(
+                "glossary_translation_math_markup_invalid",
+                "glossary preferred_translation must be plain text",
+            )
         output.append(
             {
                 **dict(term),
@@ -1556,6 +2237,213 @@ def _validate_glossary_window(
             }
         )  # type: ignore[arg-type]
     return output
+
+
+def _salvaged_glossary_fallback(
+    value: Mapping[str, Any], terms: Sequence[Mapping[str, Any]]
+) -> tuple[list[dict[str, JsonValue]], list[str], list[str]]:
+    _require_fields(value, {"entries"}, "glossary window")
+    raw_entries = _mapping_list(value["entries"], "glossary window entries")
+    if len(raw_entries) != len(terms):
+        raise TranslationWorkflowError(
+            "glossary_coverage_invalid",
+            "glossary window must cover every supplied term",
+        )
+    accepted: list[dict[str, JsonValue]] = []
+    recovered_term_ids: list[str] = []
+    dropped_term_ids: list[str] = []
+    for entry, term in zip(raw_entries, terms, strict=True):
+        candidate = dict(entry)
+        recovered = False
+        for field in ("preferred_translation", "target_definition"):
+            raw_text = candidate.get(field)
+            if not isinstance(raw_text, str):
+                continue
+            recovered_text = _recover_glossary_control_text(raw_text)
+            if recovered_text != raw_text:
+                candidate[field] = recovered_text
+                recovered = True
+        preferred = candidate.get("preferred_translation")
+        if (
+            isinstance(preferred, str)
+            and _has_glossary_translated_term_math_markup(preferred)
+        ):
+            candidate["preferred_translation"] = str(term["term"])
+            recovered = True
+        try:
+            validated = _validate_glossary_window(
+                {"entries": [candidate]}, [term]
+            )
+        except TranslationWorkflowError as exc:
+            if exc.code not in {
+                "glossary_content_invalid",
+                "glossary_control_character_invalid",
+                "glossary_translation_math_markup_invalid",
+            }:
+                raise
+            dropped_term_ids.append(str(term["term_id"]))
+            continue
+        accepted.extend(validated)
+        if recovered:
+            recovered_term_ids.append(str(term["term_id"]))
+    if not recovered_term_ids and not dropped_term_ids:
+        raise TranslationWorkflowError(
+            "glossary_fallback_invalid",
+            "glossary control fallback did not identify an unsafe entry",
+        )
+    return accepted, recovered_term_ids, dropped_term_ids
+
+
+def _publish_glossary_fallback(
+    context: RunContext,
+    artifact_id: str,
+    *,
+    recovered_term_ids: Sequence[str] = (),
+    dropped_term_ids: Sequence[str],
+    reason_codes: Sequence[str],
+) -> None:
+    document = {
+        "schema_version": "alc.translate.glossary_fallback_diagnostic.v2",
+        "recovered_term_ids": list(dict.fromkeys(recovered_term_ids)),
+        "dropped_term_ids": list(dict.fromkeys(dropped_term_ids)),
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+    }
+    expected = _glossary_fallback_summary_from_diagnostic(document)
+    existing = context.artifacts.find(artifact_id)
+    if existing is not None:
+        actual = _glossary_fallback_summary_from_diagnostic(
+            _read_json_artifact(context, existing, "glossary fallback diagnostic")
+        )
+        if actual != expected:
+            raise TranslationWorkflowError(
+                "glossary_fallback_mismatch",
+                "glossary fallback diagnostic differs on replay",
+            )
+        return
+    context.artifacts.publish_json(artifact_id, document)
+    event = {
+        "glossary_entry_count": len(document["dropped_term_ids"]),
+        "reason_codes": document["reason_codes"],
+    }
+    if recovered_term_ids:
+        event["glossary_recovered_entry_count"] = len(
+            document["recovered_term_ids"]
+        )
+    context.events.emit("translation_fallback", event)
+
+
+def _load_legacy_glossary_fallback_summary(
+    context: RunContext,
+    *,
+    source: TranslationSource,
+    approx_count: int,
+    target_language: str,
+    term_input_budget_bytes: int,
+    artifact_prefix: str,
+) -> GlossaryFallbackSummary:
+    inventory_ref = context.artifacts.find(
+        f"{artifact_prefix}/keyword-inventory"
+    )
+    if inventory_ref is None:
+        return GlossaryFallbackSummary()
+    inventory = _read_json_artifact(
+        context, inventory_ref, "legacy keyword inventory"
+    )
+    _validate_keyword_inventory(
+        inventory, source=source, approx_count=approx_count
+    )
+    terms = _mapping_list(inventory["terms"], "legacy keyword terms")
+    windows = _glossary_windows(
+        terms,
+        target_language=target_language,
+        budget_bytes=term_input_budget_bytes,
+    )
+    return _load_glossary_fallback_summary(
+        context,
+        terms=terms,
+        window_count=len(windows),
+        artifact_prefix=artifact_prefix,
+    )
+
+
+def _load_glossary_fallback_summary(
+    context: RunContext,
+    *,
+    terms: Sequence[Mapping[str, Any]],
+    window_count: int,
+    artifact_prefix: str,
+) -> GlossaryFallbackSummary:
+    known_term_ids = {str(term["term_id"]) for term in terms}
+    recovered: list[str] = []
+    dropped: list[str] = []
+    reasons: list[str] = []
+    for ordinal in range(window_count):
+        ref = context.artifacts.find(
+            f"{artifact_prefix}/fallbacks/{ordinal:04d}"
+        )
+        if ref is None:
+            continue
+        summary = _glossary_fallback_summary_from_diagnostic(
+            _read_json_artifact(context, ref, "glossary fallback diagnostic")
+        )
+        recovered.extend(summary.recovered_term_ids)
+        dropped.extend(summary.dropped_term_ids)
+        reasons.extend(summary.reason_codes)
+    result = GlossaryFallbackSummary(
+        recovered_term_ids=tuple(dict.fromkeys(recovered)),
+        dropped_term_ids=tuple(dict.fromkeys(dropped)),
+        reason_codes=tuple(dict.fromkeys(reasons)),
+    )
+    declared = set(result.recovered_term_ids) | set(result.dropped_term_ids)
+    if not declared.issubset(known_term_ids):
+        raise TranslationWorkflowError(
+            "glossary_fallback_invalid",
+            "glossary fallback summary refers to an unknown term",
+        )
+    return result
+
+
+def _glossary_fallback_summary_from_diagnostic(
+    value: Mapping[str, Any],
+) -> GlossaryFallbackSummary:
+    schema_version = _string(value, "schema_version")
+    common = {"schema_version", "dropped_term_ids", "reason_codes"}
+    if schema_version == "alc.translate.glossary_fallback_diagnostic.v2":
+        _require_fields(
+            value, {*common, "recovered_term_ids"}, "glossary fallback diagnostic"
+        )
+        recovered = _string_items(
+            value["recovered_term_ids"], "recovered glossary term IDs"
+        )
+    elif schema_version == "alc.translate.glossary_fallback_diagnostic.v1":
+        allowed = (common, {*common, "recovered_term_ids"})
+        if set(value) not in allowed:
+            raise TranslationWorkflowError(
+                "glossary_fallback_invalid",
+                "legacy glossary fallback diagnostic is invalid",
+            )
+        recovered = _string_items(
+            value.get("recovered_term_ids", ()), "recovered glossary term IDs"
+        )
+    else:
+        raise TranslationWorkflowError(
+            "glossary_fallback_invalid",
+            "glossary fallback diagnostic uses an unsupported schema",
+        )
+    try:
+        return GlossaryFallbackSummary(
+            recovered_term_ids=recovered,
+            dropped_term_ids=_string_items(
+                value["dropped_term_ids"], "dropped glossary term IDs"
+            ),
+            reason_codes=_string_items(
+                value["reason_codes"], "glossary fallback reason codes"
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise TranslationWorkflowError(
+            "glossary_fallback_invalid", str(exc)
+        ) from exc
 
 
 def _validated_glossary_document(
@@ -1709,7 +2597,7 @@ def _model_translation_blocks(
     return tuple(
         block
         for block in blocks
-        if not _is_structural_figure(block)
+        if not _is_nonlinguistic_media_block(block)
         and str(block.get("kind")) != "equation"
         and source_note_link_markdown(block) is None
     )
@@ -1721,6 +2609,7 @@ class _TranslationUnitPlan:
     kind: str
     unit_groups: tuple[tuple[str, ...], ...]
     direct: bool
+    protected_atom_ids: tuple[str, ...]
 
 
 def _bounded_model_translation_units(
@@ -1763,38 +2652,52 @@ def _bounded_model_translation_units(
                     str(block.get("kind")),
                     ((block_id,),),
                     True,
+                    protected_atom_ids(block),
                 )
             )
             continue
         text_budget = max(64, budget_bytes // 4)
         while True:
             try:
-                text_groups = translation_text_groups(
+                part_groups = protected_atom_part_groups(
                     block, max_bytes=text_budget
                 )
-            except TranslationSourceError as exc:
+            except ProtectedAtomError as exc:
                 raise TranslationWorkflowError(
                     exc.code, str(exc), exc.details
                 ) from exc
             candidate_units: list[Mapping[str, Any]] = []
             unit_groups: list[tuple[str, ...]] = []
             unit_ordinal = 0
-            for group in text_groups:
+            for group in part_groups:
                 group_ids: list[str] = []
-                for text in group:
+                for parts in group:
                     unit_id = (
                         f"{block_id}.translation-unit-{unit_ordinal:06d}"
                     )
                     unit_ordinal += 1
                     group_ids.append(unit_id)
+                    unit_plan = protected_atom_subplan(
+                        block, block_id=unit_id, parts=parts
+                    )
+                    unit = {
+                        "block_id": unit_id,
+                        "ordinal": block.get("ordinal"),
+                        "kind": "translation_unit",
+                        "section_path": block.get("section_path", []),
+                        "payload": {"text": ""},
+                        "protected_atom_plan": unit_plan,
+                    }
+                    try:
+                        source_text, _ = assemble_protected_translation(
+                            unit, unit_plan["parts"]
+                        )
+                    except ProtectedAtomError as exc:
+                        raise TranslationWorkflowError(
+                            exc.code, str(exc), exc.details
+                        ) from exc
                     candidate_units.append(
-                        {
-                            "block_id": unit_id,
-                            "ordinal": block.get("ordinal"),
-                            "kind": "translation_unit",
-                            "section_path": block.get("section_path", []),
-                            "payload": {"text": text},
-                        }
+                        {**unit, "payload": {"text": source_text}}
                     )
                 unit_groups.append(tuple(group_ids))
             if not candidate_units:
@@ -1821,12 +2724,24 @@ def _bounded_model_translation_units(
                 for unit in candidate_units
             ):
                 units.extend(candidate_units)
+                actual_atom_ids = [
+                    atom_id
+                    for unit in candidate_units
+                    for atom_id in protected_atom_ids(unit)
+                ]
+                expected_atom_ids = list(protected_atom_ids(block))
+                if sorted(actual_atom_ids) != sorted(expected_atom_ids):
+                    raise TranslationWorkflowError(
+                        "translation_atom_plan_invalid",
+                        "split translation units do not exactly cover source atoms",
+                    )
                 plans.append(
                     _TranslationUnitPlan(
                         block_id,
                         str(block.get("kind")),
                         tuple(unit_groups),
                         False,
+                        tuple(expected_atom_ids),
                     )
                 )
                 break
@@ -1843,14 +2758,14 @@ def _bounded_model_translation_units(
 def _collapse_model_translation_units(
     blocks: Sequence[Mapping[str, Any]],
     plans: Sequence[_TranslationUnitPlan],
-    translations: Sequence[Mapping[str, str]],
+    translations: Sequence[Mapping[str, Any]],
 ) -> tuple[Mapping[str, str], ...]:
     if len(blocks) != len(plans):
         raise TranslationWorkflowError(
             "translation_coverage_invalid",
             "translation unit plans do not cover the selected source blocks",
         )
-    by_id = {str(item["block_id"]): str(item["text"]) for item in translations}
+    by_id = {str(item["block_id"]): item for item in translations}
     if len(by_id) != len(translations):
         raise TranslationWorkflowError(
             "translation_coverage_invalid",
@@ -1874,7 +2789,8 @@ def _collapse_model_translation_units(
                         f"translation omitted internal unit {unit_id}",
                     )
                 consumed.add(unit_id)
-                value = by_id[unit_id].strip()
+                translation = by_id[unit_id]
+                value = str(translation["text"]).strip()
                 if plan.kind == "list" and not plan.direct:
                     value = " ".join(
                         line.strip()
@@ -1888,13 +2804,21 @@ def _collapse_model_translation_units(
             if plan.kind == "list" and not plan.direct
             else " ".join(group_values)
         ).strip()
-        text = restore_translation_identity(text, block)
-        try:
-            validate_translation_text(text, block)
-        except TranslationSourceError as exc:
-            raise TranslationWorkflowError(
-                exc.code, str(exc), exc.details
-            ) from exc
+        protected = all(
+            item.get("schema_version") == PROTECTED_ATOM_RESULT_SCHEMA
+            for item in (by_id[unit_id] for group in plan.unit_groups for unit_id in group)
+        )
+        if not protected:
+            # Historical accepted Markdown is read through this explicit
+            # compatibility branch. New model results were assembled locally
+            # from immutable atoms and do not re-parse model Markdown.
+            text = restore_translation_identity(text, block)
+            try:
+                validate_translation_text(text, block)
+            except TranslationSourceError as exc:
+                raise TranslationWorkflowError(
+                    exc.code, str(exc), exc.details
+                ) from exc
         output.append({"block_id": plan.block_id, "text": text})
     if consumed != set(by_id):
         raise TranslationWorkflowError(
@@ -1907,7 +2831,7 @@ def _collapse_model_translation_units(
 def _collapse_model_translation_units_with_fallback(
     blocks: Sequence[Mapping[str, Any]],
     plans: Sequence[_TranslationUnitPlan],
-    translations: Sequence[Mapping[str, str]],
+    translations: Sequence[Mapping[str, Any]],
 ) -> tuple[tuple[Mapping[str, str], ...], tuple[str, ...]]:
     """Collapse bounded units while preserving only identity-invalid blocks.
 
@@ -1973,18 +2897,39 @@ def _collapse_model_translation_units_with_fallback(
     return tuple(output), tuple(source_fallback_ids)
 
 
+def _protected_original_block_ids(
+    plans: Sequence[_TranslationUnitPlan],
+    translations: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    by_id = {str(item.get("block_id")): item for item in translations}
+    protected: set[str] = set()
+    for plan in plans:
+        unit_ids = [
+            unit_id for group in plan.unit_groups for unit_id in group
+        ]
+        if unit_ids and all(
+            by_id.get(unit_id, {}).get("schema_version")
+            == PROTECTED_ATOM_RESULT_SCHEMA
+            for unit_id in unit_ids
+        ):
+            protected.add(plan.block_id)
+    return protected
+
+
 def _salvaged_translation_fallback(
     blocks: Sequence[Mapping[str, Any]],
     *,
     candidate: Mapping[str, Any] | None = None,
-) -> tuple[list[dict[str, str]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     candidate_by_id: dict[str, Mapping[str, Any]] = {}
-    raw_translations = (
-        candidate.get("translations")
-        if isinstance(candidate, Mapping)
-        else None
-    )
-    if isinstance(raw_translations, Sequence) and not isinstance(
+    raw_translations = candidate.get("translations") if candidate else None
+    if isinstance(raw_translations, Mapping):
+        candidate_by_id = {
+            str(block_id): item
+            for block_id, item in raw_translations.items()
+            if isinstance(block_id, str) and isinstance(item, Mapping)
+        }
+    elif isinstance(raw_translations, Sequence) and not isinstance(
         raw_translations, (str, bytes)
     ):
         for item in raw_translations:
@@ -1994,37 +2939,96 @@ def _salvaged_translation_fallback(
             if isinstance(block_id, str) and block_id not in candidate_by_id:
                 candidate_by_id[block_id] = item
 
-    translations: list[dict[str, str]] = []
+    protected_candidate = (
+        isinstance(candidate, Mapping)
+        and candidate.get("schema_version") == PROTECTED_ATOM_RESULT_SCHEMA
+    )
+    text_slot_candidate = (
+        isinstance(candidate, Mapping)
+        and candidate.get("schema_version") == TEXT_SLOT_RESULT_SCHEMA
+    )
+    translations: list[dict[str, Any]] = []
     source_fallback_ids: list[str] = []
     for block in blocks:
         block_id = str(block["block_id"])
         candidate_item = candidate_by_id.get(block_id)
         if candidate_item is not None:
             try:
-                translations.extend(
-                    _validate_draft_window(
-                        {"translations": [dict(candidate_item)]},
-                        (block,),
+                if text_slot_candidate:
+                    translations.extend(
+                        _validate_text_slot_window(
+                            {
+                                "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+                                "translations": {
+                                    block_id: dict(candidate_item)
+                                },
+                            },
+                            (block,),
+                        )
                     )
-                )
+                elif protected_candidate:
+                    translations.extend(
+                        _validate_model_protected_atom_window(
+                            {
+                                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                                "translations": [dict(candidate_item)],
+                            },
+                            (block,),
+                        )
+                    )
+                else:
+                    # Explicit legacy input compatibility: this is only for
+                    # artifacts created by pre-protected-atom prompt versions.
+                    translations.extend(
+                        _validate_draft_window(
+                            {"translations": [dict(candidate_item)]},
+                            (block,),
+                        )
+                    )
                 continue
             except TranslationWorkflowError:
                 pass
         source_fallback_ids.append(block_id)
-        translations.extend(
-            _validate_draft_window(
-                {
-                    "translations": [
-                        {
-                            "block_id": block_id,
-                            "text": _identity_preserving_source_text(block),
-                        }
-                    ]
-                },
-                (block,),
-            )
-        )
+        translations.append(_source_protected_translation(block))
     return translations, source_fallback_ids
+
+
+def _source_protected_translation(block: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        text, parts = assemble_protected_translation(
+            block, source_protected_parts(block)
+        )
+    except ProtectedAtomError as exc:
+        raise TranslationWorkflowError(
+            exc.code, str(exc), exc.details
+        ) from exc
+    return {
+        "block_id": str(block["block_id"]),
+        "text": text,
+        "parts": parts,
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+    }
+
+
+def _translation_result_document(
+    translations: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if all(
+        item.get("schema_version") == PROTECTED_ATOM_RESULT_SCHEMA
+        and isinstance(item.get("parts"), Sequence)
+        and not isinstance(item.get("parts"), (str, bytes))
+        for item in translations
+    ):
+        return protected_result_document(translations)
+    # A persisted pre-v13 candidate can contain valid neighboring Markdown
+    # entries. Keep that replay on the explicit legacy representation instead
+    # of silently interpreting it as a protected-atom result.
+    return {
+        "translations": [
+            {"block_id": str(item["block_id"]), "text": str(item["text"])}
+            for item in translations
+        ]
+    }
 
 
 def _identity_preserving_source_text(block: Mapping[str, Any]) -> str:
@@ -2038,6 +3042,242 @@ def _identity_preserving_source_text(block: Mapping[str, Any]) -> str:
     return text
 
 
+def _persist_source_fallback_window(
+    context: RunContext,
+    window: Sequence[Mapping[str, Any]],
+    *,
+    accepted_id: str,
+    fallback_id: str,
+    reason_code: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    fallback, source_fallback_ids = _salvaged_translation_fallback(window)
+    _publish_translation_fallback(
+        context,
+        fallback_id,
+        source_text_block_ids=source_fallback_ids,
+        review_skipped_block_ids=[],
+        reason_codes=[reason_code],
+    )
+    context.artifacts.publish_json(
+        accepted_id, _translation_result_document(fallback)
+    )
+    return fallback, source_fallback_ids
+
+
+def _provider_fallback_reason(outcome: Paused | RunError) -> str | None:
+    """Return one typed provider reason eligible for block-local fallback."""
+
+    markers: set[str] = set()
+    if isinstance(outcome, Paused):
+        details: Mapping[str, Any] = outcome.awaiting.details
+    else:
+        markers.add(outcome.code)
+        details = outcome.details
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                if key in {
+                    "code",
+                    "category",
+                    "ac_error_code",
+                    "detail_code",
+                } and isinstance(child, str):
+                    markers.add(child)
+                if key in {"causes", "details", "provider_failure"}:
+                    collect(child)
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for child in value:
+                collect(child)
+
+    collect(details)
+    if markers & _PROVIDER_HARD_STOP_MARKERS:
+        return None
+    if not markers & _PROVIDER_FALLBACK_MARKERS:
+        return None
+    for reason in _PROVIDER_FALLBACK_REASON_ORDER:
+        if reason in markers:
+            return reason
+    return None
+
+
+def _provider_reason_from_codes(
+    reason_codes: Sequence[str],
+) -> str | None:
+    values = set(reason_codes)
+    return next(
+        (
+            reason
+            for reason in _PROVIDER_FALLBACK_REASON_ORDER
+            if reason in values
+        ),
+        None,
+    )
+
+
+def _publish_translation_provider_failure(
+    context: RunContext,
+    artifact_id: str,
+    *,
+    outcome: Paused | RunError,
+    model: ModelSelection,
+    reason_code: str,
+    stage: str,
+    window_ordinal: int,
+    consecutive_window_failures: int,
+    global_fallback_triggered: bool,
+    remaining_windows_skipped: int,
+) -> None:
+    document = _translation_provider_failure_document(
+        outcome=outcome,
+        model=model,
+        reason_code=reason_code,
+        stage=stage,
+        window_ordinal=window_ordinal,
+        consecutive_window_failures=consecutive_window_failures,
+        global_fallback_triggered=global_fallback_triggered,
+        remaining_windows_skipped=remaining_windows_skipped,
+    )
+    _publish_translation_provider_failure_document(context, artifact_id, document)
+
+
+def _translation_provider_failure_document(
+    *,
+    outcome: Paused | RunError,
+    model: ModelSelection,
+    reason_code: str,
+    stage: str,
+    window_ordinal: int,
+    consecutive_window_failures: int,
+    global_fallback_triggered: bool,
+    remaining_windows_skipped: int,
+) -> dict[str, Any]:
+    details: Mapping[str, Any] = (
+        outcome.awaiting.details if isinstance(outcome, Paused) else outcome.details
+    )
+    provider_failure = _nested_provider_failure(details)
+    category = _optional_nonblank_string(
+        provider_failure.get("category")
+    ) or _provider_category_from_reason(reason_code)
+    detail_code = _optional_nonblank_string(
+        provider_failure.get("detail_code")
+    ) or _optional_nonblank_string(provider_failure.get("ac_error_code"))
+    return {
+        "schema_version": _TRANSLATION_PROVIDER_FALLBACK_DIAGNOSTIC_SCHEMA,
+        "provider": model.provider,
+        "model": model.model,
+        "tier": model.tier,
+        "effort": model.reasoning_effort,
+        "reason_code": reason_code,
+        "failure_category": category or "unknown",
+        "detail_code": detail_code or reason_code,
+        "stage": stage,
+        "window_ordinal": window_ordinal,
+        "consecutive_window_failures": consecutive_window_failures,
+        "global_fallback_triggered": global_fallback_triggered,
+        "remaining_windows_skipped": remaining_windows_skipped,
+    }
+
+
+def _publish_translation_provider_failure_document(
+    context: RunContext,
+    artifact_id: str,
+    document: Mapping[str, Any],
+) -> None:
+    _validate_translation_provider_failure_document(document)
+    existing = context.artifacts.find(artifact_id)
+    if existing is not None:
+        if _read_json_artifact(
+            context, existing, "translation provider fallback diagnostic"
+        ) != document:
+            raise TranslationWorkflowError(
+                "translation_provider_fallback_mismatch",
+                "translation provider fallback diagnostic differs on replay",
+            )
+        return
+    context.artifacts.publish_json(artifact_id, document)
+    context.events.emit(
+        "translation_provider_fallback",
+        {key: value for key, value in document.items() if key != "schema_version"},
+    )
+
+
+def _validate_translation_provider_failure_document(
+    document: Mapping[str, Any],
+) -> None:
+    expected_fields = {
+        "schema_version",
+        "provider",
+        "model",
+        "tier",
+        "effort",
+        "reason_code",
+        "failure_category",
+        "detail_code",
+        "stage",
+        "window_ordinal",
+        "consecutive_window_failures",
+        "global_fallback_triggered",
+        "remaining_windows_skipped",
+    }
+    if (
+        set(document) != expected_fields
+        or document.get("schema_version")
+        != _TRANSLATION_PROVIDER_FALLBACK_DIAGNOSTIC_SCHEMA
+        or not isinstance(document.get("reason_code"), str)
+        or not str(document["reason_code"])
+    ):
+        raise TranslationWorkflowError(
+            "translation_provider_fallback_invalid",
+            "translation provider fallback diagnostic is invalid",
+        )
+
+
+def _nested_provider_failure(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    direct = value.get("provider_failure")
+    if isinstance(direct, Mapping):
+        return direct
+    for key in ("details", "causes"):
+        child = value.get(key)
+        if isinstance(child, Mapping):
+            found = _nested_provider_failure(child)
+            if found:
+                return found
+        elif isinstance(child, Sequence) and not isinstance(
+            child, (str, bytes, bytearray)
+        ):
+            for item in child:
+                found = _nested_provider_failure(item)
+                if found:
+                    return found
+    return {}
+
+
+def _optional_nonblank_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _provider_category_from_reason(reason_code: str) -> str:
+    if reason_code == "provider_circuit_open":
+        return "circuit_open"
+    if reason_code == "provider_crash_retry_exhausted":
+        return "crash_retry_exhausted"
+    for category in (
+        "timeout",
+        "transport",
+        "unavailable",
+        "quota",
+        "rate_limit",
+    ):
+        if reason_code in {category, f"provider_{category}"}:
+            return category
+    return "unknown"
+
+
 def _publish_translation_fallback(
     context: RunContext,
     artifact_id: str,
@@ -2046,8 +3286,22 @@ def _publish_translation_fallback(
     review_skipped_block_ids: Sequence[str],
     reason_codes: Sequence[str],
 ) -> None:
-    document = {
-        "schema_version": "alc.translate.fallback_diagnostic.v1",
+    document = _translation_fallback_document(
+        source_text_block_ids=source_text_block_ids,
+        review_skipped_block_ids=review_skipped_block_ids,
+        reason_codes=reason_codes,
+    )
+    _publish_translation_fallback_document(context, artifact_id, document)
+
+
+def _translation_fallback_document(
+    *,
+    source_text_block_ids: Sequence[str],
+    review_skipped_block_ids: Sequence[str],
+    reason_codes: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": _TRANSLATION_FALLBACK_DIAGNOSTIC_SCHEMA,
         "source_text_block_ids": list(
             dict.fromkeys(source_text_block_ids)
         ),
@@ -2056,6 +3310,14 @@ def _publish_translation_fallback(
         ),
         "reason_codes": list(dict.fromkeys(reason_codes)),
     }
+
+
+def _publish_translation_fallback_document(
+    context: RunContext,
+    artifact_id: str,
+    document: Mapping[str, Any],
+) -> None:
+    _translation_fallback_entries(document)
     existing = context.artifacts.find(artifact_id)
     if existing is not None:
         if _read_json_artifact(
@@ -2085,21 +3347,39 @@ def _load_translation_fallback(
     context: RunContext,
     artifact_id: str,
     fallback_units: dict[str, str],
-) -> None:
+) -> tuple[str, ...]:
     ref = context.artifacts.find(artifact_id)
     if ref is None:
-        return
+        return ()
     document = _read_json_artifact(
         context, ref, "translation fallback diagnostic"
     )
+    return _apply_translation_fallback_document(document, fallback_units)
+
+
+def _apply_translation_fallback_document(
+    document: Mapping[str, Any],
+    fallback_units: dict[str, str],
+) -> tuple[str, ...]:
+    source_ids, review_ids, reason_codes = _translation_fallback_entries(document)
+    fallback_units.update(
+        (block_id, "review_skipped") for block_id in review_ids
+    )
+    fallback_units.update(
+        (block_id, "source_text") for block_id in source_ids
+    )
+    return reason_codes
+
+
+def _translation_fallback_entries(
+    document: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     if set(document) != {
         "schema_version",
         "source_text_block_ids",
         "review_skipped_block_ids",
         "reason_codes",
-    } or document.get("schema_version") != (
-        "alc.translate.fallback_diagnostic.v1"
-    ):
+    } or document.get("schema_version") != _TRANSLATION_FALLBACK_DIAGNOSTIC_SCHEMA:
         raise TranslationWorkflowError(
             "translation_fallback_invalid",
             "translation fallback diagnostic is invalid",
@@ -2112,13 +3392,10 @@ def _load_translation_fallback(
         document.get("review_skipped_block_ids"),
         "review fallback block IDs",
     )
-    _string_items(document.get("reason_codes"), "fallback reason codes")
-    fallback_units.update(
-        (block_id, "review_skipped") for block_id in review_ids
+    reason_codes = _string_items(
+        document.get("reason_codes"), "fallback reason codes"
     )
-    fallback_units.update(
-        (block_id, "source_text") for block_id in source_ids
-    )
+    return source_ids, review_ids, reason_codes
 
 
 def _collapse_translation_fallbacks(
@@ -2166,10 +3443,24 @@ def _is_structural_figure(block: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_structural_table(block: Mapping[str, Any]) -> bool:
+    """Tables without a caption have no ALC translation surface."""
+
+    if str(block.get("kind")) != "table":
+        return False
+    payload = block.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TranslationWorkflowError(
+            "source_block_invalid",
+            "source block payload must be an object",
+        )
+    return not str(payload.get("caption", "")).strip()
+
+
 def _is_nonlinguistic_media_block(block: Mapping[str, Any]) -> bool:
     """Return whether a source media block has no language-bearing content."""
 
-    return _is_structural_figure(block)
+    return _is_structural_figure(block) or _is_structural_table(block)
 
 
 def _is_nonlinguistic_media_translation(
@@ -2177,6 +3468,8 @@ def _is_nonlinguistic_media_translation(
 ) -> bool:
     if not _is_nonlinguistic_media_block(block):
         return False
+    if _is_structural_table(block):
+        return text.strip() == STRUCTURAL_FIGURE_PLACEHOLDER
     payload = block.get("payload")
     assert isinstance(payload, Mapping)
     marker = text.strip()
@@ -2203,7 +3496,7 @@ def _merge_programmatic_translations(
         if link_markdown is not None:
             merged.append({"block_id": block_id, "text": link_markdown})
             continue
-        if _is_structural_figure(block):
+        if _is_nonlinguistic_media_block(block):
             merged.append(
                 {
                     "block_id": block_id,
@@ -2269,7 +3562,7 @@ def _translation_prompt_size(
 ) -> int:
     return len(
         translation_prompt(
-            blocks=[prompt_block(item) for item in blocks],
+            blocks=[text_slot_prompt_block(item) for item in blocks],
             glossary=_window_glossary(blocks, glossary),
             target_language=target_language,
             language_result=language.to_document(),
@@ -2287,12 +3580,11 @@ def _translation_review_estimate_size(
 ) -> int:
     return len(
         review_prompt(
-            blocks=[prompt_block(item) for item in blocks],
+            blocks=[text_slot_prompt_block(item) for item in blocks],
             translations=[
-                {
-                    "block_id": str(item["block_id"]),
-                    "text": block_text(item) or "translated block",
-                }
+                _review_text_slot_projection(
+                    item, _source_protected_translation(item)
+                )
                 for item in blocks
             ],
             glossary=_window_glossary(blocks, glossary),
@@ -2334,8 +3626,13 @@ def _translation_review_windows(
         candidate_blocks = [*current_blocks, block]
         candidate_translations = [*current_translations, translation]
         candidate_text = review_prompt(
-            blocks=[prompt_block(item) for item in candidate_blocks],
-            translations=candidate_translations,
+            blocks=[text_slot_prompt_block(item) for item in candidate_blocks],
+            translations=[
+                _review_text_slot_projection(block, item)
+                for block, item in zip(
+                    candidate_blocks, candidate_translations, strict=True
+                )
+            ],
             glossary=_window_glossary(candidate_blocks, glossary),
             target_language=target_language,
             window_ordinal=window_ordinal,
@@ -2349,8 +3646,10 @@ def _translation_review_windows(
                 (tuple(current_blocks), tuple(current_translations))
             )
         single_text = review_prompt(
-            blocks=[prompt_block(block)],
-            translations=[translation],
+            blocks=[text_slot_prompt_block(block)],
+            translations=[
+                _review_text_slot_projection(block, translation)
+            ],
             glossary=_window_glossary([block], glossary),
             target_language=target_language,
             window_ordinal=window_ordinal,
@@ -2367,10 +3666,49 @@ def _translation_review_windows(
     return tuple(windows)
 
 
+def _review_translation_projection(
+    translation: Mapping[str, Any],
+) -> dict[str, Any]:
+    parts = translation.get("parts")
+    if not isinstance(parts, Sequence) or isinstance(parts, (str, bytes)):
+        raise TranslationWorkflowError(
+            "translation_atom_result_invalid",
+            "protected translation review requires structured atom parts",
+        )
+    return {
+        "block_id": str(translation.get("block_id", "")),
+        "content": {
+            "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            "parts": [dict(part) for part in parts if isinstance(part, Mapping)],
+        },
+    }
+
+
+def _review_text_slot_projection(
+    block: Mapping[str, Any], translation: Mapping[str, Any]
+) -> dict[str, Any]:
+    parts = translation.get("parts")
+    try:
+        slots = text_slot_values_from_parts(block, parts)
+    except ProtectedAtomError as exc:
+        raise TranslationWorkflowError(
+            exc.code, str(exc), exc.details
+        ) from exc
+    return {
+        "block_id": str(translation.get("block_id", "")),
+        "content": {
+            "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+            "text_slots": slots,
+        },
+    }
+
+
 def _validate_draft_window(
     value: Mapping[str, Any],
     blocks: Sequence[Mapping[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
+    if "schema_version" in value:
+        return _validate_protected_atom_window(value, blocks)
     return _validate_translation_window(
         value,
         blocks,
@@ -2423,6 +3761,422 @@ def _validate_translation_window(
     return output
 
 
+def _validate_protected_atom_window(
+    value: Mapping[str, Any],
+    blocks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    _require_fields(value, {"schema_version", "translations"}, "protected translation result")
+    if value["schema_version"] != PROTECTED_ATOM_RESULT_SCHEMA:
+        raise TranslationWorkflowError(
+            "translation_atom_result_invalid",
+            "translation result uses an unsupported protected-atom schema",
+        )
+    translations = _mapping_list(
+        value["translations"], "protected translation entries"
+    )
+    expected = [str(item["block_id"]) for item in blocks]
+    if [item.get("block_id") for item in translations] != expected:
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "protected translation block IDs must exactly match source order",
+        )
+    output: list[dict[str, Any]] = []
+    for translated, block in zip(translations, blocks, strict=True):
+        _require_fields(
+            translated, {"block_id", "parts"}, "protected translated block"
+        )
+        try:
+            text, parts = assemble_protected_translation(
+                block, translated["parts"]
+            )
+            validate_translation_text(text, block)
+        except ProtectedAtomError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        except TranslationSourceError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        output.append(
+            {
+                "block_id": str(translated["block_id"]),
+                "text": text,
+                "parts": parts,
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            }
+        )
+    return output
+
+
+def _validate_model_protected_atom_window(
+    value: Mapping[str, Any],
+    blocks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate raw model output with bounded caller-side atom restoration."""
+
+    _require_fields(
+        value,
+        {"schema_version", "translations"},
+        "protected translation result",
+    )
+    if value["schema_version"] != PROTECTED_ATOM_RESULT_SCHEMA:
+        raise TranslationWorkflowError(
+            "translation_atom_result_invalid",
+            "translation result uses an unsupported protected-atom schema",
+        )
+    translations = _mapping_list(
+        value["translations"], "protected translation entries"
+    )
+    expected = [str(item["block_id"]) for item in blocks]
+    if [item.get("block_id") for item in translations] != expected:
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "protected translation block IDs must exactly match source order",
+        )
+    output: list[dict[str, Any]] = []
+    for translated, block in zip(translations, blocks, strict=True):
+        _require_fields(
+            translated, {"block_id", "parts"}, "protected translated block"
+        )
+        try:
+            text, parts = assemble_model_protected_translation(
+                block, translated["parts"]
+            )
+            validate_translation_text(text, block)
+        except ProtectedAtomError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        except TranslationSourceError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        output.append(
+            {
+                "block_id": str(translated["block_id"]),
+                "text": text,
+                "parts": parts,
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            }
+        )
+    return output
+
+
+def _validate_text_slot_window(
+    value: Mapping[str, Any],
+    blocks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate exact model text slots and assemble caller-owned atoms locally."""
+
+    _require_fields(
+        value,
+        {"schema_version", "translations"},
+        "text-slot translation result",
+    )
+    if value["schema_version"] != TEXT_SLOT_RESULT_SCHEMA:
+        raise TranslationWorkflowError(
+            "translation_text_slot_result_invalid",
+            "translation result uses an unsupported text-slot schema",
+        )
+    translations = value["translations"]
+    if not isinstance(translations, Mapping):
+        raise TranslationWorkflowError(
+            "translation_text_slot_result_invalid",
+            "text-slot translations must be an object",
+        )
+    expected = [str(item["block_id"]) for item in blocks]
+    if set(translations) != set(expected) or len(translations) != len(expected):
+        raise TranslationWorkflowError(
+            "translation_coverage_invalid",
+            "text-slot translation block IDs must exactly match the source",
+        )
+    output: list[dict[str, Any]] = []
+    for block in blocks:
+        block_id = str(block["block_id"])
+        translated = translations.get(block_id)
+        if not isinstance(translated, Mapping):
+            raise TranslationWorkflowError(
+                "translation_text_slot_result_invalid",
+                f"text-slot translation is invalid for {block_id}",
+            )
+        _require_fields(
+            translated, {"text_slots"}, "text-slot translated block"
+        )
+        try:
+            text, parts = assemble_text_slot_translation(
+                block, translated["text_slots"]
+            )
+            validate_translation_text(text, block)
+        except ProtectedAtomError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        except TranslationSourceError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        output.append(
+            {
+                "block_id": block_id,
+                "text": text,
+                "parts": parts,
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            }
+        )
+    return output
+
+
+def _protected_candidate_items(
+    value: Any,
+) -> dict[str, list[Mapping[str, Any]]]:
+    if not isinstance(value, Mapping):
+        return {}
+    raw = value.get("translations")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return {}
+    items: dict[str, list[Mapping[str, Any]]] = {}
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        block_id = item.get("block_id")
+        if isinstance(block_id, str):
+            items.setdefault(block_id, []).append(item)
+    return items
+
+
+def _text_slot_candidate_items(
+    value: Any,
+) -> dict[str, Mapping[str, Any]]:
+    if not isinstance(value, Mapping):
+        return {}
+    raw = value.get("translations")
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(block_id): item
+        for block_id, item in raw.items()
+        if isinstance(block_id, str) and isinstance(item, Mapping)
+    }
+
+
+def _normalized_text_slot_candidate_item(
+    item: Mapping[str, Any], block: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    block_id = str(block["block_id"])
+    try:
+        validated = _validate_text_slot_window(
+            {
+                "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+                "translations": {block_id: dict(item)},
+            },
+            (block,),
+        )
+    except TranslationWorkflowError:
+        return None
+    return protected_result_document(validated)["translations"][0]
+
+
+def _normalized_model_candidate_item(
+    item: Mapping[str, Any], block: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    try:
+        validated = _validate_model_protected_atom_window(
+            {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": [dict(item)],
+            },
+            (block,),
+        )
+    except TranslationWorkflowError:
+        return None
+    return protected_result_document(validated)["translations"][0]
+
+
+def _invalid_protected_candidate_blocks(
+    candidate: Mapping[str, Any],
+    blocks: Sequence[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    if candidate.get("schema_version") == TEXT_SLOT_RESULT_SCHEMA:
+        items = _text_slot_candidate_items(candidate)
+        return tuple(
+            block
+            for block in blocks
+            if (
+                (item := items.get(str(block["block_id"]))) is None
+                or _normalized_text_slot_candidate_item(item, block) is None
+            )
+        )
+    if candidate.get("schema_version") != PROTECTED_ATOM_RESULT_SCHEMA:
+        return tuple(blocks)
+    items = _protected_candidate_items(candidate)
+    invalid: list[Mapping[str, Any]] = []
+    for block in blocks:
+        candidates = items.get(str(block["block_id"]), ())
+        if (
+            len(candidates) != 1
+            or _normalized_model_candidate_item(candidates[0], block) is None
+        ):
+            invalid.append(block)
+    return tuple(invalid)
+
+
+def _protected_translation_retry_request(
+    request: LLMRequest,
+    error: TranslationWorkflowError,
+    candidate: Mapping[str, Any],
+    blocks: Sequence[Mapping[str, Any]],
+    *,
+    glossary: Sequence[Mapping[str, Any]],
+    target_language: str,
+    language: LanguageResult,
+    window_ordinal: int,
+) -> LLMRequest:
+    invalid = _invalid_protected_candidate_blocks(candidate, blocks) or tuple(
+        blocks
+    )
+    scoped = LLMRequest(
+        _task_id(
+            "translation-retry-scope",
+            {
+                "parent_task_id": request.task_id,
+                "block_ids": [str(item["block_id"]) for item in invalid],
+            },
+        ),
+        translation_prompt(
+            blocks=[text_slot_prompt_block(item) for item in invalid],
+            glossary=glossary,
+            target_language=target_language,
+            language_result=language.to_document(),
+            window_ordinal=window_ordinal,
+        ),
+        JsonOutput(
+            translation_schema(
+                [text_slot_prompt_block(item) for item in invalid]
+            ),
+            repair="format",
+        ),
+        request.model,
+        request.session,
+        request.inputs,
+    )
+    return _semantic_retry_request(scoped, error)
+
+
+def _merge_protected_translation_candidates(
+    first: Mapping[str, Any],
+    second: Any,
+    blocks: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if (
+        first.get("schema_version") == TEXT_SLOT_RESULT_SCHEMA
+        or (
+            isinstance(second, Mapping)
+            and second.get("schema_version") == TEXT_SLOT_RESULT_SCHEMA
+        )
+    ):
+        first_items = _text_slot_candidate_items(first)
+        second_items = _text_slot_candidate_items(second)
+        first_protected_items = _protected_candidate_items(first)
+        second_protected_items = _protected_candidate_items(second)
+        if first_protected_items or second_protected_items:
+            # A retry always returns text slots, while a pre-text-slot accepted
+            # neighbor may use a valid non-canonical protected-atom order.
+            # Keep that validated arrangement intact and assemble only the
+            # retried units into the protected representation.
+            merged: list[dict[str, Any]] = []
+            for block in blocks:
+                block_id = str(block["block_id"])
+                chosen: dict[str, Any] | None = None
+                for items in (second_items, first_items):
+                    candidate = items.get(block_id)
+                    if candidate is None:
+                        continue
+                    normalized = _normalized_text_slot_candidate_item(
+                        candidate, block
+                    )
+                    if normalized is not None:
+                        chosen = normalized
+                        break
+                if chosen is None:
+                    for items in (second_protected_items, first_protected_items):
+                        candidates = items.get(block_id, ())
+                        if len(candidates) != 1:
+                            continue
+                        normalized = _normalized_model_candidate_item(
+                            candidates[0], block
+                        )
+                        if normalized is not None:
+                            chosen = normalized
+                            break
+                if chosen is None:
+                    for items in (second_protected_items, first_protected_items):
+                        candidates = items.get(block_id, ())
+                        if candidates:
+                            chosen = dict(candidates[0])
+                            break
+                if chosen is None:
+                    for items in (second_items, first_items):
+                        candidate = items.get(block_id)
+                        if candidate is not None:
+                            chosen = dict(candidate)
+                            break
+                if chosen is not None:
+                    merged.append(chosen)
+            return {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": merged,
+            }
+        merged_slots: dict[str, dict[str, Any]] = {}
+        for block in blocks:
+            block_id = str(block["block_id"])
+            chosen: dict[str, Any] | None = None
+            for items in (second_items, first_items):
+                candidate = items.get(block_id)
+                if candidate is None:
+                    continue
+                if _normalized_text_slot_candidate_item(candidate, block) is not None:
+                    chosen = dict(candidate)
+                    break
+            if chosen is None:
+                for items in (second_items, first_items):
+                    candidate = items.get(block_id)
+                    if candidate is not None:
+                        chosen = dict(candidate)
+                        break
+            if chosen is not None:
+                merged_slots[block_id] = chosen
+        return {
+            "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+            "translations": merged_slots,
+        }
+    first_items = _protected_candidate_items(first)
+    second_items = _protected_candidate_items(second)
+    merged: list[dict[str, Any]] = []
+    for block in blocks:
+        block_id = str(block["block_id"])
+        chosen: dict[str, Any] | None = None
+        for items in (second_items, first_items):
+            candidates = items.get(block_id, ())
+            if len(candidates) != 1:
+                continue
+            chosen = _normalized_model_candidate_item(candidates[0], block)
+            if chosen is not None:
+                break
+        if chosen is None:
+            for items in (second_items, first_items):
+                candidates = items.get(block_id, ())
+                if candidates:
+                    chosen = dict(candidates[0])
+                    break
+        if chosen is not None:
+            merged.append(chosen)
+    return {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "translations": merged,
+    }
+
+
 def _validated_draft_document(
     value: Any, blocks: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -2431,10 +4185,28 @@ def _validated_draft_document(
     return document
 
 
+def _validated_protected_draft_document(
+    value: Any, blocks: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    document = _object(value, "protected translation draft")
+    if document.get("schema_version") == TEXT_SLOT_RESULT_SCHEMA:
+        validated = _validate_text_slot_window(document, blocks)
+        return protected_result_document(validated)
+    if document.get("schema_version") != PROTECTED_ATOM_RESULT_SCHEMA:
+        raise TranslationWorkflowError(
+            "translation_atom_result_invalid",
+            "translation calls must use a supported caller-owned result schema",
+        )
+    validated = _validate_model_protected_atom_window(document, blocks)
+    return protected_result_document(validated)
+
+
 def _validate_accepted_window(
     value: Mapping[str, Any],
     blocks: Sequence[Mapping[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
+    if "schema_version" in value:
+        return _validate_protected_atom_window(value, blocks)
     return _validate_translation_window(
         value,
         blocks,
@@ -2443,6 +4215,78 @@ def _validate_accepted_window(
         mismatch_message="accepted translations must exactly match source order",
         item_description="accepted translation",
     )
+
+
+def _review_accepted_window_document(
+    accepted: Mapping[str, Any],
+    *,
+    fallback_document: Mapping[str, Any] | None = None,
+    provider_failure_document: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind a review outcome to its diagnostics in one immutable artifact."""
+
+    if fallback_document is None and provider_failure_document is None:
+        return dict(accepted)
+    if fallback_document is not None:
+        _translation_fallback_entries(fallback_document)
+    if provider_failure_document is not None:
+        _validate_translation_provider_failure_document(
+            provider_failure_document
+        )
+    return {
+        "schema_version": REVIEW_ACCEPTED_WINDOW_SCHEMA,
+        "accepted": dict(accepted),
+        "fallback": (
+            dict(fallback_document)
+            if fallback_document is not None
+            else None
+        ),
+        "provider_failure": (
+            dict(provider_failure_document)
+            if provider_failure_document is not None
+            else None
+        ),
+    }
+
+
+def _unpack_review_accepted_window(
+    value: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    if value.get("schema_version") != REVIEW_ACCEPTED_WINDOW_SCHEMA:
+        return dict(value), None, None
+    _require_fields(
+        value,
+        {"schema_version", "accepted", "fallback", "provider_failure"},
+        "review accepted translation window",
+    )
+    accepted = _object(value["accepted"], "review accepted translation")
+    fallback_value = value["fallback"]
+    provider_value = value["provider_failure"]
+    if fallback_value is not None and not isinstance(fallback_value, Mapping):
+        raise TranslationWorkflowError(
+            "translation_review_acceptance_invalid",
+            "review accepted fallback evidence is invalid",
+        )
+    if provider_value is not None and not isinstance(provider_value, Mapping):
+        raise TranslationWorkflowError(
+            "translation_review_acceptance_invalid",
+            "review accepted provider evidence is invalid",
+        )
+    fallback = dict(fallback_value) if isinstance(fallback_value, Mapping) else None
+    provider_failure = (
+        dict(provider_value) if isinstance(provider_value, Mapping) else None
+    )
+    if fallback is None:
+        if provider_failure is not None:
+            raise TranslationWorkflowError(
+                "translation_review_acceptance_invalid",
+                "review provider evidence requires fallback evidence",
+            )
+    else:
+        _translation_fallback_entries(fallback)
+    if provider_failure is not None:
+        _validate_translation_provider_failure_document(provider_failure)
+    return accepted, fallback, provider_failure
 
 
 def _migrate_legacy_accepted_list_windows(
@@ -2539,13 +4383,20 @@ def _validate_window_formula_identity(
 
 def _apply_review(
     value: Any,
-    draft: Sequence[Mapping[str, str]],
+    draft: Sequence[Mapping[str, Any]],
     blocks: Sequence[Mapping[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     document = _object(value, "translation review")
     _require_fields(
-        document, {"translation_patches", "summary"}, "translation review"
+        document,
+        {"schema_version", "translation_patches", "summary"},
+        "translation review",
     )
+    if document["schema_version"] != PROTECTED_ATOM_REVIEW_RESULT_SCHEMA:
+        raise TranslationWorkflowError(
+            "translation_review_invalid",
+            "review result uses an unsupported protected-atom schema",
+        )
     patches = _mapping_list(
         document["translation_patches"], "translation review patches"
     )
@@ -2554,27 +4405,111 @@ def _apply_review(
             "translation_review_invalid", "review summary must be non-empty"
         )
     allowed = {str(item["block_id"]) for item in draft}
-    replacements: dict[str, str] = {}
+    replacements: dict[str, Any] = {}
     for patch in patches:
         _require_fields(
-            patch, {"block_id", "replacement"}, "translation review patch"
+            patch, {"block_id", "parts"}, "translation review patch"
         )
         block_id = _string(patch, "block_id")
-        replacement = _string(patch, "replacement")
         if block_id not in allowed or block_id in replacements:
             raise TranslationWorkflowError(
                 "translation_review_invalid",
                 "review patch IDs must be unique existing block IDs",
             )
-        replacements[block_id] = replacement
-    reviewed = [
-        {
-            "block_id": str(item["block_id"]),
-            "text": replacements.get(str(item["block_id"]), str(item["text"])),
-        }
-        for item in draft
-    ]
-    return _validate_accepted_window({"translations": reviewed}, blocks)
+        replacements[block_id] = patch["parts"]
+    reviewed = []
+    for item, block in zip(draft, blocks, strict=True):
+        parts = replacements.get(str(item["block_id"]), item.get("parts"))
+        try:
+            text, normalized_parts = assemble_model_protected_translation(
+                block, parts
+            )
+        except ProtectedAtomError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        reviewed.append(
+            {
+                "block_id": str(item["block_id"]),
+                "text": text,
+                "parts": normalized_parts,
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            }
+        )
+    return _validate_protected_atom_window(
+        protected_result_document(reviewed), blocks
+    )
+
+
+def _apply_text_slot_review(
+    value: Any,
+    draft: Sequence[Mapping[str, Any]],
+    blocks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    document = _object(value, "text-slot translation review")
+    _require_fields(
+        document,
+        {"schema_version", "translation_patches", "summary"},
+        "text-slot translation review",
+    )
+    if document["schema_version"] != TEXT_SLOT_REVIEW_RESULT_SCHEMA:
+        raise TranslationWorkflowError(
+            "translation_review_invalid",
+            "review result uses an unsupported text-slot schema",
+        )
+    patches = document["translation_patches"]
+    if not isinstance(patches, Mapping):
+        raise TranslationWorkflowError(
+            "translation_review_invalid",
+            "text-slot review patches must be an object",
+        )
+    if not isinstance(document["summary"], str) or not document["summary"].strip():
+        raise TranslationWorkflowError(
+            "translation_review_invalid", "review summary must be non-empty"
+        )
+    allowed = {str(item["block_id"]) for item in draft}
+    if set(patches) - allowed:
+        raise TranslationWorkflowError(
+            "translation_review_invalid",
+            "text-slot review patch IDs must be existing block IDs",
+        )
+
+    reviewed: list[dict[str, Any]] = []
+    for item, block in zip(draft, blocks, strict=True):
+        block_id = str(item["block_id"])
+        patch = patches.get(block_id)
+        if patch is None:
+            reviewed.extend(
+                _validate_protected_atom_window(
+                    protected_result_document([item]), (block,)
+                )
+            )
+            continue
+        if not isinstance(patch, Mapping):
+            raise TranslationWorkflowError(
+                "translation_review_invalid",
+                f"text-slot review patch is invalid for {block_id}",
+            )
+        _require_fields(patch, {"text_slots"}, "text-slot review patch")
+        try:
+            text, parts = assemble_text_slot_translation(
+                block, patch["text_slots"]
+            )
+        except ProtectedAtomError as exc:
+            raise TranslationWorkflowError(
+                exc.code, str(exc), exc.details
+            ) from exc
+        reviewed.append(
+            {
+                "block_id": block_id,
+                "text": text,
+                "parts": parts,
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            }
+        )
+    return _validate_protected_atom_window(
+        protected_result_document(reviewed), blocks
+    )
 
 
 def _validate_language_binding(
@@ -2737,8 +4672,26 @@ def _validate_translation_result(
                     "translation revision refers to an unselected source block",
                 )
             actual_id = block_id
+        atom_contract = revision.provenance.get("protected_atoms")
+        if atom_contract is not None and (
+            not isinstance(atom_contract, Mapping)
+            or atom_contract
+            != {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "assembled_by": "caller",
+            }
+        ):
+            raise TranslationWorkflowError(
+                "translation_revision_binding_mismatch",
+                "protected-atom translation provenance is invalid",
+            )
         try:
-            if note_contract is not None:
+            if atom_contract is not None:
+                # The model never produced Markdown/TeX/URL payloads for this
+                # revision. Exact atom coverage was checked before caller-side
+                # assembly, so do not re-parse it as model-authored Markdown.
+                pass
+            elif note_contract is not None:
                 validate_translation_text(
                     revision.markdown_body,
                     rich_block_document,
@@ -2791,10 +4744,12 @@ def _publish_translation_result(
     artifact_prefix: str,
     coverage: str,
     fallback_kinds: Mapping[str, str] | None = None,
+    protected_atom_block_ids: set[str] | None = None,
 ) -> TranslationResult:
     rich_blocks = {item.block_id: item for item in source.rich.blocks}
     units_by_id = {str(item["block_id"]): item for item in units}
     fallback_by_id = dict(fallback_kinds or {})
+    protected_by_id = set(protected_atom_block_ids or ())
     if any(
         kind not in {"source_text", "review_skipped"}
         for kind in fallback_by_id.values()
@@ -2802,6 +4757,11 @@ def _publish_translation_result(
         raise TranslationWorkflowError(
             "translation_fallback_invalid",
             "translation fallback kind is invalid",
+        )
+    if not protected_by_id.issubset(units_by_id):
+        raise TranslationWorkflowError(
+            "translation_atom_result_invalid",
+            "protected-atom provenance refers to an unknown source unit",
         )
     source_identity = source_identity_from_rich_document(source.rich)
     revisions: list[FragmentRevisionRef] = []
@@ -2857,6 +4817,11 @@ def _publish_translation_result(
             "target_language": target_language,
             "markdown_body": markdown_body,
             "fallback_kind": fallback_by_id.get(block_id),
+            "protected_atom_schema": (
+                PROTECTED_ATOM_RESULT_SCHEMA
+                if block_id in protected_by_id
+                else None
+            ),
         }
         fragment_digest = hashlib.sha256(
             canonical_json_bytes(fragment_material)
@@ -2871,6 +4836,16 @@ def _publish_translation_result(
                 }
             }
             if fallback_kind is not None
+            else {}
+        )
+        atom_provenance = (
+            {
+                "protected_atoms": {
+                    "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                    "assembled_by": "caller",
+                }
+            }
+            if block_id in protected_by_id
             else {}
         )
         revision = FragmentRevision(
@@ -2893,6 +4868,7 @@ def _publish_translation_result(
                 "source_language": source_language,
                 "translation_mode": "enabled",
                 **fallback_provenance,
+                **atom_provenance,
                 **note_provenance,
             },
             markdown_body=markdown_body,
@@ -3012,12 +4988,13 @@ def _is_sha256(value: str) -> bool:
 
 
 __all__ = [
+    "REVIEW_SUPERVISION_SCHEMA",
+    "GlossaryFallbackSummary",
     "GlossaryResult",
     "KeywordProvider",
     "LanguageResult",
     "TranslationResult",
     "TranslationRevisionArtifact",
-    "REVIEW_SUPERVISION_SCHEMA",
     "TranslationWorkflowError",
     "TranslationWorkflowService",
     "outer_resume_input",

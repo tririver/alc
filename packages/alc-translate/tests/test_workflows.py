@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import pytest
 import alc_translate.source as source_module
-
+import pytest
+from ac_document import AcDocumentService, RichDocumentParserService
 from ac_jobs import (
     ArtifactDigest,
     ArtifactSourceRef,
@@ -24,11 +24,10 @@ from ac_llm import (
     FailureCategory,
     LLMCompleted,
     LLMFailed,
+    ModelSelection,
     ProviderFailure,
 )
-from ac_document import AcDocumentService, RichDocumentParserService
 from alc_render import decode_fragment_revision
-
 from alc_translate import (
     BlocksRequest,
     GenerationRecipe,
@@ -36,27 +35,41 @@ from alc_translate import (
     GlossaryResult,
     LanguageRequest,
     LanguageResult,
-    TranslationService,
     TranslationResult,
+    TranslationService,
     TranslationSource,
     TranslationWorkflowService,
     source_blocks,
 )
+from alc_translate.atoms import (
+    protected_atom_plan,
+    source_protected_parts,
+    text_slot_ids,
+    text_slot_prompt_block,
+)
+from alc_translate.contracts import recipe_from_document, recipe_to_document
 from alc_translate.prompts import (
-    GLOSSARY_SCHEMA,
     GLOSSARY_PROMPT_VERSION,
+    GLOSSARY_SCHEMA,
     LANGUAGE_PROMPT_VERSION,
+    PROTECTED_ATOM_RESULT_SCHEMA,
+    PROTECTED_ATOM_REVIEW_RESULT_SCHEMA,
     REVIEW_PROMPT_VERSION,
-    TRANSLATION_SCHEMA,
+    TEXT_SLOT_RESULT_SCHEMA,
+    TEXT_SLOT_REVIEW_RESULT_SCHEMA,
     TRANSLATION_PROMPT_VERSION,
+    TRANSLATION_SCHEMA,
     glossary_prompt,
     review_prompt,
+    review_schema,
     translation_prompt,
+    translation_schema,
 )
-from alc_translate.source import block_text
+from alc_translate.service import _run_id
 from alc_translate.source import (
     STRUCTURAL_FIGURE_PLACEHOLDER,
     TranslationSourceError,
+    block_text,
     resolve_translation_source,
 )
 from alc_translate.workflow import (
@@ -65,15 +78,20 @@ from alc_translate.workflow import (
     _bounded_model_translation_units,
     _collapse_model_translation_units_with_fallback,
     _digest,
+    _merge_protected_translation_candidates,
     _model_translation_blocks,
     _output_supervision,
+    _review_accepted_window_document,
+    _salvaged_glossary_fallback,
     _salvaged_translation_fallback,
+    _translation_fallback_document,
     _translation_review_windows,
     _translation_units,
     _translation_windows,
     _validate_draft_window,
+    _validate_glossary_window,
+    _validated_protected_draft_document,
 )
-from alc_translate.service import _run_id
 
 
 class FakeTasks:
@@ -98,9 +116,7 @@ class FakeTasks:
         self.review_blocks: list[list[dict[str, Any]]] = []
         self.prompt_sizes: list[tuple[str, int]] = []
 
-    def execute_or_resume(
-        self, _context, request, *, input=None, options=None
-    ):
+    def execute_or_resume(self, _context, request, *, input=None, options=None):
         contract, payload = _prompt(request.prompt)
         self.calls.append(contract)
         self.prompt_sizes.append((contract, len(request.prompt.encode("utf-8"))))
@@ -131,50 +147,74 @@ class FakeTasks:
             )
             translations = []
             for block in payload["blocks"]:
-                identity = block["source_identity"]
-                if identity["code_text"] is not None:
-                    text = identity["code_text"]
-                elif block["kind"] == "equation":
-                    text = block_text(block)
-                else:
-                    source_text = block_text(block)
-                    prefix = next(
-                        (
-                            value
-                            for marker, value in (
-                                self.translation_prefix_by_text.items()
-                            )
-                            if marker in source_text
-                        ),
-                        self.translation_prefix,
+                source_text = "".join(
+                    str(part.get("text", ""))
+                    if part["kind"] in {"text", "text_slot"}
+                    else "".join(
+                        str(label.get("text", "")) for label in part.get("parts", ())
                     )
-                    text = f"{prefix}{source_text}"
-                for token in [
-                    *identity["equations"],
-                    *identity["link_targets"],
-                ]:
-                    if token not in text:
-                        text += f" {token}"
-                if not text.strip():
-                    text = "translated:block"
+                    if part["kind"] == "link"
+                    else ""
+                    for part in block["content"]["parts"]
+                )
+                prefix = next(
+                    (
+                        value
+                        for marker, value in self.translation_prefix_by_text.items()
+                        if marker in source_text
+                    ),
+                    self.translation_prefix,
+                )
+                parts = []
+                prefixed = False
+                for part in block["content"]["parts"]:
+                    if part["kind"] == "atom":
+                        parts.append(dict(part))
+                    elif part["kind"] == "link":
+                        parts.append(
+                            {
+                                "kind": "link",
+                                "atom_id": part["atom_id"],
+                                "parts": [
+                                    {
+                                        "kind": "text",
+                                        "text": f"{prefix}{label['text']}"
+                                        if not prefixed
+                                        else label["text"],
+                                    }
+                                    for label in part["parts"]
+                                ],
+                            }
+                        )
+                        prefixed = True
+                    else:
+                        text = str(part["text"])
+                        if not prefixed:
+                            text = f"{prefix}{text}"
+                            prefixed = True
+                        parts.append({"kind": "text", "text": text})
+                if not parts:
+                    parts = [{"kind": "text", "text": "translated:block"}]
                 translations.append(
                     {
                         "block_id": block["block_id"],
-                        "text": text,
+                        "parts": parts,
                     }
                 )
-            value = {"translations": translations}
+            value = {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": translations,
+            }
         elif contract == REVIEW_PROMPT_VERSION:
             self.review_blocks.append(payload["blocks"])
             self.prompt_glossary_fields.append(
                 [set(item) for item in payload["glossary"]]
             )
             patches = (
-                [{"block_id": "missing-block", "replacement": "unsafe"}]
-                if self.invalid_review
-                else []
+                {"missing-block": {"text_slots": {}}} if self.invalid_review else {}
             )
             value = {
+                "schema_version": TEXT_SLOT_REVIEW_RESULT_SCHEMA,
                 "translation_patches": patches,
                 "summary": "reviewed",
             }
@@ -208,6 +248,228 @@ class InvalidGlossaryTasks:
         )
 
 
+class TextSlotOnlyTasks(FakeTasks):
+    def __init__(self) -> None:
+        super().__init__()
+        self.output_schemas: list[dict[str, Any]] = []
+
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        contract, payload = _prompt(request.prompt)
+        if contract != TRANSLATION_PROMPT_VERSION:
+            return super().execute_or_resume(
+                context, request, input=input, options=options
+            )
+        self.calls.append(contract)
+        self.translation_blocks.append(payload["blocks"])
+        self.output_schemas.append(request.output.schema)
+        translations: dict[str, Any] = {}
+        for block in payload["blocks"]:
+            slots: dict[str, str] = {}
+            prefixed = False
+            for part in block["content"]["parts"]:
+                labels = part["parts"] if part["kind"] == "link" else (part,)
+                for label in labels:
+                    if label["kind"] != "text_slot":
+                        continue
+                    text = str(label["text"])
+                    if not prefixed:
+                        text = f"slot-translated:{text}"
+                        prefixed = True
+                    slots[str(label["slot_id"])] = text
+            translations[str(block["block_id"])] = {"text_slots": slots}
+        return LLMCompleted(
+            {
+                "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+                "translations": translations,
+            },
+            "fake",
+            "fake",
+            None,
+            None,
+        )
+
+
+class MalformedTextSlotTasks(TextSlotOnlyTasks):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        outcome = super().execute_or_resume(
+            context, request, input=input, options=options
+        )
+        contract, payload = _prompt(request.prompt)
+        if contract != TRANSLATION_PROMPT_VERSION:
+            return outcome
+        assert isinstance(outcome, LLMCompleted)
+        value = dict(outcome.value)
+        translations = {
+            block_id: {
+                "text_slots": dict(item["text_slots"]),
+            }
+            for block_id, item in value["translations"].items()
+        }
+        for block in payload["blocks"]:
+            source_text = "".join(
+                str(part.get("text", ""))
+                for part in block["content"]["parts"]
+                if part["kind"] == "text_slot"
+            )
+            if "First" not in source_text:
+                continue
+            block_id = str(block["block_id"])
+            slot_id = next(iter(translations[block_id]["text_slots"]))
+            translations[block_id]["text_slots"][slot_id] += " $$"
+        return LLMCompleted(
+            {
+                "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+                "translations": translations,
+            },
+            "fake",
+            "fake",
+            None,
+            None,
+        )
+
+
+class EmptySemanticTextTasks(TextSlotOnlyTasks):
+    def __init__(self, *, always_invalid: bool = False) -> None:
+        super().__init__()
+        self.always_invalid = always_invalid
+
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        outcome = super().execute_or_resume(
+            context, request, input=input, options=options
+        )
+        contract, payload = _prompt(request.prompt)
+        if contract != TRANSLATION_PROMPT_VERSION:
+            return outcome
+        assert isinstance(outcome, LLMCompleted)
+        should_blank = self.always_invalid or len(self.translation_blocks) == 1
+        if not should_blank:
+            return outcome
+        value = dict(outcome.value)
+        translations = {
+            block_id: {"text_slots": dict(item["text_slots"])}
+            for block_id, item in value["translations"].items()
+        }
+        for block in payload["blocks"]:
+            source_text = "".join(
+                str(label.get("text", ""))
+                for part in block["content"]["parts"]
+                for label in (
+                    part.get("parts", ())
+                    if part["kind"] == "link"
+                    else (part,)
+                )
+                if label["kind"] == "text_slot"
+            )
+            if "Reference Author" not in source_text:
+                continue
+            block_id = str(block["block_id"])
+            translations[block_id]["text_slots"] = {
+                slot_id: ""
+                for slot_id in translations[block_id]["text_slots"]
+            }
+        return LLMCompleted(
+            {
+                "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+                "translations": translations,
+            },
+            outcome.provider,
+            outcome.model,
+            outcome.session,
+            outcome.usage,
+            outcome.warnings,
+        )
+
+
+class ControlGlossaryTasks:
+    def __init__(
+        self,
+        *,
+        recover_on_retry: bool = False,
+        unsafe_control: str = "\x00",
+    ):
+        self.calls = 0
+        self.recover_on_retry = recover_on_retry
+        self.unsafe_control = unsafe_control
+
+    def execute_or_resume(self, _context, request, *, input=None, options=None):
+        contract, payload = _prompt(request.prompt)
+        assert contract == GLOSSARY_PROMPT_VERSION
+        self.calls += 1
+        entries = []
+        for index, term in enumerate(payload["terms"]):
+            unsafe = index == 0 and (not self.recover_on_retry or self.calls == 1)
+            entries.append(
+                {
+                    "term_id": term["term_id"],
+                    "preferred_translation": f"target:{term['term']}",
+                    "target_definition": (
+                        f"definition:{self.unsafe_control}unsafe"
+                        if unsafe
+                        else f"definition:{term['term']}"
+                    ),
+                }
+            )
+        return LLMCompleted({"entries": entries}, "fake", "fake", None, None)
+
+
+class RecoverableControlGlossaryTasks:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute_or_resume(self, _context, request, *, input=None, options=None):
+        contract, payload = _prompt(request.prompt)
+        assert contract == GLOSSARY_PROMPT_VERSION
+        self.calls += 1
+        definitions = [
+            "参考参数 $\x1b[1;3mβ>0\x1b[0m$。",
+            "由 $\x03c7\\in C^0(K)$ 参数化。",
+            "分别记作 $\x03b4_0$ 和 $\x03b4_1$。",
+            "保留普通的 $E_K$。",
+        ]
+        return LLMCompleted(
+            {
+                "entries": [
+                    {
+                        "term_id": term["term_id"],
+                        "preferred_translation": f"target:{term['term']}",
+                        "target_definition": definitions[index],
+                    }
+                    for index, term in enumerate(payload["terms"])
+                ]
+            },
+            "fake",
+            "fake",
+            None,
+            None,
+        )
+
+
+class MathMarkupGlossaryTasks:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute_or_resume(self, _context, request, *, input=None, options=None):
+        contract, payload = _prompt(request.prompt)
+        assert contract == GLOSSARY_PROMPT_VERSION
+        self.calls += 1
+        return LLMCompleted(
+            {
+                "entries": [
+                    {
+                        "term_id": term["term_id"],
+                        "preferred_translation": "宽 H$\\alpha$ 成分",
+                        "target_definition": "H$\\alpha$ 发射线的宽成分。",
+                    }
+                    for term in payload["terms"]
+                ]
+            },
+            "fake",
+            "fake",
+            None,
+            None,
+        )
+
+
 class ProviderFailingTasks:
     def execute_or_resume(self, _context, _request, *, input=None, options=None):
         return LLMFailed(
@@ -219,9 +481,7 @@ class ProviderFailingTasks:
 
 
 class ReviewProviderFailingTasks(FakeTasks):
-    def execute_or_resume(
-        self, context, request, *, input=None, options=None
-    ):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
         contract, _payload = _prompt(request.prompt)
         if contract == REVIEW_PROMPT_VERSION:
             return LLMFailed(
@@ -230,44 +490,62 @@ class ReviewProviderFailingTasks(FakeTasks):
                     category=FailureCategory.AUTHENTICATION,
                 )
             )
-        return super().execute_or_resume(
-            context, request, input=input, options=options
-        )
+        return super().execute_or_resume(context, request, input=input, options=options)
+
+
+class ProviderTimeoutAfterFirstWindowTasks(FakeTasks):
+    def __init__(self) -> None:
+        super().__init__()
+        self.translation_calls = 0
+
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        contract, _payload = _prompt(request.prompt)
+        if contract == TRANSLATION_PROMPT_VERSION:
+            self.translation_calls += 1
+            if self.translation_calls > 1:
+                return LLMFailed(
+                    ProviderFailure(
+                        "provider stopped producing output",
+                        category=FailureCategory.TIMEOUT,
+                    )
+                )
+        return super().execute_or_resume(context, request, input=input, options=options)
+
+
+class ProviderIntermittentTimeoutTasks(FakeTasks):
+    def __init__(self) -> None:
+        super().__init__()
+        self.translation_calls = 0
+
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        contract, _payload = _prompt(request.prompt)
+        if contract == TRANSLATION_PROMPT_VERSION:
+            self.translation_calls += 1
+            if self.translation_calls in {2, 4}:
+                return LLMFailed(
+                    ProviderFailure(
+                        "provider stopped producing output once",
+                        category=FailureCategory.TIMEOUT,
+                    )
+                )
+        return super().execute_or_resume(context, request, input=input, options=options)
 
 
 class OverescapedFormulaTasks(FakeTasks):
-    def execute_or_resume(
-        self, context, request, *, input=None, options=None
-    ):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
         contract, _payload = _prompt(request.prompt)
         outcome = super().execute_or_resume(
             context, request, input=input, options=options
         )
         if contract != TRANSLATION_PROMPT_VERSION:
             return outcome
-        translations = [
-            {
-                **item,
-                "text": str(item["text"]).replace(
-                    r"\Psi^\dagger", r"\\Psi^\dagger"
-                ),
-            }
-            for item in outcome.value["translations"]
-        ]
-        return LLMCompleted(
-            {"translations": translations},
-            outcome.provider,
-            outcome.model,
-            outcome.session,
-            outcome.usage,
-            outcome.warnings,
-        )
+        # Formula payload is not exposed to the model in protected-atom v1,
+        # so it cannot add an escape layer to it.
+        return outcome
 
 
 class ListItemDroppingTasks(FakeTasks):
-    def execute_or_resume(
-        self, context, request, *, input=None, options=None
-    ):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
         contract, payload = _prompt(request.prompt)
         outcome = super().execute_or_resume(
             context, request, input=input, options=options
@@ -278,12 +556,23 @@ class ListItemDroppingTasks(FakeTasks):
         for block, translated in zip(
             payload["blocks"], outcome.value["translations"], strict=True
         ):
-            text = str(translated["text"])
             if block["kind"] == "list":
-                text = text.splitlines()[0]
-            translations.append({**translated, "text": text})
+                parts = [
+                    {
+                        **part,
+                        "text": str(part["text"]).splitlines()[0],
+                    }
+                    if part["kind"] == "text"
+                    else dict(part)
+                    for part in translated["parts"]
+                ]
+                translated = {**translated, "parts": parts}
+            translations.append(translated)
         return LLMCompleted(
-            {"translations": translations},
+            {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": translations,
+            },
             outcome.provider,
             outcome.model,
             outcome.session,
@@ -293,9 +582,7 @@ class ListItemDroppingTasks(FakeTasks):
 
 
 class ListItemNewlineTasks(FakeTasks):
-    def execute_or_resume(
-        self, context, request, *, input=None, options=None
-    ):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
         contract, payload = _prompt(request.prompt)
         outcome = super().execute_or_resume(
             context, request, input=input, options=options
@@ -307,13 +594,22 @@ class ListItemNewlineTasks(FakeTasks):
         for block, translated in zip(
             payload["blocks"], outcome.value["translations"], strict=True
         ):
-            text = str(translated["text"])
             if ".translation-unit-" in str(block["block_id"]):
-                text = "un\nextra" if list_ordinal == 0 else "deux"
+                replacement = "un\nextra" if list_ordinal == 0 else "deux"
                 list_ordinal += 1
-            translations.append({**translated, "text": text})
+                parts = [
+                    {"kind": "text", "text": replacement}
+                    if part["kind"] == "text"
+                    else dict(part)
+                    for part in translated["parts"]
+                ]
+                translated = {**translated, "parts": parts}
+            translations.append(translated)
         return LLMCompleted(
-            {"translations": translations},
+            {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": translations,
+            },
             outcome.provider,
             outcome.model,
             outcome.session,
@@ -323,9 +619,7 @@ class ListItemNewlineTasks(FakeTasks):
 
 
 class FormulaOmittingTasks(FakeTasks):
-    def execute_or_resume(
-        self, context, request, *, input=None, options=None
-    ):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
         contract, payload = _prompt(request.prompt)
         outcome = super().execute_or_resume(
             context, request, input=input, options=options
@@ -336,12 +630,19 @@ class FormulaOmittingTasks(FakeTasks):
         for block, translated in zip(
             payload["blocks"], outcome.value["translations"], strict=True
         ):
-            text = str(translated["text"])
-            if block["source_identity"]["equations"]:
-                text = "translated text without its formula"
-            translations.append({**translated, "text": text})
+            if any(part["kind"] == "atom" for part in block["content"]["parts"]):
+                translated = {
+                    **translated,
+                    "parts": [
+                        part for part in translated["parts"] if part["kind"] != "atom"
+                    ],
+                }
+            translations.append(translated)
         return LLMCompleted(
-            {"translations": translations},
+            {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": translations,
+            },
             outcome.provider,
             outcome.model,
             outcome.session,
@@ -351,9 +652,7 @@ class FormulaOmittingTasks(FakeTasks):
 
 
 class LinkOmittingTasks(FakeTasks):
-    def execute_or_resume(
-        self, context, request, *, input=None, options=None
-    ):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
         contract, payload = _prompt(request.prompt)
         outcome = super().execute_or_resume(
             context, request, input=input, options=options
@@ -364,12 +663,108 @@ class LinkOmittingTasks(FakeTasks):
         for block, translated in zip(
             payload["blocks"], outcome.value["translations"], strict=True
         ):
-            text = str(translated["text"])
-            if block["source_identity"]["link_targets"]:
-                text = "translated text without its link"
-            translations.append({**translated, "text": text})
+            if any(part["kind"] == "link" for part in block["content"]["parts"]):
+                translated = {
+                    **translated,
+                    "parts": [
+                        part for part in translated["parts"] if part["kind"] != "link"
+                    ],
+                }
+            translations.append(translated)
         return LLMCompleted(
-            {"translations": translations},
+            {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": translations,
+            },
+            outcome.provider,
+            outcome.model,
+            outcome.session,
+            outcome.usage,
+            outcome.warnings,
+        )
+
+
+class ScopedAtomRetryTasks(FakeTasks):
+    def __init__(self, *, always_invalid: bool = False) -> None:
+        super().__init__()
+        self.always_invalid = always_invalid
+
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        contract, payload = _prompt(request.prompt)
+        outcome = super().execute_or_resume(
+            context, request, input=input, options=options
+        )
+        if contract != TRANSLATION_PROMPT_VERSION:
+            return outcome
+        should_break = self.always_invalid or len(self.translation_blocks) == 1
+        if not should_break:
+            return outcome
+        translations = []
+        broken = False
+        for block, translated in zip(
+            payload["blocks"], outcome.value["translations"], strict=True
+        ):
+            if not broken and any(
+                part["kind"] == "atom" for part in block["content"]["parts"]
+            ):
+                translated = {
+                    **translated,
+                    "parts": [
+                        {
+                            "kind": "text",
+                            "text": "".join(
+                                str(part.get("text", ""))
+                                for part in translated["parts"]
+                                if part["kind"] == "text"
+                            ),
+                        }
+                    ],
+                }
+                broken = True
+            translations.append(translated)
+        return LLMCompleted(
+            {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": translations,
+            },
+            outcome.provider,
+            outcome.model,
+            outcome.session,
+            outcome.usage,
+            outcome.warnings,
+        )
+
+
+class ReviewTextSlotPatchingTasks(FakeTasks):
+    def execute_or_resume(self, context, request, *, input=None, options=None):
+        contract, payload = _prompt(request.prompt)
+        outcome = super().execute_or_resume(
+            context, request, input=input, options=options
+        )
+        if contract != REVIEW_PROMPT_VERSION:
+            return outcome
+        patch_block_id = None
+        patch_slots = None
+        for block, translation in zip(
+            payload["blocks"], payload["translations"], strict=True
+        ):
+            slots = dict(translation["content"]["text_slots"])
+            has_atom = any(
+                part["kind"] in {"atom", "link"} for part in block["content"]["parts"]
+            )
+            if slots and has_atom:
+                first = next(iter(slots))
+                slots[first] = f"reviewed:{slots[first]}"
+                patch_block_id = block["block_id"]
+                patch_slots = slots
+                break
+        assert patch_block_id is not None and patch_slots is not None
+        return LLMCompleted(
+            {
+                "schema_version": TEXT_SLOT_REVIEW_RESULT_SCHEMA,
+                "translation_patches": {patch_block_id: {"text_slots": patch_slots}},
+                "summary": "reviewed text without returning atom IDs",
+            },
             outcome.provider,
             outcome.model,
             outcome.session,
@@ -399,16 +794,18 @@ class InvalidOnceTasks(FakeTasks):
                 }
             elif contract == TRANSLATION_PROMPT_VERSION:
                 value = {
+                    "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
                     "translations": [
-                        {"block_id": "wrong-block", "text": "translated"}
-                    ]
+                        {
+                            "block_id": "wrong-block",
+                            "parts": [{"kind": "text", "text": "translated"}],
+                        }
+                    ],
                 }
             else:  # pragma: no cover - guards fixture scope
                 raise AssertionError(contract)
             return LLMCompleted(value, "fake", "fake", None, None)
-        return super().execute_or_resume(
-            context, request, input=input, options=options
-        )
+        return super().execute_or_resume(context, request, input=input, options=options)
 
 
 @dataclass
@@ -441,9 +838,7 @@ class FakeKeywords:
         }
 
 
-def _term(
-    term_id: str, term: str, *, sentence: str | None = None
-) -> dict[str, Any]:
+def _term(term_id: str, term: str, *, sentence: str | None = None) -> dict[str, Any]:
     return {
         "term_id": term_id,
         "term": term,
@@ -507,9 +902,7 @@ def test_equation_translation_round_trips_through_fragment_markdown(
     )
     source = TranslationSource(rich)
     equation = next(
-        block
-        for block in source_blocks(source)
-        if block["kind"] == "equation"
+        block for block in source_blocks(source) if block["kind"] == "equation"
     )
     tasks = FakeTasks()
     context = _context(tmp_path, "equation-round-trip")
@@ -556,9 +949,7 @@ def test_equation_translation_round_trips_through_fragment_markdown(
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == equation["block_id"]
+        item for item in revisions if item.anchor.target_id == equation["block_id"]
     )
     assert revision.markdown_body == f"$$\n{tex}\n$$\n"
 
@@ -627,14 +1018,11 @@ def test_equation_is_reinjected_when_review_falls_back(tmp_path: Path) -> None:
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == equation["block_id"]
+        item for item in revisions if item.anchor.target_id == equation["block_id"]
     )
     assert revision.markdown_body == f"$$\n{tex}\n$$\n"
     assert any(
-        item.provenance.get("translation_fallback", {}).get("kind")
-        == "review_skipped"
+        item.provenance.get("translation_fallback", {}).get("kind") == "review_skipped"
         for item in revisions
         if item.anchor.target_id != equation["block_id"]
     )
@@ -665,11 +1053,376 @@ def test_glossary_prompt_contracts_markdown_definitions_and_plain_terms() -> Non
     assert "Do not use raw HTML, headings, tables, images" in prompt
 
 
-def test_translation_schema_only_requests_block_id_and_text():
+def test_glossary_plain_term_math_markup_falls_back_per_entry() -> None:
+    term = {
+        "term_id": "term-h-alpha",
+        "term": "broad H\u03b1 component",
+        "aliases": [],
+        "occurrence_count": 1,
+        "source_refs": [],
+        "matched_sentences": ["A broad H\u03b1 component is present."],
+    }
+    candidate = {
+        "entries": [
+            {
+                "term_id": "term-h-alpha",
+                "preferred_translation": "\u5bbd H$\\alpha$ \u6210\u5206",
+                "target_definition": "H$\\alpha$ \u53d1\u5c04\u7ebf\u7684\u5bbd\u6210\u5206\u3002",
+            }
+        ]
+    }
+
+    with pytest.raises(
+        TranslationWorkflowError,
+        match="preferred_translation must be plain text",
+    ) as caught:
+        _validate_glossary_window(candidate, [term])
+    assert caught.value.code == "glossary_translation_math_markup_invalid"
+
+    entries, recovered, dropped = _salvaged_glossary_fallback(
+        candidate, [term]
+    )
+    assert entries[0]["preferred_translation"] == "broad H\u03b1 component"
+    assert entries[0]["target_definition"] == "H$\\alpha$ \u53d1\u5c04\u7ebf\u7684\u5bbd\u6210\u5206\u3002"
+    assert recovered == ["term-h-alpha"]
+    assert dropped == []
+
+
+def test_translation_schema_requires_versioned_atom_parts():
+    assert TRANSLATION_SCHEMA["required"] == [
+        "schema_version",
+        "translations",
+    ]
     entry = TRANSLATION_SCHEMA["properties"]["translations"]["items"]
     assert entry["additionalProperties"] is False
-    assert entry["required"] == ["block_id", "text"]
-    assert set(entry["properties"]) == {"block_id", "text"}
+    assert entry["required"] == ["block_id", "parts"]
+    assert set(entry["properties"]) == {"block_id", "parts"}
+
+
+def test_text_slot_schemas_require_exact_dynamic_blocks_and_slots() -> None:
+    source_block = {
+        "block_id": "block-slot-schema",
+        "ordinal": 0,
+        "kind": "paragraph",
+        "section_path": [],
+        "payload": {
+            "text": "Before $x$ after.",
+            "inline_spans": [{"kind": "text", "text": "Before $x$ after."}],
+        },
+    }
+    prompt_block = text_slot_prompt_block(source_block)
+
+    generated = translation_schema([prompt_block])
+    reviewed = review_schema([prompt_block])
+
+    block_id = str(source_block["block_id"])
+    generated_blocks = generated["properties"]["translations"]
+    assert generated["properties"]["schema_version"] == {
+        "type": "string",
+        "const": TEXT_SLOT_RESULT_SCHEMA,
+    }
+    assert generated_blocks["required"] == [block_id]
+    slots = generated_blocks["properties"][block_id]["properties"]["text_slots"]
+    assert slots["additionalProperties"] is False
+    assert slots["required"] == [
+        f"{block_id}.text-000000",
+        f"{block_id}.text-000001",
+    ]
+    assert reviewed["properties"]["schema_version"] == {
+        "type": "string",
+        "const": TEXT_SLOT_REVIEW_RESULT_SCHEMA,
+    }
+    assert reviewed["properties"]["translation_patches"]["required"] == []
+
+
+def test_generation_recipe_round_trips_reasoning_effort_and_legacy_model() -> None:
+    recipe = GenerationRecipe(
+        model=ModelSelection(
+            provider="codex",
+            model="gpt-5.6-terra",
+            reasoning_effort="high",
+        )
+    )
+    document = recipe_to_document(recipe)
+
+    assert document["model"]["reasoning_effort"] == "high"
+    assert recipe_from_document(document) == recipe
+
+    legacy = recipe_to_document(
+        GenerationRecipe(model=ModelSelection("codex", "gpt-5.6-terra"))
+    )
+    assert "reasoning_effort" not in legacy["model"]
+    assert recipe_from_document(legacy).model.reasoning_effort is None
+
+
+def test_workflow_uses_text_slots_and_reinserts_formula_locally(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "text-slots.md"
+    markdown.write_text("# Result\n\nBefore $x$ after.\n", encoding="utf-8")
+    paper = AcDocumentService(cache_root=tmp_path / "text-slot-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    tasks = TextSlotOnlyTasks()
+    context = _context(tmp_path, "text-slot-workflow")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    formula = next(
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+        if "$x$" in context.artifacts.read_bytes(item.artifact).decode("utf-8")
+    )
+    assert formula.markdown_body == "slot-translated:Before $x$ after.\n"
+    assert "translation_fallback" not in formula.provenance
+    assert tasks.output_schemas
+    assert all(
+        schema["properties"]["schema_version"]
+        == {"type": "string", "const": TEXT_SLOT_RESULT_SCHEMA}
+        for schema in tasks.output_schemas
+    )
+
+
+@pytest.mark.parametrize("always_invalid", [False, True])
+def test_empty_semantic_text_gets_scoped_retry_then_source_fallback(
+    tmp_path: Path, always_invalid: bool
+) -> None:
+    markdown = tmp_path / "empty-semantic-text.md"
+    markdown.write_text(
+        "# Coverage\n\n"
+        "Reference Author wrote [Paper title](https://example.test/paper).\n\n"
+        "Neighbor remains translated.\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "empty-semantic-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    tasks = EmptySemanticTextTasks(always_invalid=always_invalid)
+    context = _context(tmp_path, f"empty-semantic-{always_invalid}")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    assert [len(window) for window in tasks.translation_blocks] == [3, 1]
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    reference = next(
+        item for item in revisions if "example.test/paper" in item.markdown_body
+    )
+    neighbor = next(
+        item
+        for item in revisions
+        if "Neighbor remains translated" in item.markdown_body
+    )
+    assert "translation_fallback" not in neighbor.provenance
+    if always_invalid:
+        assert reference.markdown_body.strip() == (
+            "Reference Author wrote "
+            "[Paper title](https://example.test/paper)."
+        )
+        assert reference.provenance["translation_fallback"]["kind"] == "source_text"
+        assert any(
+            "translation_coverage_invalid" in event["data"]["reason_codes"]
+            for event in context.events.read_all()
+            if event["event"] == "translation_fallback"
+        )
+    else:
+        assert reference.markdown_body.startswith("slot-translated:")
+        assert "translation_fallback" not in reference.provenance
+
+
+@pytest.mark.parametrize(
+    ("source_item", "identity_marker"),
+    [
+        ("Entry keeps $x$ beside translated prose.", "$x$"),
+        (
+            "Entry cites [the DOI](https://doi.org/10.1000/example).",
+            "https://doi.org/10.1000/example",
+        ),
+    ],
+    ids=["formula", "link"],
+)
+def test_split_text_slot_units_preserve_locally_reinserted_identity(
+    tmp_path: Path,
+    source_item: str,
+    identity_marker: str,
+) -> None:
+    markdown = tmp_path / "split-text-slots.md"
+    markdown.write_text(
+        f"# References\n\n- {source_item}\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "split-text-slot-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    list_block = next(
+        block for block in source_blocks(source) if block["kind"] == "list"
+    )
+    tasks = TextSlotOnlyTasks()
+    context = _context(tmp_path, "split-text-slot-workflow")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    revision = next(
+        item
+        for item in revisions
+        if item.anchor.target_id == list_block["block_id"]
+    )
+    assert any(
+        str(block["block_id"]).endswith(".translation-unit-000000")
+        for window in tasks.translation_blocks
+        for block in window
+    )
+    assert "slot-translated:" in revision.markdown_body
+    assert identity_marker in revision.markdown_body
+    assert "translation_fallback" not in revision.provenance
+
+
+def test_malformed_text_slot_falls_back_only_the_affected_block(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "malformed-text-slot.md"
+    markdown.write_text(
+        "# Result\n\nFirst paragraph.\n\nSecond paragraph.\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "malformed-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    context = _context(tmp_path, "malformed-text-slot-workflow")
+
+    result = TranslationWorkflowService(MalformedTextSlotTasks()).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    first = next(
+        item for item in revisions if item.markdown_body == "First paragraph.\n"
+    )
+    second = next(
+        item
+        for item in revisions
+        if "slot-translated:Second paragraph." in item.markdown_body
+    )
+    assert first.provenance["translation_fallback"]["kind"] == "source_text"
+    assert "translation_fallback" not in second.provenance
 
 
 def test_translation_prompts_require_complete_block_text() -> None:
@@ -736,12 +1489,8 @@ def test_standalone_steps_use_verified_cross_run_results(tmp_path):
     source = _source(tmp_path)
     service = TranslationService(tmp_path / "jobs")
     tasks = FakeTasks()
-    language_snapshot = service.prepare_language(
-        LanguageRequest(source, "fr")
-    )
-    language_snapshot = service.execute(
-        language_snapshot.run_id, task_service=tasks
-    )
+    language_snapshot = service.prepare_language(LanguageRequest(source, "fr"))
+    language_snapshot = service.execute(language_snapshot.run_id, task_service=tasks)
     assert language_snapshot.status is RunStatus.SUCCEEDED
 
     keywords = FakeKeywords([_term("term-1", "Entropy")])
@@ -772,9 +1521,7 @@ def test_standalone_steps_use_verified_cross_run_results(tmp_path):
             service.result_source(glossary_snapshot.run_id),
         )
     )
-    blocks_snapshot = service.execute(
-        blocks_snapshot.run_id, task_service=tasks
-    )
+    blocks_snapshot = service.execute(blocks_snapshot.run_id, task_service=tasks)
     assert blocks_snapshot.status is RunStatus.SUCCEEDED
     blocks = service.result(blocks_snapshot.run_id)
     assert isinstance(blocks, TranslationResult)
@@ -823,9 +1570,7 @@ def test_missing_or_unverified_prerequisite_never_runs_keyword_step(tmp_path):
         "language/result",
         ArtifactDigest("sha256", "0" * 64, 1),
     )
-    snapshot = service.prepare_glossary(
-        GlossaryRequest(source, "fr", 50, missing)
-    )
+    snapshot = service.prepare_glossary(GlossaryRequest(source, "fr", 50, missing))
     snapshot = service.execute(
         snapshot.run_id,
         task_service=FakeTasks(),
@@ -844,9 +1589,7 @@ def test_glossary_windows_preserve_every_term_identity_and_order(tmp_path):
         for index in range(3)
     ]
     tasks = FakeTasks()
-    result = TranslationWorkflowService(
-        tasks, FakeKeywords(terms)
-    ).build_glossary(
+    result = TranslationWorkflowService(tasks, FakeKeywords(terms)).build_glossary(
         _context(tmp_path, "glossary-windows"),
         source,
         language=LanguageResult(
@@ -931,6 +1674,231 @@ def test_invalid_glossary_retries_once_then_pauses_with_editable_candidate(
     assert recovered.entries[0]["matched_sentences"] == term["matched_sentences"]
 
 
+def test_glossary_control_character_gets_one_fresh_retry(tmp_path):
+    source = _source(tmp_path)
+    term = _term("term-1", "Entropy")
+    tasks = ControlGlossaryTasks(recover_on_retry=True)
+    result = TranslationWorkflowService(tasks, FakeKeywords([term])).build_glossary(
+        _context(tmp_path, "glossary-control-retry"),
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1.0,
+            "fr",
+            "enabled",
+        ),
+        target_language="fr",
+        approx_count=1,
+    )
+
+    assert isinstance(result, GlossaryResult)
+    assert tasks.calls == 2
+    assert result.entries[0]["target_definition"] == "definition:Entropy"
+    assert result.fallback_summary.is_empty
+    assert result.to_document()["fallback_summary"] == {
+        "schema_version": "alc.translate.glossary_fallback_summary.v1",
+        "recovered_term_ids": [],
+        "dropped_term_ids": [],
+        "reason_codes": [],
+    }
+
+
+def test_glossary_math_markup_falls_back_to_plain_source_term_and_continues(
+    tmp_path,
+):
+    source = _source(tmp_path)
+    term = _term("term-h-alpha", "broad Hα component")
+    context = _context(tmp_path, "glossary-term-markup-fallback")
+    tasks = MathMarkupGlossaryTasks()
+    result = TranslationWorkflowService(tasks, FakeKeywords([term])).build_glossary(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1.0,
+            "zh-CN",
+            "enabled",
+        ),
+        target_language="zh-CN",
+        approx_count=1,
+    )
+
+    assert isinstance(result, GlossaryResult)
+    assert tasks.calls == 2
+    assert result.entries[0]["preferred_translation"] == "broad Hα component"
+    assert result.entries[0]["target_definition"] == "H$\\alpha$ 发射线的宽成分。"
+    assert result.fallback_summary.to_document() == {
+        "schema_version": "alc.translate.glossary_fallback_summary.v1",
+        "recovered_term_ids": ["term-h-alpha"],
+        "dropped_term_ids": [],
+        "reason_codes": ["glossary_translation_math_markup_invalid"],
+    }
+
+
+@pytest.mark.parametrize("unsafe_control", ["\x00", "\x03", "\x1d"])
+def test_glossary_control_character_falls_back_per_entry_and_continues(
+    tmp_path,
+    unsafe_control,
+):
+    source = _source(tmp_path)
+    terms = [
+        _term("term-1", "Entropy"),
+        _term("term-2", "Tensor"),
+    ]
+    context = _context(tmp_path, "glossary-control-fallback")
+    tasks = ControlGlossaryTasks(unsafe_control=unsafe_control)
+    result = TranslationWorkflowService(tasks, FakeKeywords(terms)).build_glossary(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1.0,
+            "fr",
+            "enabled",
+        ),
+        target_language="fr",
+        approx_count=2,
+    )
+
+    assert isinstance(result, GlossaryResult)
+    assert tasks.calls == 2
+    assert [entry["term_id"] for entry in result.entries] == ["term-2"]
+    assert result.fallback_summary.to_document() == {
+        "schema_version": "alc.translate.glossary_fallback_summary.v1",
+        "recovered_term_ids": [],
+        "dropped_term_ids": ["term-1"],
+        "reason_codes": ["glossary_control_character_invalid"],
+    }
+    fallback = next(
+        event
+        for event in context.events.read_all()
+        if event["event"] == "translation_fallback"
+    )
+    assert fallback["data"] == {
+        "glossary_entry_count": 1,
+        "reason_codes": ["glossary_control_character_invalid"],
+    }
+    replayed = TranslationWorkflowService(ProviderFailingTasks()).build_glossary(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1.0,
+            "fr",
+            "enabled",
+        ),
+        target_language="fr",
+        approx_count=2,
+    )
+    assert isinstance(replayed, GlossaryResult)
+    assert replayed.fallback_summary == result.fallback_summary
+    legacy_context = _context(tmp_path, "glossary-control-legacy-replay")
+    for artifact_id in (
+        "glossary/result",
+        "glossary/keyword-inventory",
+        "glossary/fallbacks/0000",
+    ):
+        reference = context.artifacts.find(artifact_id)
+        assert reference is not None
+        document = json.loads(context.artifacts.read_bytes(reference).decode("utf-8"))
+        if artifact_id == "glossary/result":
+            document["schema_version"] = "alc.translate.glossary_result.v1"
+            document.pop("fallback_summary")
+        elif artifact_id == "glossary/fallbacks/0000":
+            document["schema_version"] = "alc.translate.glossary_fallback_diagnostic.v1"
+            document.pop("recovered_term_ids")
+        legacy_context.artifacts.publish_json(artifact_id, document)
+    legacy = TranslationWorkflowService(ProviderFailingTasks()).build_glossary(
+        legacy_context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1.0,
+            "fr",
+            "enabled",
+        ),
+        target_language="fr",
+        approx_count=2,
+    )
+    assert isinstance(legacy, GlossaryResult)
+    assert legacy.fallback_summary == result.fallback_summary
+
+
+def test_glossary_recovers_bounded_terminal_and_unicode_control_corruption(
+    tmp_path,
+):
+    source = _source(tmp_path)
+    terms = [
+        _term("term-beta", "inverse temperature"),
+        _term("term-chi", "gauge parameter"),
+        _term("term-delta", "incidence operators"),
+        _term("term-energy", "Maxwell energy"),
+    ]
+    context = _context(tmp_path, "glossary-control-recovery")
+    tasks = RecoverableControlGlossaryTasks()
+    result = TranslationWorkflowService(tasks, FakeKeywords(terms)).build_glossary(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1.0,
+            "zh-Hans",
+            "enabled",
+        ),
+        target_language="zh-Hans",
+        approx_count=4,
+    )
+
+    assert isinstance(result, GlossaryResult)
+    assert tasks.calls == 2
+    assert [entry["term_id"] for entry in result.entries] == [
+        "term-beta",
+        "term-chi",
+        "term-delta",
+        "term-energy",
+    ]
+    assert [entry["target_definition"] for entry in result.entries] == [
+        "参考参数 $β>0$。",
+        "由 $χ\\in C^0(K)$ 参数化。",
+        "分别记作 $δ_0$ 和 $δ_1$。",
+        "保留普通的 $E_K$。",
+    ]
+    assert result.fallback_summary.to_document() == {
+        "schema_version": "alc.translate.glossary_fallback_summary.v1",
+        "recovered_term_ids": ["term-beta", "term-chi", "term-delta"],
+        "dropped_term_ids": [],
+        "reason_codes": ["glossary_control_character_invalid"],
+    }
+    fallback = next(
+        event
+        for event in context.events.read_all()
+        if event["event"] == "translation_fallback"
+    )
+    assert fallback["data"] == {
+        "glossary_entry_count": 0,
+        "glossary_recovered_entry_count": 3,
+        "reason_codes": ["glossary_control_character_invalid"],
+    }
+
+
 def test_invalid_language_output_gets_one_fresh_retry(tmp_path):
     source = _source(tmp_path)
     tasks = InvalidOnceTasks(LANGUAGE_PROMPT_VERSION)
@@ -947,9 +1915,7 @@ def test_invalid_language_output_gets_one_fresh_retry(tmp_path):
         LANGUAGE_PROMPT_VERSION,
         LANGUAGE_PROMPT_VERSION,
     ]
-    assert context.working.find_candidate(
-        "language/language/result.json"
-    ) is not None
+    assert context.working.find_candidate("language/language/result.json") is not None
     assert len(set(tasks.task_ids)) == 2
 
 
@@ -1023,14 +1989,26 @@ def test_full_translation_publishes_source_note_revision_and_caption_only_table(
         for block in window
         if block["kind"] == "table"
     )
-    assert table_prompt["payload"] == {"caption": "Table 1: Measurements."}
+    assert table_prompt["content"]["parts"] == [
+        {
+            "kind": "text_slot",
+            "slot_id": f"{table_prompt['block_id']}.text-000000",
+            "text": "Table 1: Measurements.\n",
+        }
+    ]
     note_prompt = next(
         block
         for window in tasks.translation_blocks
         for block in window
         if block["kind"] == "source_note"
     )
-    assert note_prompt["payload"] == {"text": "Authored note body."}
+    assert note_prompt["content"]["parts"] == [
+        {
+            "kind": "text_slot",
+            "slot_id": "source-note:footnote1.text-000000",
+            "text": "Authored note body.",
+        }
+    ]
     prompted_note_ids = {
         block["block_id"]
         for window in tasks.translation_blocks
@@ -1056,7 +2034,9 @@ def test_full_translation_publishes_source_note_revision_and_caption_only_table(
         "schema_version": "alc.render.source_note_translation.v1",
         "note_id": "footnote1",
     }
-    owner = next(block for block in source.rich.blocks if block.kind.value == "paragraph")
+    owner = next(
+        block for block in source.rich.blocks if block.kind.value == "paragraph"
+    )
     assert note_revision.anchor.target_id == owner.block_id
     link_note_revision = next(
         revision
@@ -1096,9 +2076,7 @@ def test_language_second_invalid_output_pauses_and_resumes_without_third_call(
     assert paused.awaiting is not None
     assert paused.awaiting.input_required is False
     assert paused.awaiting.details["output_attempts"] == 2
-    candidate_path = Path(
-        str(paused.awaiting.details["candidate_path"])
-    )
+    candidate_path = Path(str(paused.awaiting.details["candidate_path"]))
     candidate_path.write_text(
         json.dumps(
             {
@@ -1180,8 +2158,7 @@ def test_provider_failure_is_not_published_as_source_fallback(tmp_path):
     assert result.code == "provider_authentication"
     assert context.artifacts.find("translation/result") is None
     assert all(
-        event.event != "translation_fallback"
-        for event in context.events.read_all()
+        event.event != "translation_fallback" for event in context.events.read_all()
     )
 
 
@@ -1189,9 +2166,7 @@ def test_review_provider_failure_is_not_published_as_review_skipped(tmp_path):
     source = _source(tmp_path)
     context = _context(tmp_path, "review-provider-failure")
 
-    result = TranslationWorkflowService(
-        ReviewProviderFailingTasks()
-    ).translate_blocks(
+    result = TranslationWorkflowService(ReviewProviderFailingTasks()).translate_blocks(
         context,
         source,
         language=LanguageResult(
@@ -1218,8 +2193,159 @@ def test_review_provider_failure_is_not_published_as_review_skipped(tmp_path):
     assert result.code == "provider_authentication"
     assert context.artifacts.find("translation/result") is None
     assert all(
-        event.event != "translation_fallback"
+        event.event != "translation_fallback" for event in context.events.read_all()
+    )
+
+
+def test_provider_timeout_preserves_completed_windows_and_falls_back_remaining(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "partial-provider.md"
+    markdown.write_text(
+        "# Partial\n\n" + "\n\n".join(["source prose " * 36] * 10),
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "partial-provider-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    tasks = ProviderTimeoutAfterFirstWindowTasks()
+    context = _context(tmp_path, "partial-provider")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+        input_budget_bytes=4_800,
+    )
+
+    assert isinstance(result, TranslationResult)
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    assert any("translated:" in item.markdown_body for item in revisions)
+    assert any(
+        item.provenance.get("translation_fallback", {}).get("kind") == "source_text"
+        for item in revisions
+    )
+    assert tasks.translation_calls == 3
+    fallback_events = [
+        event
         for event in context.events.read_all()
+        if event["event"] == "translation_fallback"
+    ]
+    assert any(
+        "provider_timeout" in event["data"]["reason_codes"] for event in fallback_events
+    )
+    provider_events = [
+        event["data"]
+        for event in context.events.read_all()
+        if event["event"] == "translation_provider_fallback"
+    ]
+    assert len(provider_events) == 2
+    assert provider_events[0]["global_fallback_triggered"] is False
+    assert provider_events[1]["global_fallback_triggered"] is True
+    assert provider_events[1]["remaining_windows_skipped"] > 0
+    assert {item["failure_category"] for item in provider_events} == {"timeout"}
+
+
+def test_nonconsecutive_provider_failures_do_not_skip_later_windows(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "transient-provider.md"
+    markdown.write_text(
+        "# Transient\n\n" + "\n\n".join(["source prose " * 36] * 10),
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "transient-provider-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    tasks = ProviderIntermittentTimeoutTasks()
+    context = _context(tmp_path, "transient-provider")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+        input_budget_bytes=4_800,
+    )
+
+    assert isinstance(result, TranslationResult)
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    fallback_indexes = [
+        index
+        for index, item in enumerate(revisions)
+        if item.provenance.get("translation_fallback", {}).get("kind")
+        == "source_text"
+    ]
+    translated_indexes = [
+        index
+        for index, item in enumerate(revisions)
+        if "translated:" in item.markdown_body
+    ]
+    assert tasks.translation_calls >= 4
+    assert fallback_indexes
+    assert translated_indexes
+    assert max(translated_indexes) > min(fallback_indexes)
+    provider_events = [
+        event["data"]
+        for event in context.events.read_all()
+        if event["event"] == "translation_provider_fallback"
+    ]
+    assert len(provider_events) == 2
+    assert all(
+        item["global_fallback_triggered"] is False
+        and item["remaining_windows_skipped"] == 0
+        for item in provider_events
     )
 
 
@@ -1245,9 +2371,7 @@ def test_output_supervision_request_tracks_current_error(tmp_path):
     assert first.awaiting.resume_key != second.awaiting.resume_key
     assert first.awaiting.request_ref != second.awaiting.request_ref
     assert second.awaiting.request_ref is not None
-    request = json.loads(
-        context.artifacts.read_bytes(second.awaiting.request_ref)
-    )
+    request = json.loads(context.artifacts.read_bytes(second.awaiting.request_ref))
     assert request["schema_version"] == OUTPUT_SUPERVISION_SCHEMA
     assert request["message"] == "second error"
 
@@ -1300,12 +2424,8 @@ def test_changed_translation_gets_a_distinct_fragment_identity(tmp_path) -> None
 def test_block_selector_normalizes_order_and_filters_window_glossary(tmp_path):
     source = _source(tmp_path)
     blocks = source_blocks(source)
-    entropy_block = next(
-        item for item in blocks if "Entropy" in block_text(item)
-    )
-    tensor_block = next(
-        item for item in blocks if "tensor" in block_text(item)
-    )
+    entropy_block = next(item for item in blocks if "Entropy" in block_text(item))
+    tensor_block = next(item for item in blocks if "tensor" in block_text(item))
     glossary = GlossaryResult(
         source.document_digest,
         source.source_digest,
@@ -1390,9 +2510,7 @@ def test_block_selector_normalizes_order_and_filters_window_glossary(tmp_path):
 def test_window_glossary_does_not_match_inside_longer_word(tmp_path):
     source = _source(tmp_path)
     blocks = source_blocks(source)
-    tensor_block = next(
-        item for item in blocks if "tensor" in block_text(item)
-    )
+    tensor_block = next(item for item in blocks if "tensor" in block_text(item))
     glossary = GlossaryResult(
         source.document_digest,
         source.source_digest,
@@ -1427,6 +2545,7 @@ def test_window_glossary_does_not_match_inside_longer_word(tmp_path):
     assert isinstance(result, TranslationResult)
     assert tasks.translation_glossaries == [[]]
 
+
 def test_structural_figures_bypass_models_and_keep_ordered_coverage(tmp_path):
     assets = tmp_path / "images"
     assets.mkdir()
@@ -1439,7 +2558,7 @@ def test_structural_figures_bypass_models_and_keep_ordered_coverage(tmp_path):
         "![](images/structural.png)\n\n"
         "<details>\n<summary>natural_image</summary>\n\n"
         "Extractor-only sidecar text.\n</details>\n\n"
-        "![private alt](images/captioned.png \"Visible scientific caption\")\n\n"
+        '![private alt](images/captioned.png "Visible scientific caption")\n\n'
         "![Accessibility language](images/alt.png)\n\n"
         "The surrounding prose remains translatable.\n",
         encoding="utf-8",
@@ -1453,21 +2572,18 @@ def test_structural_figures_bypass_models_and_keep_ordered_coverage(tmp_path):
     structural = next(
         item
         for item in blocks
-        if item["kind"] == "figure"
-        and not str(item["payload"]["caption"]).strip()
+        if item["kind"] == "figure" and not str(item["payload"]["caption"]).strip()
     )
     captioned = next(
         item
         for item in blocks
-        if item["kind"] == "figure"
-        and str(item["payload"]["caption"]).strip()
+        if item["kind"] == "figure" and str(item["payload"]["caption"]).strip()
     )
     alt_only = next(
         item
         for item in blocks
         if item["kind"] == "figure"
-        and str(item["payload"]["alt_text"]).strip()
-        == "Accessibility language"
+        and str(item["payload"]["alt_text"]).strip() == "Accessibility language"
     )
     language = LanguageResult(
         source.document_digest,
@@ -1508,9 +2624,7 @@ def test_structural_figures_bypass_models_and_keep_ordered_coverage(tmp_path):
     assert structural["block_id"] not in revision_block_ids
     assert captioned["block_id"] in revision_block_ids
     assert alt_only["block_id"] in revision_block_ids
-    prompted = [
-        item for window in tasks.translation_blocks for item in window
-    ]
+    prompted = [item for window in tasks.translation_blocks for item in window]
     reviewed = [item for window in tasks.review_blocks for item in window]
     assert structural["block_id"] not in {
         item["block_id"] for item in [*prompted, *reviewed]
@@ -1518,40 +2632,41 @@ def test_structural_figures_bypass_models_and_keep_ordered_coverage(tmp_path):
     prompted_caption = next(
         item for item in prompted if item["block_id"] == captioned["block_id"]
     )
-    assert prompted_caption["payload"] == {
-        "caption": "Visible scientific caption",
-        "alt_text": "private alt",
-    }
+    assert prompted_caption["content"]["parts"] == [
+        {
+            "kind": "text_slot",
+            "slot_id": f"{captioned['block_id']}.text-000000",
+            "text": "Visible scientific caption",
+        }
+    ]
     prompted_alt = next(
         item for item in prompted if item["block_id"] == alt_only["block_id"]
     )
-    assert prompted_alt["payload"] == {
-        "caption": "",
-        "alt_text": "Accessibility language",
-    }
+    assert prompted_alt["content"]["parts"] == [
+        {
+            "kind": "text_slot",
+            "slot_id": f"{alt_only['block_id']}.text-000000",
+            "text": "Accessibility language",
+        }
+    ]
     assert set(prompted_caption) == {
         "block_id",
         "ordinal",
         "kind",
         "section_path",
-        "payload",
-        "source_identity",
+        "content",
     }
     figure_prompts = json.dumps(
-        [
-            item
-            for item in [*prompted, *reviewed]
-            if item["kind"] == "figure"
-        ],
+        [item for item in [*prompted, *reviewed] if item["kind"] == "figure"],
         ensure_ascii=False,
     )
     for private_value in (
-            "images/structural.png",
-            "images/captioned.png",
-            "Extractor-only sidecar text",
-            "asset_digest",
-            "asset_target",
-            "logical_name",
+        "images/structural.png",
+        "images/captioned.png",
+        "Extractor-only sidecar text",
+        "asset_digest",
+        "asset_target",
+        "logical_name",
         '"target"',
     ):
         assert private_value not in figure_prompts
@@ -1571,6 +2686,54 @@ def test_structural_figures_bypass_models_and_keep_ordered_coverage(tmp_path):
     assert structural_only.coverage == "selection"
     assert structural_only.revision_artifacts == ()
     assert structural_only_tasks.calls == []
+
+
+def test_captionless_tables_bypass_models_and_complete_selection(tmp_path):
+    markdown = tmp_path / "captionless-table.md"
+    markdown.write_text(
+        "# Measurements\n\n"
+        "| Quantity | Value |\n"
+        "| --- | --- |\n"
+        "| Mass | 42 |\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "captionless-table-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    table = next(item for item in source_blocks(source) if item["kind"] == "table")
+    tasks = FakeTasks()
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        _context(tmp_path, "captionless-table"),
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "fr",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "fr",
+            1,
+            "e" * 64,
+            (),
+        ),
+        target_language="fr",
+        block_ids=[str(table["block_id"])],
+    )
+
+    assert isinstance(result, TranslationResult)
+    assert result.coverage == "selection"
+    assert result.revision_artifacts == ()
+    assert tasks.calls == []
 
 
 def test_failed_review_automatically_keeps_validated_translation(tmp_path):
@@ -1613,8 +2776,254 @@ def test_failed_review_automatically_keeps_validated_translation(tmp_path):
         for item in result.revision_artifacts
     ]
     assert all(
-        item.provenance["translation_fallback"]["kind"]
-        == "review_skipped"
+        item.provenance["translation_fallback"]["kind"] == "review_skipped"
+        for item in revisions
+    )
+
+
+def test_replay_of_review_acceptance_envelope_restores_audit_and_provider_data(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "replay-review-envelope.md"
+    markdown.write_text("Only one translated paragraph.\n", encoding="utf-8")
+    paper = AcDocumentService(cache_root=tmp_path / "replay-review-envelope-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    language = LanguageResult(
+        source.document_digest,
+        source.source_digest,
+        "en",
+        "known",
+        1,
+        "fr",
+        "enabled",
+    )
+    glossary = GlossaryResult(
+        source.document_digest,
+        source.source_digest,
+        "fr",
+        1,
+        "f" * 64,
+        (),
+    )
+    units = _translation_units(source, source_blocks(source))
+    model_blocks = _model_translation_blocks(units)
+    model_units, _plans = _bounded_model_translation_units(
+        model_blocks,
+        glossary=glossary.entries,
+        target_language="fr",
+        language=language,
+        budget_bytes=32_000,
+    )
+    windows = _translation_windows(
+        model_units,
+        glossary=glossary.entries,
+        target_language="fr",
+        language=language,
+        budget_bytes=32_000,
+    )
+    assert len(windows) == 1
+    window = windows[0]
+    accepted = {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "translations": [
+            {
+                "block_id": str(block["block_id"]),
+                "parts": source_protected_parts(block),
+            }
+            for block in window
+        ],
+    }
+    fallback = _translation_fallback_document(
+        source_text_block_ids=[],
+        review_skipped_block_ids=[str(block["block_id"]) for block in window],
+        reason_codes=["provider_timeout"],
+    )
+    provider = {
+        "schema_version": "alc.translate.provider_fallback_diagnostic.v1",
+        "provider": "fake",
+        "model": "fake",
+        "tier": "default",
+        "effort": "",
+        "reason_code": "provider_timeout",
+        "failure_category": "timeout",
+        "detail_code": "provider_timeout",
+        "stage": "review",
+        "window_ordinal": 0,
+        "consecutive_window_failures": 1,
+        "global_fallback_triggered": False,
+        "remaining_windows_skipped": 0,
+    }
+    context = _context(tmp_path, "replay-review-envelope")
+    context.artifacts.publish_json(
+        "translation/windows/0000/accepted",
+        _review_accepted_window_document(
+            accepted,
+            fallback_document=fallback,
+            provider_failure_document=provider,
+        ),
+    )
+    tasks = FakeTasks()
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=language,
+        glossary=glossary,
+        target_language="fr",
+    )
+
+    assert isinstance(result, TranslationResult)
+    assert tasks.calls == []
+    assert context.artifacts.find("translation/windows/0000/fallback") is not None
+    assert (
+        context.artifacts.find("translation/windows/0000/fallback-provider")
+        is not None
+    )
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    assert all(
+        item.provenance["translation_fallback"]["kind"] == "review_skipped"
+        for item in revisions
+    )
+
+
+def test_split_review_envelope_replay_keeps_the_recorded_fallback(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "split-review-envelope.md"
+    markdown.write_text(
+        "# Long\n\n" + "\n\n".join(["source prose " * 8] * 4),
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "split-review-envelope-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    language = LanguageResult(
+        source.document_digest,
+        source.source_digest,
+        "en",
+        "known",
+        1,
+        "zh-CN",
+        "enabled",
+    )
+    glossary = GlossaryResult(
+        source.document_digest,
+        source.source_digest,
+        "zh-CN",
+        1,
+        "a" * 64,
+        (),
+    )
+    units = _translation_units(source, source_blocks(source))
+    model_blocks = _model_translation_blocks(units)
+    model_units, _plans = _bounded_model_translation_units(
+        model_blocks,
+        glossary=glossary.entries,
+        target_language="zh-CN",
+        language=language,
+        budget_bytes=4_800,
+    )
+    windows = _translation_windows(
+        model_units,
+        glossary=glossary.entries,
+        target_language="zh-CN",
+        language=language,
+        budget_bytes=4_800,
+    )
+    assert len(windows) == 1
+    window = windows[0]
+    draft_document = {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "translations": [
+            {
+                "block_id": str(block["block_id"]),
+                "parts": [
+                    {
+                        "kind": "text",
+                        "text": f"{'译' * 600}{block_text(block)}",
+                    }
+                ],
+            }
+            for block in window
+        ],
+    }
+    draft = _validate_draft_window(draft_document, window)
+    review_windows = _translation_review_windows(
+        window,
+        draft,
+        glossary=glossary.entries,
+        target_language="zh-CN",
+        window_ordinal=0,
+        budget_bytes=4_800,
+    )
+    assert len(review_windows) > 1
+    first_blocks, first_draft = review_windows[0]
+    first_digest = _digest(first_draft)[:24]
+    first_fallback = _translation_fallback_document(
+        source_text_block_ids=[],
+        review_skipped_block_ids=[str(block["block_id"]) for block in first_blocks],
+        reason_codes=["translation_review_invalid"],
+    )
+    context = _context(tmp_path, "split-review-envelope")
+    context.artifacts.publish_json("translation/windows/0000/draft", draft_document)
+    context.artifacts.publish_json(
+        f"translation/windows/0000/reviews/0000/{first_digest}/accepted",
+        _review_accepted_window_document(
+            {
+                "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+                "translations": [
+                    {
+                        "block_id": str(item["block_id"]),
+                        "parts": item["parts"],
+                    }
+                    for item in first_draft
+                ],
+            },
+            fallback_document=first_fallback,
+        ),
+    )
+    tasks = FakeTasks(translation_prefix="译" * 600)
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=language,
+        glossary=glossary,
+        target_language="zh-CN",
+        input_budget_bytes=4_800,
+    )
+
+    assert isinstance(result, TranslationResult)
+    assert TRANSLATION_PROMPT_VERSION not in tasks.calls
+    skipped_ids = {str(block["block_id"]) for block in first_blocks}
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    assert all(
+        item.provenance["translation_fallback"]["kind"] == "review_skipped"
+        for item in revisions
+        if item.anchor.target_id in skipped_ids
+    )
+    assert any(
+        item.anchor.target_id not in skipped_ids
+        and "translation_fallback" not in item.provenance
         for item in revisions
     )
 
@@ -1675,9 +3084,7 @@ def test_overescaped_formula_is_restored_without_supervision(tmp_path):
     )
     context = _context(tmp_path, "formula-restore")
 
-    result = TranslationWorkflowService(
-        OverescapedFormulaTasks()
-    ).translate_blocks(
+    result = TranslationWorkflowService(OverescapedFormulaTasks()).translate_blocks(
         context,
         source,
         language=LanguageResult(
@@ -1709,9 +3116,7 @@ def test_overescaped_formula_is_restored_without_supervision(tmp_path):
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == paragraph["block_id"]
+        item for item in revisions if item.anchor.target_id == paragraph["block_id"]
     )
     assert r"$\Psi^\dagger$" in revision.markdown_body
     assert r"$\\Psi^\dagger$" not in revision.markdown_body
@@ -1720,8 +3125,7 @@ def test_overescaped_formula_is_restored_without_supervision(tmp_path):
 def test_small_list_is_translated_as_item_units(tmp_path):
     markdown = tmp_path / "small-list.md"
     markdown.write_text(
-        "# Data\n\n- (16)\n"
-        "- Type Ia observations span $0.001<z<2.26$.\n",
+        "# Data\n\n- (16)\n- Type Ia observations span $0.001<z<2.26$.\n",
         encoding="utf-8",
     )
     paper = AcDocumentService(cache_root=tmp_path / "small-list-cache")
@@ -1773,9 +3177,7 @@ def test_small_list_is_translated_as_item_units(tmp_path):
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == list_block["block_id"]
+        item for item in revisions if item.anchor.target_id == list_block["block_id"]
     )
     assert len(revision.markdown_body.splitlines()) == 2
     assert "$0.001<z<2.26$" in revision.markdown_body
@@ -1829,14 +3231,12 @@ def test_list_item_translation_newlines_preserve_source_item_boundaries(
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == list_block["block_id"]
+        item for item in revisions if item.anchor.target_id == list_block["block_id"]
     )
     assert revision.markdown_body.splitlines() == ["- un extra", "- deux"]
 
 
-def test_invalid_formula_falls_back_to_source_and_continues(tmp_path):
+def test_missing_formula_atom_is_restored_without_source_fallback(tmp_path):
     markdown = tmp_path / "formula-fallback.md"
     markdown.write_text(
         "# Formula\n\nThe range is $0.001<z<2.26$.\n\nAfterward.\n",
@@ -1855,9 +3255,8 @@ def test_invalid_formula_falls_back_to_source_and_continues(tmp_path):
     )
     context = _context(tmp_path, "formula-fallback")
 
-    result = TranslationWorkflowService(
-        FormulaOmittingTasks()
-    ).translate_blocks(
+    tasks = FormulaOmittingTasks()
+    result = TranslationWorkflowService(tasks).translate_blocks(
         context,
         source,
         language=LanguageResult(
@@ -1889,24 +3288,20 @@ def test_invalid_formula_falls_back_to_source_and_continues(tmp_path):
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == formula_block["block_id"]
+        item for item in revisions if item.anchor.target_id == formula_block["block_id"]
     )
     assert "$0.001<z<2.26$" in revision.markdown_body
-    assert revision.provenance["translation_fallback"] == {
-        "schema_version": "alc.translate.fallback.v1",
-        "kind": "source_text",
-        "source_preserved": True,
+    assert revision.markdown_body.startswith("translated:")
+    assert "translation_fallback" not in revision.provenance
+    assert revision.provenance["protected_atoms"] == {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "assembled_by": "caller",
     }
-    assert all(
-        "translation_fallback" not in item.provenance
-        for item in revisions
-        if item.anchor.target_id != formula_block["block_id"]
-    )
+    assert all("translation_fallback" not in item.provenance for item in revisions)
+    assert tasks.calls.count(TRANSLATION_PROMPT_VERSION) == 1
 
 
-def test_invalid_link_falls_back_to_source_and_continues(tmp_path):
+def test_missing_link_atom_is_restored_without_source_fallback(tmp_path):
     markdown = tmp_path / "link-fallback.md"
     markdown.write_text(
         "# Links\n\n"
@@ -1925,14 +3320,12 @@ def test_invalid_link_falls_back_to_source_and_continues(tmp_path):
         block
         for block in source_blocks(source)
         if block["payload"].get("inline_spans")
-        and any(
-            span.get("kind") == "link"
-            for span in block["payload"]["inline_spans"]
-        )
+        and any(span.get("kind") == "link" for span in block["payload"]["inline_spans"])
     )
     context = _context(tmp_path, "link-fallback")
 
-    result = TranslationWorkflowService(LinkOmittingTasks()).translate_blocks(
+    tasks = LinkOmittingTasks()
+    result = TranslationWorkflowService(tasks).translate_blocks(
         context,
         source,
         language=LanguageResult(
@@ -1964,34 +3357,277 @@ def test_invalid_link_falls_back_to_source_and_continues(tmp_path):
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == link_block["block_id"]
+        item for item in revisions if item.anchor.target_id == link_block["block_id"]
     )
     assert revision.markdown_body.strip() == (
-        "The project is at "
+        "translated:The project is at "
         "[https://example.test/source](https://example.test/source)."
     )
-    assert revision.provenance["translation_fallback"] == {
-        "schema_version": "alc.translate.fallback.v1",
-        "kind": "source_text",
-        "source_preserved": True,
+    assert "translation_fallback" not in revision.provenance
+    assert revision.provenance["protected_atoms"] == {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "assembled_by": "caller",
     }
-    assert any(
-        item.anchor.target_id != link_block["block_id"]
-        and "translation_fallback" not in item.provenance
-        for item in revisions
+    assert all("translation_fallback" not in item.provenance for item in revisions)
+    assert tasks.calls.count(TRANSLATION_PROMPT_VERSION) == 1
+
+
+@pytest.mark.parametrize("always_invalid", [False, True])
+def test_translation_retry_is_scoped_and_preserves_valid_neighbors(
+    tmp_path: Path, always_invalid: bool
+) -> None:
+    markdown = tmp_path / "scoped-retry.md"
+    markdown.write_text(
+        "# Scope\n\nBefore $x$ after.\n\nNeighbor remains translated.\n",
+        encoding="utf-8",
     )
+    paper = AcDocumentService(cache_root=tmp_path / "scoped-retry-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    tasks = ScopedAtomRetryTasks(always_invalid=always_invalid)
+    context = _context(tmp_path, f"scoped-retry-{always_invalid}")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "c" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    assert [len(window) for window in tasks.translation_blocks] == [3, 1]
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    formula = next(item for item in revisions if "$x$" in item.markdown_body)
+    neighbor = next(
+        item
+        for item in revisions
+        if "Neighbor remains translated" in item.markdown_body
+    )
+    assert "translation_fallback" not in neighbor.provenance
+    if always_invalid:
+        assert formula.provenance["translation_fallback"]["kind"] == "source_text"
+    else:
+        assert "translation_fallback" not in formula.provenance
+
+
+def test_text_slot_retry_keeps_verified_legacy_protected_neighbors() -> None:
+    neighbor = {
+        "block_id": "legacy-neighbor",
+        "ordinal": 0,
+        "kind": "paragraph",
+        "section_path": [],
+        "payload": {"text": "Legacy neighbor stays translated"},
+    }
+    retry_target = {
+        "block_id": "retry-target",
+        "ordinal": 1,
+        "kind": "paragraph",
+        "section_path": [],
+        "payload": {"text": "Retry this text"},
+    }
+    neighbor_parts = source_protected_parts(neighbor)
+    first = {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "translations": [
+            {"block_id": "legacy-neighbor", "parts": neighbor_parts},
+            {
+                "block_id": "retry-target",
+                "parts": [{"kind": "text", "text": ""}],
+            },
+        ],
+    }
+    retry = {
+        "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+        "translations": {
+            "retry-target": {
+                "text_slots": {
+                    text_slot_ids(retry_target)[0]: "重试后的文本",
+                }
+            }
+        },
+    }
+
+    merged = _merge_protected_translation_candidates(
+        first, retry, (neighbor, retry_target)
+    )
+
+    assert merged["schema_version"] == PROTECTED_ATOM_RESULT_SCHEMA
+    assert next(
+        item for item in merged["translations"] if item["block_id"] == "legacy-neighbor"
+    )["parts"] == neighbor_parts
+    _validated_protected_draft_document(merged, (neighbor, retry_target))
+
+
+def test_text_slot_retry_preserves_reordered_legacy_protected_neighbor(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "legacy-reordered-retry.md"
+    markdown.write_text(
+        "Before $x$ after.\n\n"
+        "Read [the source](https://example.test/source) after $y$.\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "legacy-reordered-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    retry_target, neighbor = source_blocks(source)
+    neighbor_plan = protected_atom_plan(neighbor)
+    atom_ids = {
+        str(atom["kind"]): str(atom["atom_id"])
+        for atom in neighbor_plan["atoms"]
+    }
+    formula_id = atom_ids["formula"]
+    link_id = atom_ids["link"]
+    reordered_neighbor_parts = [
+        {"kind": "text", "text": "译文先引用 "},
+        {
+            "kind": "link",
+            "atom_id": link_id,
+            "parts": [{"kind": "text", "text": "译文来源"}],
+        },
+        {"kind": "text", "text": "，再计算 "},
+        {"kind": "atom", "atom_id": formula_id},
+        {"kind": "text", "text": "。"},
+    ]
+    first = {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "translations": [
+            {
+                "block_id": str(retry_target["block_id"]),
+                "parts": [{"kind": "text", "text": ""}],
+            },
+            {
+                "block_id": str(neighbor["block_id"]),
+                "parts": reordered_neighbor_parts,
+            },
+        ],
+    }
+    retry = {
+        "schema_version": TEXT_SLOT_RESULT_SCHEMA,
+        "translations": {
+            str(retry_target["block_id"]): {
+                    "text_slots": {
+                        text_slot_ids(retry_target)[0]: "修复后的译文",
+                        text_slot_ids(retry_target)[1]: "之后。",
+                }
+            }
+        },
+    }
+
+    merged = _merge_protected_translation_candidates(
+        first, retry, (retry_target, neighbor)
+    )
+    _validated_protected_draft_document(
+        merged, (retry_target, neighbor)
+    )
+    validated = _validate_draft_window(merged, (retry_target, neighbor))
+
+    assert merged["schema_version"] == PROTECTED_ATOM_RESULT_SCHEMA
+    retained_neighbor = next(
+        item
+        for item in validated
+        if item["block_id"] == str(neighbor["block_id"])
+    )
+    assert [
+        part["atom_id"]
+        for part in retained_neighbor["parts"]
+        if part["kind"] in {"atom", "link"}
+    ] == [link_id, formula_id]
+    assert "[译文来源](https://example.test/source)" in retained_neighbor["text"]
+    assert "$y$" in retained_neighbor["text"]
+    assert any(
+        item["block_id"] == str(retry_target["block_id"])
+        and "修复后的译文" in item["text"]
+        for item in validated
+    )
+
+
+def test_text_slot_review_preserves_atoms_without_returning_them(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "review-atom-repair.md"
+    markdown.write_text(
+        "# Review\n\nBefore $x$ after.\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "review-atom-repair-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    tasks = ReviewTextSlotPatchingTasks()
+    context = _context(tmp_path, "review-atom-repair")
+
+    result = TranslationWorkflowService(tasks).translate_blocks(
+        context,
+        source,
+        language=LanguageResult(
+            source.document_digest,
+            source.source_digest,
+            "en",
+            "known",
+            1,
+            "zh-CN",
+            "enabled",
+        ),
+        glossary=GlossaryResult(
+            source.document_digest,
+            source.source_digest,
+            "zh-CN",
+            1,
+            "d" * 64,
+            (),
+        ),
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    formula = next(item for item in revisions if "$x$" in item.markdown_body)
+    assert "translation_fallback" not in formula.provenance
+    assert "reviewed:" in formula.markdown_body
+    assert tasks.calls.count(REVIEW_PROMPT_VERSION) == 1
 
 
 def test_parenthesized_repeated_link_source_fallback_is_valid():
-    doi_target = (
-        "https://dx.doi.org/https://doi.org/10.1016/"
-        "0370-2693(80)90670-X"
-    )
+    doi_target = "https://dx.doi.org/https://doi.org/10.1016/0370-2693(80)90670-X"
     article_target = (
-        "https://www.sciencedirect.com/science/article/pii/"
-        "037026938090670X"
+        "https://www.sciencedirect.com/science/article/pii/037026938090670X"
     )
     block = {
         "block_id": "block-parenthesized-links",
@@ -2042,19 +3678,15 @@ def test_parenthesized_repeated_link_source_fallback_is_valid():
     )
 
     assert fallback_ids == [block["block_id"]]
-    assert fallback == [
-        {
-            "block_id": block["block_id"],
-            "text": (
-                "[2] A. A. Starobinsky, "
-                f"[Physics Letters B]({doi_target})"
-                f"[ ]({doi_target})"
-                f"[91]({doi_target})"
-                f"[ no. 1, (1980) 99–102]({doi_target}). "
-                f"[{article_target}]({article_target})."
-            ),
-        }
-    ]
+    assert fallback[0]["text"] == (
+        "[2] A. A. Starobinsky, "
+        f"[Physics Letters B]({doi_target})"
+        f"[ ]({doi_target})"
+        f"[91]({doi_target})"
+        f"[ no. 1, (1980) 99–102]({doi_target}). "
+        f"[{article_target}]({article_target})."
+    )
+    assert fallback[0]["schema_version"] == PROTECTED_ATOM_RESULT_SCHEMA
 
 
 @pytest.mark.parametrize(
@@ -2068,9 +3700,7 @@ def test_lexical_link_source_fallback_is_valid(target):
         "kind": "paragraph",
         "payload": {
             "text": "source",
-            "inline_spans": [
-                {"kind": "link", "text": "source", "target": target}
-            ],
+            "inline_spans": [{"kind": "link", "text": "source", "target": target}],
         },
     }
 
@@ -2084,9 +3714,8 @@ def test_lexical_link_source_fallback_is_valid(target):
     )
 
     assert fallback_ids == [block["block_id"]]
-    assert fallback == [
-        {"block_id": block["block_id"], "text": f"[source]({target})"}
-    ]
+    assert fallback[0]["text"] == f"[source]({target})"
+    assert fallback[0]["schema_version"] == PROTECTED_ATOM_RESULT_SCHEMA
 
 
 @pytest.mark.parametrize("artifact_kind", ["draft", "accepted"])
@@ -2095,14 +3724,10 @@ def test_invalid_replayed_translation_artifact_falls_back_and_continues(
 ):
     markdown = tmp_path / f"replayed-{artifact_kind}.md"
     markdown.write_text(
-        "# Links\n\n"
-        "Read the [project](https://example.test/source).\n\n"
-        "Afterward.\n",
+        "# Links\n\nRead the [project](https://example.test/source).\n\nAfterward.\n",
         encoding="utf-8",
     )
-    paper = AcDocumentService(
-        cache_root=tmp_path / f"replayed-{artifact_kind}-cache"
-    )
+    paper = AcDocumentService(cache_root=tmp_path / f"replayed-{artifact_kind}-cache")
     source = TranslationSource(
         RichDocumentParserService(paper.repository).parse_source(
             paper.import_source(markdown)
@@ -2188,9 +3813,7 @@ def test_invalid_replayed_translation_artifact_falls_back_and_continues(
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == link_block["block_id"]
+        item for item in revisions if item.anchor.target_id == link_block["block_id"]
     )
     assert revision.markdown_body.strip() == (
         "Read the [project](https://example.test/source)."
@@ -2199,6 +3822,89 @@ def test_invalid_replayed_translation_artifact_falls_back_and_continues(
         "schema_version": "alc.translate.fallback.v1",
         "kind": "source_text",
         "source_preserved": True,
+    }
+
+
+def test_protected_atom_accepted_window_replays_without_a_model_call(tmp_path):
+    markdown = tmp_path / "protected-replay.md"
+    markdown.write_text(
+        "# Replay\n\nCompute $x$ then see [the source](https://example.test/x).\n",
+        encoding="utf-8",
+    )
+    paper = AcDocumentService(cache_root=tmp_path / "protected-replay-cache")
+    source = TranslationSource(
+        RichDocumentParserService(paper.repository).parse_source(
+            paper.import_source(markdown)
+        )
+    )
+    language = LanguageResult(
+        source.document_digest,
+        source.source_digest,
+        "en",
+        "known",
+        1,
+        "zh-CN",
+        "enabled",
+    )
+    glossary = GlossaryResult(
+        source.document_digest,
+        source.source_digest,
+        "zh-CN",
+        1,
+        "c" * 64,
+        (),
+    )
+    units = _model_translation_blocks(_translation_units(source, source_blocks(source)))
+    model_units, _plans = _bounded_model_translation_units(
+        units,
+        glossary=glossary.entries,
+        target_language="zh-CN",
+        language=language,
+        budget_bytes=32_000,
+    )
+    windows = _translation_windows(
+        model_units,
+        glossary=glossary.entries,
+        target_language="zh-CN",
+        language=language,
+        budget_bytes=32_000,
+    )
+    assert len(windows) == 1
+    context = _context(tmp_path, "protected-replay")
+    context.artifacts.publish_json(
+        "translation/windows/0000/accepted",
+        {
+            "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            "translations": [
+                {
+                    "block_id": str(block["block_id"]),
+                    "parts": source_protected_parts(block),
+                }
+                for block in windows[0]
+            ],
+        },
+    )
+
+    result = TranslationWorkflowService(ProviderFailingTasks()).translate_blocks(
+        context,
+        source,
+        language=language,
+        glossary=glossary,
+        target_language="zh-CN",
+    )
+
+    assert isinstance(result, TranslationResult)
+    revisions = [
+        decode_fragment_revision(
+            context.artifacts.read_bytes(item.artifact).decode("utf-8"),
+            filename=Path(item.revision.path).name,
+        )
+        for item in result.revision_artifacts
+    ]
+    paragraph = next(item for item in revisions if "$x$" in item.markdown_body)
+    assert paragraph.provenance["protected_atoms"] == {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+        "assembled_by": "caller",
     }
 
 
@@ -2290,9 +3996,7 @@ def test_historical_accepted_list_translation_replays_into_item_units(
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == list_block["block_id"]
+        item for item in revisions if item.anchor.target_id == list_block["block_id"]
     )
     assert revision.markdown_body.splitlines() == [
         "- ancien un",
@@ -2305,10 +4009,7 @@ def test_historical_accepted_list_translation_replays_across_new_windows(
     tmp_path,
 ):
     markdown = tmp_path / "historical-long-list.md"
-    items = [
-        f"item {index:02d} " + "detail " * 12
-        for index in range(70)
-    ]
+    items = [f"item {index:02d} " + "detail " * 12 for index in range(70)]
     markdown.write_text(
         "# Data\n\n" + "\n".join(f"- {item}" for item in items) + "\n",
         encoding="utf-8",
@@ -2397,9 +4098,7 @@ def test_historical_accepted_list_translation_replays_across_new_windows(
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == list_block["block_id"]
+        item for item in revisions if item.anchor.target_id == list_block["block_id"]
     )
     assert revision.markdown_body.splitlines() == [
         f"- {item}" for item in translated_items
@@ -2437,32 +4136,36 @@ def test_invalid_replayed_review_artifact_keeps_draft_and_continues(tmp_path):
         (),
     )
     blocks = source_blocks(source)
-    model_blocks = _model_translation_blocks(
-        _translation_units(source, blocks)
-    )
+    model_blocks = _model_translation_blocks(_translation_units(source, blocks))
     model_units, _plans = _bounded_model_translation_units(
         model_blocks,
         glossary=glossary.entries,
         target_language="zh-CN",
         language=language,
-        budget_bytes=4_800,
+        budget_bytes=8_000,
     )
     windows = _translation_windows(
         model_units,
         glossary=glossary.entries,
         target_language="zh-CN",
         language=language,
-        budget_bytes=4_800,
+        budget_bytes=8_000,
     )
     assert len(windows) == 1
     draft_doc = {
+        "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
         "translations": [
             {
                 "block_id": str(block["block_id"]),
-                "text": f"{'译' * 600}{block_text(block)}",
+                "parts": [
+                    {
+                        "kind": "text",
+                        "text": f"{'译' * 600}{block_text(block)}",
+                    }
+                ],
             }
             for block in windows[0]
-        ]
+        ],
     }
     draft = _validate_draft_window(draft_doc, windows[0])
     review_windows = _translation_review_windows(
@@ -2471,7 +4174,7 @@ def test_invalid_replayed_review_artifact_keeps_draft_and_continues(tmp_path):
         glossary=glossary.entries,
         target_language="zh-CN",
         window_ordinal=0,
-        budget_bytes=4_800,
+        budget_bytes=8_000,
     )
     assert len(review_windows) > 1
     first_review_blocks, first_review_draft = review_windows[0]
@@ -2479,9 +4182,16 @@ def test_invalid_replayed_review_artifact_keeps_draft_and_continues(tmp_path):
     context = _context(tmp_path, "replayed-review")
     context.artifacts.publish_json("translation/windows/0000/draft", draft_doc)
     context.artifacts.publish_json(
-        "translation/windows/0000/reviews/0000/"
-        f"{review_digest}/accepted",
-        {"translations": [{"block_id": "wrong-block", "text": "unsafe"}]},
+        f"translation/windows/0000/reviews/0000/{review_digest}/accepted",
+        {
+            "schema_version": PROTECTED_ATOM_RESULT_SCHEMA,
+            "translations": [
+                {
+                    "block_id": "wrong-block",
+                    "parts": [{"kind": "text", "text": "unsafe"}],
+                }
+            ],
+        },
     )
     tasks = FakeTasks(translation_prefix="译" * 600)
 
@@ -2491,7 +4201,7 @@ def test_invalid_replayed_review_artifact_keeps_draft_and_continues(tmp_path):
         language=language,
         glossary=glossary,
         target_language="zh-CN",
-        input_budget_bytes=4_800,
+        input_budget_bytes=8_000,
     )
 
     assert isinstance(result, TranslationResult)
@@ -2505,8 +4215,7 @@ def test_invalid_replayed_review_artifact_keeps_draft_and_continues(tmp_path):
     ]
     skipped_ids = {str(item["block_id"]) for item in first_review_blocks}
     assert all(
-        revision.provenance["translation_fallback"]["kind"]
-        == "review_skipped"
+        revision.provenance["translation_fallback"]["kind"] == "review_skipped"
         for revision in revisions
         if revision.anchor.target_id in skipped_ids
     )
@@ -2583,16 +4292,15 @@ def test_structured_inline_identity_survives_source_fallback_and_collapse(
     block, expected_text
 ):
     candidate = {
-        "translations": [
-            {"block_id": block["block_id"], "text": "invalid translation"}
-        ]
+        "translations": [{"block_id": block["block_id"], "text": "invalid translation"}]
     }
 
     fallback, fallback_ids = _salvaged_translation_fallback(
         (block,), candidate=candidate
     )
 
-    assert fallback == [{"block_id": block["block_id"], "text": expected_text}]
+    assert fallback[0]["text"] == expected_text
+    assert fallback[0]["schema_version"] == PROTECTED_ATOM_RESULT_SCHEMA
     assert fallback_ids == [block["block_id"]]
 
     units, plans = _bounded_model_translation_units(
@@ -2612,12 +4320,10 @@ def test_structured_inline_identity_survives_source_fallback_and_collapse(
     )
     assert [item["block_id"] for item in units] == [block["block_id"]]
 
-    collapsed, collapsed_fallback_ids = (
-        _collapse_model_translation_units_with_fallback(
-            (block,),
-            plans,
-            ({"block_id": block["block_id"], "text": "invalid translation"},),
-        )
+    collapsed, collapsed_fallback_ids = _collapse_model_translation_units_with_fallback(
+        (block,),
+        plans,
+        ({"block_id": block["block_id"], "text": "invalid translation"},),
     )
 
     assert collapsed == ({"block_id": block["block_id"], "text": expected_text},)
@@ -2629,8 +4335,7 @@ def test_oversized_list_is_translated_as_bounded_internal_units(tmp_path):
     markdown.write_text(
         "# References\n\n"
         + "\n".join(
-            f"- Reference {index}: " + ("source detail " * 18)
-            for index in range(1, 61)
+            f"- Reference {index}: " + ("source detail " * 18) for index in range(1, 61)
         )
         + "\n",
         encoding="utf-8",
@@ -2681,9 +4386,7 @@ def test_oversized_list_is_translated_as_bounded_internal_units(tmp_path):
         for item in result.revision_artifacts
     ]
     revision = next(
-        item
-        for item in revisions
-        if item.anchor.target_id == list_block["block_id"]
+        item for item in revisions if item.anchor.target_id == list_block["block_id"]
     )
     assert len(revision.markdown_body.splitlines()) == 60
 
@@ -2693,8 +4396,7 @@ def test_oversized_paragraph_is_translated_as_bounded_internal_units(tmp_path):
     markdown.write_text(
         "# Long\n\n"
         + " ".join(
-            f"Sentence {index} contains source detail."
-            for index in range(1, 241)
+            f"Sentence {index} contains source detail." for index in range(1, 241)
         )
         + "\n",
         encoding="utf-8",
@@ -2744,9 +4446,7 @@ def test_oversized_paragraph_is_translated_as_bounded_internal_units(tmp_path):
         )
         for item in result.revision_artifacts
     ]
-    assert any(
-        item.anchor.target_id == paragraph["block_id"] for item in revisions
-    )
+    assert any(item.anchor.target_id == paragraph["block_id"] for item in revisions)
 
 
 def test_oversized_review_block_does_not_skip_neighbor_reviews(tmp_path):
@@ -2760,9 +4460,7 @@ def test_oversized_review_block_does_not_skip_neighbor_reviews(tmp_path):
     source = TranslationSource(
         RichDocumentParserService(paper.repository).parse_source(artifact)
     )
-    tasks = FakeTasks(
-        translation_prefix_by_text={"middle expands": "译" * 2_000}
-    )
+    tasks = FakeTasks(translation_prefix_by_text={"middle expands": "译" * 2_000})
     workflow = TranslationWorkflowService(tasks)
     context = _context(tmp_path, "mixed-review")
     language = LanguageResult(
@@ -2794,15 +4492,23 @@ def test_oversized_review_block_does_not_skip_neighbor_reviews(tmp_path):
     assert isinstance(result, TranslationResult)
     assert len(tasks.review_blocks) == 2
     assert all(
-        "middle expands" not in block_text(block)
+        "middle expands"
+        not in "".join(
+            part.get("text", "")
+            for part in block["content"]["parts"]
+            if part["kind"] == "text"
+        )
         for blocks in tasks.review_blocks
         for block in blocks
     )
-    assert max(
-        size
-        for contract, size in tasks.prompt_sizes
-        if contract == REVIEW_PROMPT_VERSION
-    ) <= 4_800
+    assert (
+        max(
+            size
+            for contract, size in tasks.prompt_sizes
+            if contract == REVIEW_PROMPT_VERSION
+        )
+        <= 4_800
+    )
 
 
 def test_translation_windows_reserve_space_for_review(tmp_path):
@@ -2887,11 +4593,14 @@ def test_actual_translation_expansion_splits_review_windows(tmp_path):
     translation_count = tasks.calls.count(TRANSLATION_PROMPT_VERSION)
     review_count = tasks.calls.count(REVIEW_PROMPT_VERSION)
     assert review_count > translation_count
-    assert max(
-        size
-        for contract, size in tasks.prompt_sizes
-        if contract == REVIEW_PROMPT_VERSION
-    ) <= 4_800
+    assert (
+        max(
+            size
+            for contract, size in tasks.prompt_sizes
+            if contract == REVIEW_PROMPT_VERSION
+        )
+        <= 4_800
+    )
 
 
 def test_split_review_fallback_progresses_across_subwindows(tmp_path):
@@ -2947,8 +4656,7 @@ def test_split_review_fallback_progresses_across_subwindows(tmp_path):
         for item in result.revision_artifacts
     ]
     assert all(
-        item.provenance["translation_fallback"]["kind"]
-        == "review_skipped"
+        item.provenance["translation_fallback"]["kind"] == "review_skipped"
         for item in revisions
     )
 

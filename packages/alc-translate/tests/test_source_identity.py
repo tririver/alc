@@ -4,9 +4,8 @@ import hashlib
 import time
 from types import SimpleNamespace
 
-import pytest
 import alc_translate.source as source_module
-
+import pytest
 from ac_document import (
     RichBlock,
     RichBlockKind,
@@ -19,15 +18,16 @@ from ac_document import (
     SourceOriginKind,
 )
 from alc_translate import TranslationSource
-
 from alc_translate.source import (
     TranslationSourceError,
     block_text,
+    canonicalize_translation_markdown,
     formula_identity_diagnostics,
     prompt_block,
     source_blocks,
     source_identity,
     source_note_link_markdown,
+    validate_translation_markdown,
     validate_translation_text,
 )
 
@@ -284,9 +284,7 @@ def test_formula_failure_exposes_missing_and_added_tex_diagnostics() -> None:
         "b",
     }
     assert all(item["source_block_id"] == "block-inline" for item in diagnostics)
-    assert all(
-        item["translation_block_id"] == "block-inline" for item in diagnostics
-    )
+    assert all(item["translation_block_id"] == "block-inline" for item in diagnostics)
     assert all(item["source_neighbor_block_ids"] == [] for item in diagnostics)
     assert all(item["translation_neighbor_block_ids"] == [] for item in diagnostics)
 
@@ -525,8 +523,10 @@ def test_table_identity_extracts_markdown_math_and_links() -> None:
     assert identity["equations"] == ["E", "H", r"P^\mu"]
     assert identity["link_targets"] == ["caption.html", "operators.html"]
     validate_translation_text(
-        r"[数据](caption.html)给出 $E$。" "\n"
-        r"$P^\mu$ | 动量" "\n"
+        r"[数据](caption.html)给出 $E$。"
+        "\n"
+        r"$P^\mu$ | 动量"
+        "\n"
         r"$H$ | [哈密顿量](operators.html)",
         block,
     )
@@ -539,9 +539,9 @@ def test_source_presentation_accessor_is_optional_only_when_metadata_is_absent(
         source_module._ac_document, "source_presentation", raising=False
     )
 
-    assert source_module._source_presentation_or_none(
-        SimpleNamespace(metadata={})
-    ) is None
+    assert (
+        source_module._source_presentation_or_none(SimpleNamespace(metadata={})) is None
+    )
     with pytest.raises(
         TranslationSourceError,
         match="requires AC Document source-presentation support",
@@ -549,6 +549,7 @@ def test_source_presentation_accessor_is_optional_only_when_metadata_is_absent(
         source_module._source_presentation_or_none(
             SimpleNamespace(metadata={"source_presentation": {}})
         )
+
 
 def test_figure_identity_uses_caption_without_exposing_asset_target() -> None:
     block = {
@@ -578,9 +579,7 @@ def test_figure_identity_uses_caption_without_exposing_asset_target() -> None:
 
 
 def test_source_blocks_project_authoritative_figure_caption_math() -> None:
-    if not callable(
-        getattr(source_module._ac_document, "source_presentation", None)
-    ):
+    if not callable(getattr(source_module._ac_document, "source_presentation", None)):
         pytest.skip("requires AC Foundation source-presentation producer")
     source_bytes = b"<article><figure>Figure: Theta.</figure></article>"
     source = SourceArtifact(
@@ -751,9 +750,7 @@ def test_internal_bibliography_link_labels_are_source_authoritative() -> None:
         TranslationSourceError,
         match="changed internal bibliography link labels",
     ):
-        validate_translation_text(
-            r"定义见 [Bond et al. 1997](#bib.bib30)。", block
-        )
+        validate_translation_text(r"定义见 [Bond et al. 1997](#bib.bib30)。", block)
 
     author_label = {
         **block,
@@ -802,9 +799,7 @@ def test_internal_bibliography_link_labels_are_source_authoritative() -> None:
             ],
         },
     }
-    validate_translation_text(
-        r"[阅读来源](https://example.test/source)。", external
-    )
+    validate_translation_text(r"[阅读来源](https://example.test/source)。", external)
 
 
 def test_translation_unit_preserves_internal_bibliography_identity() -> None:
@@ -821,8 +816,7 @@ def test_translation_unit_preserves_internal_bibliography_identity() -> None:
     }
 
     validate_translation_text(
-        "测量来自 [Moresco et al. 2012](#bib.bib18); "
-        "[Moresco 2015](#bib.bib19)。",
+        "测量来自 [Moresco et al. 2012](#bib.bib18); [Moresco 2015](#bib.bib19)。",
         block,
     )
     with pytest.raises(
@@ -830,8 +824,7 @@ def test_translation_unit_preserves_internal_bibliography_identity() -> None:
         match="changed internal bibliography link labels",
     ):
         validate_translation_text(
-            "测量来自 [Moresco 等 2012](#bib.bib18); "
-            "[Moresco 2015](#bib.bib19)。",
+            "测量来自 [Moresco 等 2012](#bib.bib18); [Moresco 2015](#bib.bib19)。",
             block,
         )
 
@@ -971,6 +964,94 @@ def test_internal_bibliography_groups_and_entry_labels_are_authoritative() -> No
     validate_translation_text("[1] 译文参考文献。", bibliography)
     validate_translation_text("- [1] 译文参考文献。", bibliography)
 
+    parenthesized_bibliography = {
+        **bibliography,
+        "block_id": "block-parenthesized-bibliography-1",
+        "payload": {
+            "ordered": False,
+            "items": [
+                {
+                    "text": "(1) Source reference.",
+                    "inline_spans": [
+                        {
+                            "kind": "text",
+                            "start": 0,
+                            "end": 21,
+                            "text": "(1) Source reference.",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    validate_translation_text("(1) 译文参考文献。", parenthesized_bibliography)
+    validate_translation_text("- (1) 译文参考文献。", parenthesized_bibliography)
+    with pytest.raises(
+        TranslationSourceError,
+        match="changed bibliography entry label",
+    ):
+        validate_translation_text("[1] 译文参考文献。", parenthesized_bibliography)
+
+    author_year_bibliography = {
+        **bibliography,
+        "block_id": "block-author-year-bibliography-1",
+        "locator": {"source_id": "bib.bib32"},
+        "payload": {
+            "ordered": False,
+            "items": [
+                {
+                    "text": "Baldwin et al. (1981) Source reference.",
+                    "inline_spans": [
+                        {
+                            "kind": "text",
+                            "start": 0,
+                            "end": 39,
+                            "text": "Baldwin et al. (1981) Source reference.",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    validate_translation_text(
+        "Baldwin et al. (1981) 译文参考文献。", author_year_bibliography
+    )
+    validate_translation_text(
+        "- Baldwin et al. (1981) 译文参考文献。", author_year_bibliography
+    )
+    with pytest.raises(
+        TranslationSourceError,
+        match="changed bibliography entry label",
+    ):
+        validate_translation_text(
+            "Baldwin 等 (1981) 译文参考文献。", author_year_bibliography
+        )
+
+    suffixed_year_bibliography = {
+        **author_year_bibliography,
+        "block_id": "block-author-year-bibliography-2",
+        "locator": {"source_id": "bib.bib91"},
+        "payload": {
+            "ordered": False,
+            "items": [
+                {
+                    "text": "Rupke et al. (2005b) Source reference.",
+                    "inline_spans": [
+                        {
+                            "kind": "text",
+                            "start": 0,
+                            "end": 38,
+                            "text": "Rupke et al. (2005b) Source reference.",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    validate_translation_text(
+        "Rupke et al. (2005b) 译文参考文献。", suffixed_year_bibliography
+    )
+
     shuffled_source_identity = {
         **bibliography,
         "block_id": "block-bibliography-shuffled-source-id",
@@ -982,6 +1063,55 @@ def test_internal_bibliography_groups_and_entry_labels_are_authoritative() -> No
         match="changed bibliography entry label",
     ):
         validate_translation_text("译文参考文献。", bibliography)
+
+    unlabeled_bibliography = {
+        **bibliography,
+        "block_id": "block-unlabeled-bibliography-1",
+        "payload": {
+            "ordered": False,
+            "items": [{"text": "Source reference without a visible label."}],
+        },
+    }
+    with pytest.raises(
+        TranslationSourceError,
+        match="missing its authored visible label",
+    ):
+        validate_translation_text("译文参考文献。", unlabeled_bibliography)
+
+
+def test_bibliography_formula_ignores_math_syntax_in_link_destination() -> None:
+    block = {
+        "block_id": "block-bibliography-link-target-math",
+        "kind": "list",
+        "locator": {"source_id": "bib.bib46"},
+        "payload": {
+            "ordered": False,
+            "items": [
+                {
+                    "text": "(46) Source https://doi.org/example-01",
+                    "inline_spans": [
+                        {"kind": "text", "text": "(46) Source "},
+                        {
+                            "kind": "link",
+                            "text": "https://doi.org/example-",
+                            "target": "https://doi.org/example-$0_1$",
+                        },
+                        {"kind": "math", "tex": "0_{1}"},
+                    ],
+                }
+            ],
+        },
+    }
+
+    prompt_text = block_text(prompt_block(block))
+
+    assert prompt_text == (
+        "(46) Source [https://doi.org/example-](https://doi.org/example-$0_1$)$0_{1}$"
+    )
+    assert source_module._markdown_math_occurrences(
+        "[visible $x$](https://doi.org/example-$ignored$)"
+    ) == ("x",)
+    validate_translation_text(prompt_text, block)
 
 
 def test_undelimited_inline_math_still_uses_exact_tex_identity() -> None:
@@ -1078,3 +1208,31 @@ def test_equation_translation_must_equal_source_tex(
             match="changed equation text",
         ):
             validate_translation_text(text, block)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "译文中意外打开 $$ 但没有关闭。",
+        r"译文中意外打开 \[ 但没有关闭。",
+        r"\begin{align} x &= 1",
+    ],
+)
+def test_translation_markdown_rejects_unclosed_display_math(text: str) -> None:
+    with pytest.raises(TranslationSourceError) as raised:
+        validate_translation_markdown(text)
+
+    assert raised.value.code == "translation_markdown_invalid"
+
+
+def test_translation_markdown_ignores_math_delimiters_inside_code() -> None:
+    validate_translation_markdown("`$$`\n\n```text\n\\begin{align}\n```\n")
+
+
+def test_translation_markdown_disambiguates_adjacent_inline_math() -> None:
+    value = r"$a$${}^{1}$"
+
+    canonical = canonicalize_translation_markdown(value)
+
+    assert canonical == "$a$\u2060${}^{1}$"
+    validate_translation_markdown(canonical)

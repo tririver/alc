@@ -5,10 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Mapping
+import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ac_document import (
+    AcDocumentService,
+    RichDocumentParserService,
+    RichDocumentValidationError,
+    SourceBundle,
+    SourceRepositoryError,
+)
 from ac_jobs import (
     AcJobsError,
     CommandArtifact,
@@ -17,27 +25,24 @@ from ac_jobs import (
     CommandRun,
     CommandStatus,
     CommandWarning,
+    RunBusyError,
     RunStatus,
     command_result_from_snapshot,
     command_result_json,
     file_lease,
     snapshot_data,
 )
-from ac_llm import HostAuthority, LLMExecutionOptions, ModelSelection
-from ac_document import (
-    AcDocumentService,
-    RichDocumentParserService,
-    RichDocumentValidationError,
-    SourceBundle,
-    SourceRepositoryError,
-)
+from ac_llm import ExecutionLimits, HostAuthority, LLMExecutionOptions, ModelSelection
 from alc_render import (
     HTMLRenderError,
+    InteractiveReaderAdmissionError,
     RenderWorkspaceError,
     read_publication_workspace_state,
     render_publication_html,
-    validate_reader_in_browser,
+    render_source_only_html,
     validate_publication_workspace,
+    validate_reader_in_browser,
+    validate_source_only_html,
     validate_standalone_html,
 )
 
@@ -51,17 +56,18 @@ from .publication_revisions import (
 )
 from .reader_labels import ReaderLabelError, resolve_reader_labels
 from .request_contracts import (
+    _DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
     CompanionBuildRequest,
     CompanionExecutionOptions,
     CompanionGenerationRecipe,
     freeze_generation_recipe,
 )
-from .source_bundle import load_html_source_manifest
 from .service import (
     CompanionService,
     CompanionServiceError,
     companion_run_id,
 )
+from .source_bundle import load_html_source_manifest
 from .translation_adapter import (
     CompanionTranslationRuntimeError,
     require_translation_runtime,
@@ -133,6 +139,11 @@ def _parser() -> _Parser:
     build.add_argument("--provider", default="auto", help="LLM provider (default: auto)")
     build.add_argument("--model", help="provider-specific model name")
     build.add_argument(
+        "--effort",
+        choices=("low", "medium", "high", "xhigh"),
+        help="reasoning effort (default: medium for the Codex provider)",
+    )
+    build.add_argument(
         "--workers",
         type=int,
         default=16,
@@ -163,6 +174,22 @@ def _parser() -> _Parser:
         description="Inspect the selected Companion build and publication.",
     )
     status.add_argument("--project-dir", required=True, help="Companion project directory")
+
+    wait = commands.add_parser(
+        "wait",
+        help="wait for the selected build to reach a terminal state",
+        description=(
+            "Follow the selected durable build with stderr heartbeats and "
+            "return its final JSON status."
+        ),
+    )
+    wait.add_argument("--project-dir", required=True, help="Companion project directory")
+    wait.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=15.0,
+        help="status poll and heartbeat interval (default: 15 seconds)",
+    )
 
     resume = commands.add_parser(
         "resume",
@@ -250,7 +277,7 @@ def _help_command(arguments: list[str]) -> str:
         arguments[0]
         if arguments
         and arguments[0]
-        in {"build", "status", "resume", "stop", "render", "revise", "validate"}
+        in {"build", "status", "wait", "resume", "stop", "render", "revise", "validate"}
         else None
     )
     return " ".join(
@@ -281,7 +308,12 @@ def _execution_options(args: argparse.Namespace) -> CompanionExecutionOptions:
     return CompanionExecutionOptions(
         workers=args.workers,
         document_cache_root=args.document_cache_root,
-        llm=LLMExecutionOptions(host_authority=HostAuthority(args.host_authority)),
+        llm=LLMExecutionOptions(
+            limits=ExecutionLimits(
+                idle_timeout_seconds=_DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS
+            ),
+            host_authority=HostAuthority(args.host_authority),
+        ),
     )
 
 
@@ -347,6 +379,8 @@ def _dispatch(args: argparse.Namespace) -> CommandResult:
         return _build(args)
     if args.command == "status":
         return _status(args)
+    if args.command == "wait":
+        return _wait(args)
     if args.command == "resume":
         return _resume(args)
     if args.command == "stop":
@@ -435,6 +469,7 @@ def _build(args: argparse.Namespace) -> CommandResult:
                 provider=args.provider,
                 model=args.model,
                 tier="medium",
+                reasoning_effort=args.effort,
             ),
             approx_term_count=args.approx_term_count,
             cross_chapter_editorial_review=(
@@ -498,8 +533,7 @@ def _validate_workers(workers: int) -> None:
 
 def _status(args: argparse.Namespace) -> CommandResult:
     paths = CompanionProjectPaths.load(args.project_dir)
-    with file_lease(paths.delivery_lease, blocking=True):
-        return _status_locked(paths)
+    return _status_locked(paths)
 
 
 def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
@@ -524,12 +558,21 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
         service = CompanionService(paths.jobs_root)
         publication = service.publication(run_id)
         data["publication_digest"] = publication.publication_digest
+        profile = getattr(publication, "reader_profile", {})
+        source_only_publication = (
+            isinstance(profile, Mapping)
+            and profile.get("build_state")
+            == "provider_source_only"
+        )
+        source_only_delivery = source_only_publication
         workspace = paths.publication_workspace(run_id)
         validated_artifacts: list[CommandArtifact] = []
         try:
-            publication_path = service.materialize_publication(
-                run_id, workspace, project_paths=paths
-            )
+            publication_path = workspace / "publication.json"
+            if not publication_path.is_file():
+                raise RenderWorkspaceError(
+                    "selected publication workspace is not materialized"
+                )
             diagnostics = validate_publication_workspace(publication_path)
             state = read_publication_workspace_state(publication_path)
             if state.publication_digest != publication.publication_digest:
@@ -560,15 +603,21 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
             state = None
         if state is not None and paths.delivery_html.is_file():
             try:
-                validate_standalone_html(
-                    publication,
-                    paths.delivery_html,
-                    expected_selected_revision_digests=(
-                        None
-                        if state is None
-                        else state.selected_revision_digests
-                    ),
-                )
+                html_text = paths.delivery_html.read_text(encoding="utf-8")
+                if 'data-alc-source-only="true"' in html_text:
+                    validate_source_only_html(publication, paths.delivery_html)
+                    source_only_delivery = True
+                else:
+                    validate_standalone_html(
+                        publication,
+                        paths.delivery_html,
+                        expected_selected_revision_digests=(
+                            None
+                            if state is None
+                            else state.selected_revision_digests
+                        ),
+                    )
+                    source_only_delivery = False
                 data["workspace_html_consistent"] = True
                 validated_artifacts.append(
                     CommandArtifact(
@@ -584,6 +633,12 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
                 )
         else:
             data["workspace_html_consistent"] = False
+        data["delivery_grade"] = _delivery_grade(
+            publication, source_only=source_only_delivery
+        )
+        data["delivery_mode"] = _delivery_mode(
+            publication, source_only=source_only_delivery
+        )
         artifacts = tuple(validated_artifacts)
     return CommandResult(
         base.status,
@@ -598,6 +653,40 @@ def _status_locked(paths: CompanionProjectPaths) -> CommandResult:
         error=base.error,
         resume=base.resume,
     )
+
+
+def _wait(args: argparse.Namespace) -> CommandResult:
+    if args.poll_seconds < 0.25 or args.poll_seconds > 60:
+        raise _UsageError("--poll-seconds must be between 0.25 and 60")
+    paths = CompanionProjectPaths.load(args.project_dir)
+    run_id = _current_run(paths)
+    service = CompanionService(paths.jobs_root)
+    while True:
+        snapshot = service.inspect(run_id).snapshot
+        if snapshot.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+            return _status_locked(paths)
+        if snapshot.status is RunStatus.RUNNING:
+            try:
+                service.resume(run_id)
+            except RunBusyError:
+                pass
+            else:
+                continue
+        progress = service.progress(run_id)
+        heartbeat = {
+            "event": "alc.companion.wait",
+            "run_id": run_id,
+            "status": snapshot.status.value,
+            "phase": progress.get("phase"),
+            "completed_units": progress.get("completed_units"),
+            "total_units": progress.get("total_units"),
+            "last_progress_at": progress.get("last_progress_at"),
+        }
+        sys.stderr.write(
+            json.dumps(heartbeat, ensure_ascii=False, sort_keys=True) + "\n"
+        )
+        sys.stderr.flush()
+        time.sleep(args.poll_seconds)
 
 
 def _stop(args: argparse.Namespace) -> CommandResult:
@@ -646,15 +735,45 @@ def _render_locked(
     artifacts = [
         CommandArtifact("publication", run_id, str(publication_path))
     ]
-    rendered = render_publication_html(
-        publication_path,
-        paths.publication_html(run_id),
+    reader_profile = getattr(publication, "reader_profile", {})
+    source_only = (
+        isinstance(reader_profile, Mapping)
+        and reader_profile.get("build_state") == "provider_source_only"
     )
-    validate_standalone_html(
-        publication,
-        paths.publication_html(run_id),
-        expected_selected_revision_digests=state.selected_revision_digests,
-    )
+    if source_only:
+        rendered = render_source_only_html(
+            publication, paths.publication_html(run_id)
+        )
+        validate_source_only_html(publication, paths.publication_html(run_id))
+        warnings.append(
+            CommandWarning(
+                "provider_degraded_source_only",
+                "model delivery was unavailable; delivered a static source-only Reader",
+            )
+        )
+    else:
+        try:
+            rendered = render_publication_html(
+                publication_path,
+                paths.publication_html(run_id),
+            )
+            validate_standalone_html(
+                publication,
+                paths.publication_html(run_id),
+                expected_selected_revision_digests=state.selected_revision_digests,
+            )
+        except InteractiveReaderAdmissionError:
+            rendered = render_source_only_html(
+                publication, paths.publication_html(run_id)
+            )
+            validate_source_only_html(publication, paths.publication_html(run_id))
+            source_only = True
+            warnings.append(
+                CommandWarning(
+                    "web_render_degraded_source_only",
+                    "interactive Reader admission failed; delivered a static source-only Reader",
+                )
+            )
     promoted = paths._promote_publication_html_locked(run_id)
     if promoted:
         artifacts.append(
@@ -680,6 +799,12 @@ def _render_locked(
                 state, committed_publication_review_ids(paths, run_id)
             ),
             "workspace_html_consistent": promoted,
+            "delivery_grade": _delivery_grade(
+                publication, source_only=source_only
+            ),
+            "delivery_mode": _delivery_mode(
+                publication, source_only=source_only
+            ),
             "delivery": (
                 {"html": str(paths.delivery_html)}
                 if promoted
@@ -807,11 +932,16 @@ def _validate_locked(
         raise HTMLRenderError(
             "the selected publication has no standalone HTML release"
         )
-    validate_standalone_html(
-        publication,
-        paths.delivery_html,
-        expected_selected_revision_digests=state.selected_revision_digests,
-    )
+    html_text = paths.delivery_html.read_text(encoding="utf-8")
+    source_only = 'data-alc-source-only="true"' in html_text
+    if source_only:
+        validate_source_only_html(publication, paths.delivery_html)
+    else:
+        validate_standalone_html(
+            publication,
+            paths.delivery_html,
+            expected_selected_revision_digests=state.selected_revision_digests,
+        )
     browser_data: dict[str, Any] = {}
     if browser:
         checked = validate_reader_in_browser(
@@ -833,6 +963,12 @@ def _validate_locked(
                 state, committed_publication_review_ids(paths, run_id)
             ),
             "workspace_html_consistent": True,
+            "delivery_grade": _delivery_grade(
+                publication, source_only=source_only
+            ),
+            "delivery_mode": _delivery_mode(
+                publication, source_only=source_only
+            ),
             "valid": True,
             **browser_data,
         },
@@ -960,6 +1096,53 @@ def _edition_data(state: Any, review_ids: tuple[str, ...]) -> dict[str, Any]:
         "review_count": len(review_ids),
         "revision_count": len(state.revisions),
     }
+
+
+def _delivery_grade(publication: Any, *, source_only: bool) -> str:
+    """Read an optional v1 ledger while retaining legacy publication support."""
+
+    if source_only:
+        return "source_only"
+    profile = getattr(publication, "reader_profile", {})
+    if not isinstance(profile, Mapping):
+        return "complete"
+    ledger = profile.get("delivery_ledger")
+    if not isinstance(ledger, Mapping):
+        return "complete"
+    grade = ledger.get("delivery_grade")
+    return grade if grade in {"complete", "degraded", "source_only"} else "complete"
+
+
+def _delivery_mode(publication: Any, *, source_only: bool) -> str:
+    if source_only:
+        return "source_only"
+    profile = getattr(publication, "reader_profile", {})
+    if not isinstance(profile, Mapping):
+        return "source_language"
+    value = profile.get("delivery_mode")
+    if value in {
+        "bilingual",
+        "partial_bilingual",
+        "source_only",
+        "source_language",
+    }:
+        return str(value)
+    ledger = profile.get("delivery_ledger")
+    if isinstance(ledger, Mapping):
+        issues = ledger.get("issues")
+        if isinstance(issues, Sequence) and not isinstance(
+            issues, (str, bytes)
+        ) and any(
+            isinstance(item, Mapping)
+            and item.get("category") == "translation_source_text"
+            for item in issues
+        ):
+            return "partial_bilingual"
+    return (
+        "bilingual"
+        if profile.get("translation_mode") == "enabled"
+        else "source_language"
+    )
 
 
 def _source_warnings(

@@ -2,7 +2,12 @@
 
 __version__ = "2.0.5"
 
-from .contracts import (  # noqa: E402
+from .atoms import (
+    PROTECTED_ATOM_PLAN_SCHEMA,
+    PROTECTED_ATOM_RESULT_SCHEMA,
+)
+from .contracts import (
+    GLOSSARY_FALLBACK_SUMMARY_SCHEMA,
     GLOSSARY_RESULT_SCHEMA,
     LANGUAGE_RESULT_SCHEMA,
     TRANSLATION_RESULT_SCHEMA,
@@ -13,7 +18,7 @@ from .contracts import (  # noqa: E402
     LanguageRequest,
     TranslationSource,
 )
-from .handlers import (  # noqa: E402
+from .handlers import (
     BLOCKS_HANDLER,
     GLOSSARY_HANDLER,
     LANGUAGE_HANDLER,
@@ -21,44 +26,51 @@ from .handlers import (  # noqa: E402
     DetectLanguageHandler,
     TranslateBlocksHandler,
 )
-from .project import (  # noqa: E402
+from .project import (
     PROJECT_SCHEMA,
     TranslationProject,
     TranslationProjectError,
 )
-from .service import TranslationService, TranslationServiceError  # noqa: E402
-from .source import (  # noqa: E402
+from .service import TranslationService, TranslationServiceError
+from .source import (
     TranslationSourceError,
+    canonicalize_translation_markdown,
     deterministic_language_samples,
     resolve_translation_source,
     same_primary_language,
     source_blocks,
+    validate_translation_markdown,
 )
-from .workflow import (  # noqa: E402
+from .workflow import (
     REVIEW_SUPERVISION_SCHEMA,
+    GlossaryFallbackSummary,
     GlossaryResult,
     KeywordProvider,
     LanguageResult,
-    TranslationWorkflowError,
-    TranslationWorkflowService,
     TranslationResult,
     TranslationRevisionArtifact,
+    TranslationWorkflowError,
+    TranslationWorkflowService,
 )
 
 __all__ = [
     "BLOCKS_HANDLER",
+    "GLOSSARY_FALLBACK_SUMMARY_SCHEMA",
     "GLOSSARY_HANDLER",
     "GLOSSARY_RESULT_SCHEMA",
     "LANGUAGE_HANDLER",
     "LANGUAGE_RESULT_SCHEMA",
-    "TRANSLATION_RESULT_SCHEMA",
     "PROJECT_SCHEMA",
+    "PROTECTED_ATOM_PLAN_SCHEMA",
+    "PROTECTED_ATOM_RESULT_SCHEMA",
     "REVIEW_SUPERVISION_SCHEMA",
+    "TRANSLATION_RESULT_SCHEMA",
     "BlocksRequest",
     "BuildGlossaryHandler",
     "DetectLanguageHandler",
     "ExecutionOptions",
     "GenerationRecipe",
+    "GlossaryFallbackSummary",
     "GlossaryRequest",
     "GlossaryResult",
     "KeywordProvider",
@@ -67,16 +79,18 @@ __all__ = [
     "TranslateBlocksHandler",
     "TranslationProject",
     "TranslationProjectError",
+    "TranslationResult",
+    "TranslationRevisionArtifact",
     "TranslationService",
     "TranslationServiceError",
     "TranslationSource",
     "TranslationSourceError",
-    "TranslationResult",
-    "TranslationRevisionArtifact",
     "TranslationWorkflowError",
     "TranslationWorkflowService",
+    "canonicalize_translation_markdown",
     "deterministic_language_samples",
     "resolve_translation_source",
     "same_primary_language",
     "source_blocks",
+    "validate_translation_markdown",
 ]

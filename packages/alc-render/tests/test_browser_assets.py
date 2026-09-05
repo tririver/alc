@@ -36,6 +36,29 @@ def test_reader_javascript_passes_node_syntax_check() -> None:
     )
 
 
+def test_reader_uses_dismissible_floating_delivery_panel_without_inline_badges() -> None:
+    javascript = _text("reader.js")
+    assert "function renderDeliverySummary()" in javascript
+    assert 'element("aside", "alc-delivery-summary")' in javascript
+    assert '"alc-delivery-summary-close", "", labels().close' in javascript
+    assert "panel.hidden = true" in javascript
+    assert 'body.dataset.alcExportSnapshot = "true"' in javascript
+    assert 'document.body.dataset.alcExportSnapshot === "true"' in javascript
+    assert "function markDeliveryState(row, blockId)" in javascript
+    assert "renderDeliveryBadge" not in javascript
+    assert "Source preserved — not completed translation" not in javascript
+    assert "Pre-review translation retained" not in javascript
+    assert "issue.evidence" not in javascript
+    stylesheet = _text("reader.css")
+    assert ".alc-delivery-summary" in stylesheet
+    assert "position: fixed" in stylesheet
+    assert ".alc-delivery-summary-close" in stylesheet
+    assert ".alc-source-text-fallback" in stylesheet
+    assert ".alc-delivery-badge" not in stylesheet
+    assert ".alc-delivery-summary { display: none !important; }" in stylesheet
+    assert "issue.source_preserved === true" in javascript
+
+
 def test_reader_glossary_uses_latest_entry_and_only_exact_target_ranges() -> None:
     node = shutil.which("node")
     if node is None:
@@ -526,6 +549,66 @@ var base = {
     assert completed.returncode == 0, completed.stderr
 
 
+def test_reader_recovers_unsafe_glossary_definition_without_crashing() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable")
+    javascript = _text("reader.js")
+    startup = javascript.rfind("\n  if (document.readyState")
+    assert startup > 0
+    instrumented = (
+        _text("markdown-it/markdown-it.min.js")
+        + "\nglobalThis.window = globalThis;\n"
+        + "globalThis.markdownit = module.exports;\n"
+        + "globalThis.crypto = require('node:crypto').webcrypto;\n"
+        + javascript[:startup]
+        + r'''
+  globalThis.__alcGlossaryControlTest = {
+    hasForbiddenControl: glossaryDefinitionHasForbiddenControl,
+    recoverDefinition: recoverLegacyGlossaryDefinition
+  };
+}());
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+var helpers = globalThis.__alcGlossaryControlTest;
+assert(
+  helpers.hasForbiddenControl("broken\u0000definition"),
+  "NUL glossary content was not recognized"
+);
+assert(
+  helpers.hasForbiddenControl("broken\u001ddefinition"),
+  "C0 glossary content was not recognized"
+);
+assert(
+  !helpers.hasForbiddenControl("line one\nline two\tvalue"),
+  "legal Markdown whitespace was rejected"
+);
+assert(
+  helpers.recoverDefinition(
+    "$\u001b[1;3mβ>0\u001b[0m$ \u009b1;31mred\u009b0m " +
+      "\u001dσ \u0003c7 \u0003b4_0"
+  ) === "$β>0$ red σ χ δ_0",
+  "bounded terminal and Unicode control corruption was not recovered"
+);
+assert(
+  helpers.recoverDefinition("$\u0000$ \u0003c70") === "$?$ ?c70",
+  "unsafe glossary content was not recovered within its own row"
+);
+assert(
+  helpers.recoverDefinition("\u009bunsafe") === "?unsafe",
+  "non-SGR control content was mistaken for a terminal style sequence"
+);
+'''
+    )
+    completed = subprocess.run(
+        [node, "-"], input=instrumented, capture_output=True, text=True
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "alc-glossary-definition-recovered" in javascript
+    assert "labels().glossaryDefinitionRecovered" in javascript
+
+
 def test_reader_glossary_propagation_indexes_safe_mentions_and_rejects_stale_batches() -> None:
     node = shutil.which("node")
     if node is None:
@@ -981,6 +1064,29 @@ helpers.state.revisions = new Map([[fragment.fragment_id, [fragment]]]);
     "definition-only glossary edit generated Fragment work"
   );
 
+  var corruptPeer = Object.assign({}, peerEntry, {
+    entry_id: "term-corrupt-peer",
+    definition: "读者\u0000的旧释义"
+  });
+  helpers.state.payload.publication.glossary = [entry, corruptPeer];
+  helpers.state.glossaryBase = [entry, corruptPeer];
+  helpers.state.selectedGlossary = new Map([
+    [entry.entry_id, entry], [corruptPeer.entry_id, corruptPeer]
+  ]);
+  helpers.state.selectedGlossaryRevisions = new Map([
+    [entry.entry_id, null], [corruptPeer.entry_id, null]
+  ]);
+  var preparedWithCorruptPeer = await helpers.prepareGlossaryPropagation(
+    {base: entry, entryId: entry.entry_id}, nextEntry,
+    "2026-08-28T00:00:01.250Z"
+  );
+  assert(
+    preparedWithCorruptPeer.revisions.length === 1 &&
+      preparedWithCorruptPeer.glossaryRevisions.length === 0 &&
+      preparedWithCorruptPeer.skipped >= 1,
+    "a corrupt read-only peer definition blocked a healthy glossary save"
+  );
+
   var crossingFragment = Object.assign({}, fragment, {
     fragment_id: "translation-crossing",
     markdown_body: "甲乙丙丁",
@@ -1279,8 +1385,10 @@ def test_reader_markdown_supports_tables_and_glossary_math_under_node() -> None:
   globalThis.__alcMarkdownTest = {
     setupMarkdown: setupMarkdown,
     markdownPlainText: markdownPlainText,
+    glossaryTooltipModels: glossaryTooltipModels,
     glossarySpeechText: glossarySpeechText,
     buildGlossarySpeechQueue: buildGlossarySpeechQueue,
+    glossaryTranslatedTermMarkup: glossaryTranslatedTermMarkup,
     state: state
   };
 }());
@@ -1314,6 +1422,19 @@ assert(
     definition.includes('data-tex="H_0 = 70"'),
   "glossary definition Markdown or inline math did not render"
 );
+var translatedTerm = helpers.glossaryTranslatedTermMarkup(
+  String.raw`宽 H$\\alpha$ 成分`
+);
+assert(
+  translatedTerm && translatedTerm.includes('class="math math-inline"') &&
+    translatedTerm.includes('data-tex="\\\\alpha"'),
+  "legacy glossary translated-term math was not recovered inline: " +
+    translatedTerm
+);
+assert(
+  helpers.glossaryTranslatedTermMarkup("宽 Hα 成分") === null,
+  "plain glossary translated term was unnecessarily treated as Markdown"
+);
 var plainDefinition = helpers.markdownPlainText(
   "第一段包含 **强调** 和 $H_0$。\\n\\n第二段包含 `code`。"
 );
@@ -1321,6 +1442,18 @@ assert(
   plainDefinition === "第一段包含 强调 和 H_0。\\n第二段包含 code。",
   "glossary tooltip plain text retained Markdown delimiters: " +
     JSON.stringify(plainDefinition)
+);
+var tooltipModels = helpers.glossaryTooltipModels([{
+  term: "Hubble parameter",
+  translated_term: "哈勃参数",
+  definition: "定义包含 **强调** 和 $H_0 = 70$。"
+}]);
+assert(
+  tooltipModels.length === 1 &&
+    tooltipModels[0].source === "Hubble parameter" &&
+    tooltipModels[0].translated === "哈勃参数" &&
+    tooltipModels[0].definition === "定义包含 **强调** 和 $H_0 = 70$。",
+  "glossary tooltip discarded rich definition Markdown"
 );
 assert(
   helpers.glossarySpeechText({
@@ -2281,6 +2414,8 @@ define = undefined;
     katexCandidates: katexCandidates,
     katexSemanticMacros: katexSemanticMacros,
     katexTex: katexTex,
+    tableCaptionPrecedesContent: tableCaptionPrecedesContent,
+    plainFragmentTitle: plainFragmentTitle,
     syncVisibilityRoles: syncVisibilityRoles,
     validateIntegerJson: validateIntegerJson,
     validateRevisionMetadata: validateRevisionMetadata
@@ -2379,6 +2514,13 @@ if (
 ) {
   throw new Error("AASTeX arc-degree macro is not registered semantically");
 }
+if (
+  helpers.plainFragmentTitle(
+    String.raw`追踪 $ℛ³$ 与 \\(\\beta/H\\) 的来源`
+  ) !== String.raw`追踪 ℛ³ 与 \\beta/H 的来源`
+) {
+  throw new Error("legacy fragment title leaked inline-math delimiters");
+}
 if (helpers.katexTex(String.raw`A\\&B`) !== String.raw`A\\&B`) {
   throw new Error("escaped TeX ampersand was treated as an alignment tab");
 }
@@ -2466,6 +2608,54 @@ if (
   })
 ) {
   throw new Error("empty TeX array position option was not removed");
+}
+var latexmlInlineCandidates = helpers.katexCandidates(
+  String.raw`H\\sim 10^{14}\\penalty\\ {\\rm GeV}`
+);
+if (
+  !latexmlInlineCandidates.some(function (candidate) {
+    return candidate === String.raw`H\\sim 10^{14}\\ {\\rm GeV}`;
+  })
+) {
+  throw new Error("LaTeXML penalty hint was not removed");
+}
+var unicodeCandidates = helpers.katexCandidates(
+  String.raw`6716\\,\\unicode{xC5}`
+);
+if (
+  !unicodeCandidates.some(function (candidate) {
+    return candidate === String.raw`6716\\,\\text{Å}`;
+  })
+) {
+  throw new Error("LaTeXML Unicode code point was not repaired for KaTeX");
+}
+if (!helpers.tableCaptionPrecedesContent({
+  nextElementSibling: {tagName: "TABLE"}
+})) {
+  throw new Error("legacy Table caption-before placement was not inferred");
+}
+if (helpers.tableCaptionPrecedesContent({
+  nextElementSibling: {tagName: "FIGCAPTION"}
+})) {
+  throw new Error("non-Table caption sibling was treated as Table content");
+}
+var latexmlDisplayCandidates = helpers.katexCandidates(
+  String.raw`\\left\\{\\begin{array}[]{ll}{\\color[rgb]{0,0,0}(2-n)}&\\penalty\\ n\\neq 2\\\\ \\end{array}\\right.`
+);
+if (
+  !latexmlDisplayCandidates.some(function (candidate) {
+    return candidate.includes(String.raw`\\begin{array}{ll}`) &&
+      candidate.includes(String.raw`{(2-n)}`) &&
+      candidate.includes(String.raw`n\\neq 2`) &&
+      !candidate.includes(String.raw`\\begin{array}[]`) &&
+      !candidate.includes(String.raw`\\color[rgb]`) &&
+      !candidate.includes(String.raw`\\penalty`);
+  })
+) {
+  throw new Error(
+    "LaTeXML display projection was not normalized for KaTeX: " +
+    JSON.stringify(latexmlDisplayCandidates)
+  );
 }
 if (
   !helpers.katexCandidates("x+\frac{a}{b}").some(function (candidate) {
@@ -5930,7 +6120,7 @@ def test_reader_uses_low_distraction_controls_and_inline_editor() -> None:
     assert "alc-glossary-inline-definition" in javascript
     assert "focusGlossaryInlineEditor" in javascript
     assert "renderGlossaryDefinition" in javascript
-    assert "markdownPlainText(entry.definition" in javascript
+    assert "glossaryDefinitionPlainText(entry.definition" in javascript
     assert "renderGlossaryCardActions" in javascript
     assert "playGlossarySpeech" in javascript
     assert "alc-glossary-card-actions" in stylesheet

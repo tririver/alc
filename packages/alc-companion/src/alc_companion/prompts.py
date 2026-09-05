@@ -269,8 +269,10 @@ When `source_commands.availability` is `exact`, the source body is not embedded
 in the loop context: run the supplied commands for exact numbered parts,
 complete current sections, the complete current chapter, search, and
 source inspection. For a host request, copy the selected command's `shell`
-value exactly into `host_request.instruction`, without commentary or another
-command. Read the complete original chapter once before drafting. When
+value exactly into `host_request.instruction` and its caller-owned
+`host_request_id` exactly into `host_request.request_id`; never invent or reuse an ID
+within a task. Do not add commentary or another command. Read the complete
+original chapter once before drafting. When
 `source_commands.translation.availability` is `exact`, also run its
 `complete-current-chapter` command and read the complete frozen translation
 before drafting. For every local companion, confirm its placement and wording
@@ -398,7 +400,8 @@ When `source_commands.availability` is `exact`, run the supplied original-source
 `source_commands.translation.availability` is `exact`, also run its
 `complete-current-chapter` command before judging anything. For a host request,
 copy the selected command's `shell` value exactly into
-`host_request.instruction`, without commentary or another command. Then run both
+`host_request.instruction` and its caller-owned `host_request_id` exactly into
+`host_request.request_id`; never invent or reuse an ID within a task. Then run both
 matching exact `part-N` commands for every local companion and both matching
 `section-N-complete` commands for every section guide. When source
 availability is `fallback_only`, inspect the corresponding complete chapter

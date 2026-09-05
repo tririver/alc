@@ -57,10 +57,22 @@ def test_package_set_metadata_and_dependency_graph() -> None:
                 assert int(ac_range[2]) == int(ac_range[1]) + 1
 
 
-def test_companion_requires_html_source_export_floor() -> None:
-    assert "ac-document>=2.0.4,<3" in _project("alc-companion")[
-        "dependencies"
-    ]
+def test_packages_require_reliability_foundation_floors() -> None:
+    expected = {
+        "alc-companion": {
+            "ac-llm>=2.0.5,<3",
+            "ac-document>=2.0.5,<3",
+            "ac-proposer-reviewer>=2.0.5,<3",
+        },
+        "alc-ocr-proofread": {"ac-llm>=2.0.5,<3"},
+        "alc-render": {"ac-document>=2.0.5,<3"},
+        "alc-translate": {
+            "ac-llm>=2.0.5,<3",
+            "ac-document>=2.0.5,<3",
+        },
+    }
+    for package, dependencies in expected.items():
+        assert dependencies.issubset(_project(package)["dependencies"])
 
 
 def test_learning_packages_have_no_arc_code_dependency() -> None:
@@ -118,6 +130,18 @@ def test_companion_skill_declares_codex_host_execution_boundary() -> None:
     assert "Do not submit `--provider auto`" in workflow_prose
     assert "--provider <resolved-provider>" in workflow
     assert (
+        "当前伴读将使用默认模型 `gpt-5.6-luna + effort medium` 进行。"
+        "如需调整，可在请求中指定模型和 effort；本次将按上述参数继续执行。"
+        in workflow
+    )
+    assert (
+        "当前伴读将按用户自定义模型 `gpt-5.6-terra + effort high` 进行，"
+        "并继续自动执行。"
+        in workflow
+    )
+    assert "non-blocking parameter disclosure" in workflow_prose
+    assert "内部模型" not in workflow_prose
+    assert (
         "does not make `--host-authority unrestricted` truthful" in manual_prose
     )
     assert "it cannot grant its own escalation" in manual_prose
@@ -139,6 +163,9 @@ def test_runtime_source_lock_uses_full_shas() -> None:
 def test_generated_foundation_copies_match_manifest() -> None:
     manifest = json.loads((SCRIPTS / "generated-sources.json").read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "ac.generated_sources.v1"
+    lock = json.loads((SCRIPTS / "runtime-sources.json").read_text(encoding="utf-8"))
+    foundation = next(source for source in lock["sources"] if source["id"] == "foundation")
+    assert manifest["foundation_commit"] == foundation["commit"]
     for relative, metadata in manifest["files"].items():
         path = (SCRIPTS / relative).resolve()
         assert hashlib.sha256(path.read_bytes()).hexdigest() == metadata["sha256"]

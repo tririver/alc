@@ -7,14 +7,12 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ac_document import RichBlock, RichBlockKind, RichDocument
+from alc_translate import canonicalize_translation_markdown
 
 from .source_planning import SourceChapter, equation_label_provenance
 
-
 MODEL_SOURCE_INDEX_SCHEMA = "alc.companion.model_source_index.v2"
-MODEL_TRANSLATION_INDEX_SCHEMA = (
-    "alc.companion.model_translation_index.v1"
-)
+MODEL_TRANSLATION_INDEX_SCHEMA = "alc.companion.model_translation_index.v2"
 
 
 def model_source_view(
@@ -36,25 +34,25 @@ def model_source_view(
                 f"id={block.block_id} ordinal={block.ordinal} "
                 f"kind={block.kind.value} -->"
             )
-            provenance = equation_label_provenance(
-                document, block.block_id
-            )
+            provenance = equation_label_provenance(document, block.block_id)
             effective_label = (
-                provenance.get("effective_label")
-                if provenance is not None
-                else None
+                provenance.get("effective_label") if provenance is not None else None
             )
             parts.append(
                 _block_markdown(
                     block,
                     equation_label=(
-                        effective_label
-                        if isinstance(effective_label, str)
-                        else None
+                        effective_label if isinstance(effective_label, str) else None
                     ),
                 )
             )
     return "\n\n".join(parts).rstrip() + "\n"
+
+
+def model_source_block_view(block: RichBlock) -> str:
+    """Render one source block for a local translation-view fallback."""
+
+    return canonicalize_translation_markdown(_block_markdown(block)).rstrip() + "\n"
 
 
 def model_source_index(
@@ -78,9 +76,7 @@ def model_source_index(
             if block_id in chapter_by_block:
                 raise ValueError("model source block belongs to multiple chapters")
             chapter_by_block[block_id] = chapter.chapter_id
-    if tuple(chapter_by_block) != tuple(
-        item.block_id for item in document.blocks
-    ):
+    if tuple(chapter_by_block) != tuple(item.block_id for item in document.blocks):
         raise ValueError("model source chapters do not exactly cover the document")
 
     return {
@@ -98,9 +94,7 @@ def model_source_index(
         ),
         "cache_operations": (
             {
-                "table_of_contents": (
-                    "ac-document get-table-of-contents"
-                ),
+                "table_of_contents": ("ac-document get-table-of-contents"),
                 "section": "ac-document get-section",
                 "source_range": "ac-document read-cached-source-range",
                 "search": "ac-document search-full-text",
@@ -129,9 +123,7 @@ def model_translation_view(
             raise ValueError(
                 f"model translation is missing chapter: {chapter.chapter_id}"
             )
-        translated_ids = [
-            str(item.get("block_id")) for item in chapter_translations
-        ]
+        translated_ids = [str(item.get("block_id")) for item in chapter_translations]
         if translated_ids != list(chapter.block_ids):
             raise ValueError(
                 "model translation block order differs from source chapter"
@@ -145,14 +137,11 @@ def model_translation_view(
         chapter_access: list[dict[str, Any]] = []
         for part_number, item in enumerate(chapter_translations, 1):
             block_id = str(item["block_id"])
-            text = str(item["text"]).strip()
+            text = canonicalize_translation_markdown(str(item["text"]).strip())
             lines.extend(
                 (
                     "",
-                    (
-                        "<!-- ALC_TRANSLATED_BLOCK "
-                        f"id={block_id} part={part_number} -->"
-                    ),
+                    (f"<!-- ALC_TRANSLATED_BLOCK id={block_id} part={part_number} -->"),
                 )
             )
             line_start = len(lines) + 1
@@ -189,9 +178,7 @@ def model_translation_index(
                 f"model translation index is missing chapter: {chapter.chapter_id}"
             )
         values = [dict(item) for item in access]
-        if [item.get("block_id") for item in values] != list(
-            chapter.block_ids
-        ):
+        if [item.get("block_id") for item in values] != list(chapter.block_ids):
             raise ValueError(
                 "model translation index block order differs from source chapter"
             )
@@ -205,9 +192,7 @@ def model_translation_index(
         "schema_version": MODEL_TRANSLATION_INDEX_SCHEMA,
         "source_document_sha256": source_document_sha256,
         "target_language": target_language,
-        "translation_view_sha256": hashlib.sha256(
-            view.encode("utf-8")
-        ).hexdigest(),
+        "translation_view_sha256": hashlib.sha256(view.encode("utf-8")).hexdigest(),
         "translation_view_size": len(view.encode("utf-8")),
         "cached_document": dict(cached_document),
         "chapters": chapter_access,
@@ -255,12 +240,8 @@ def validate_model_translation_index(
             raise ValueError("model translation index parts are invalid")
         if any(not isinstance(part, Mapping) for part in parts):
             raise ValueError("model translation index part is invalid")
-        if [part.get("block_id") for part in parts] != list(
-            chapter.block_ids
-        ):
-            raise ValueError(
-                "model translation index block coverage differs"
-            )
+        if [part.get("block_id") for part in parts] != list(chapter.block_ids):
+            raise ValueError("model translation index block coverage differs")
         for part_number, part in enumerate(parts, 1):
             if (
                 part.get("part_number") != part_number
@@ -269,9 +250,7 @@ def validate_model_translation_index(
                 or int(part["line_start"]) < 1
                 or int(part["line_end"]) < int(part["line_start"])
             ):
-                raise ValueError(
-                    "model translation index part range is invalid"
-                )
+                raise ValueError("model translation index part range is invalid")
 
 
 def model_chapter_block_index(
@@ -359,10 +338,7 @@ def _block_markdown(
     if block.kind is RichBlockKind.LIST:
         ordered = bool(payload["ordered"])
         return "\n".join(
-            (
-                f"{index}. " if ordered else "- "
-            )
-            + str(item["text"]).strip()
+            (f"{index}. " if ordered else "- ") + str(item["text"]).strip()
             for index, item in enumerate(payload["items"], 1)
         )
     if block.kind is RichBlockKind.CODE:
@@ -373,9 +349,7 @@ def _block_markdown(
     if block.kind is RichBlockKind.EQUATION:
         text = f"$$\n{str(payload['tex']).strip()}\n$$"
         label = (
-            equation_label
-            if equation_label is not None
-            else str(payload["label"])
+            equation_label if equation_label is not None else str(payload["label"])
         ).strip()
         return text if not label else f"{text}\n\nEquation label: {label}"
     if block.kind is RichBlockKind.TABLE:
@@ -387,7 +361,9 @@ def _block_markdown(
             normalized_headers = headers or [""] * width
             table.extend(
                 (
-                    "| " + " | ".join(_table_cell(item) for item in normalized_headers) + " |",
+                    "| "
+                    + " | ".join(_table_cell(item) for item in normalized_headers)
+                    + " |",
                     "| " + " | ".join("---" for _ in range(width)) + " |",
                 )
             )
@@ -401,8 +377,7 @@ def _block_markdown(
         return "\n".join(table) or "[Empty table]"
     if block.kind is RichBlockKind.FIGURE:
         description = (
-            str(payload["caption"]).strip()
-            or str(payload["alt_text"]).strip()
+            str(payload["caption"]).strip() or str(payload["alt_text"]).strip()
         )
         return (
             f"[Figure: {description}]"
@@ -432,6 +407,7 @@ __all__ = [
     "MODEL_TRANSLATION_INDEX_SCHEMA",
     "model_block_access_index",
     "model_chapter_block_index",
+    "model_source_block_view",
     "model_source_index",
     "model_source_view",
     "model_translation_index",

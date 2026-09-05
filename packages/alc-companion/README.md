@@ -40,6 +40,9 @@ alc-companion build note.md \
   --project-dir local/example \
   --target-language zh-CN \
   --user-intent "Explain the main argument and its assumptions." \
+  --provider codex \
+  --model gpt-5.6-luna \
+  --effort medium \
   --host-authority unknown
 
 alc-companion status --project-dir local/example
@@ -52,6 +55,10 @@ sources, `--pdf note.pdf` supplies an optional validator; PDF is never the
 reader source or output. Use `unrestricted` only when the host explicitly
 grants it. Otherwise use `unknown`, or `restricted` when known, and preserve the
 same authority on resume.
+
+For the Codex provider, the frozen default is `gpt-5.6-luna` with `medium`
+reasoning effort. `--model` and `--effort` can be overridden independently;
+the selected pair is part of run identity and is reused on resume.
 
 ## Direct HTML acquisition
 
@@ -133,10 +140,67 @@ its atomic group state is published; an existing malformed state remains a
 strict error.
 Recoverable block-translation and review failures do not pause the build:
 invalid translated units fall back to source text, and invalid reviews retain
-the validated pre-review translation. Status reports these at
+the validated pre-review translation. Invalid glossary entries are retried once
+and then omitted individually rather than stopping the build. Status reports
+source-text and skipped-review counts plus glossary fallback reasons at
 `data.progress.translation_fallbacks`; final fragment provenance identifies the
-affected blocks. Source corruption, permission decisions, explicit stops, and
-an invalid final publication still stop safely.
+affected translated blocks. Source corruption, permission decisions, explicit
+stops, and an invalid final publication still stop safely.
+Before guide generation, each persisted translation is independently checked
+for renderable Markdown. A legacy or interrupted run containing one malformed
+translation feeds that block's source text to guide generation and omits only
+the unsafe translation overlay from publication, with a `translation_omitted`
+delivery-ledger issue. Translation model-view cache v2 prevents an older unsafe
+chapter view from being reused after this recovery.
+When provider transport, timeout, rate-limit, quota, unavailability, or an
+open provider circuit prevents one translation window, only that window is
+source-preserved. A successful later window resets the streak; two consecutive
+failed windows source-preserve the remaining model-dependent windows while
+retaining every earlier accepted translation. Status reports the sanitized
+provider/model, failure category/detail, first failed window, failed-window
+count, and remaining skipped-window count. Guide exhaustion omits only the
+affected guide and still publishes source plus translation. A static
+source-only Reader is reserved for provider failure before a usable optional
+overlay exists. Companion treats five
+minutes without provider pipe activity as a typed timeout; this is an
+inactivity deadline, not a total build deadline.
+A provider that keeps emitting activity may run longer, while a disappeared or
+interrupted provider releases its execution leases and enters the same safe
+delivery path. Provider authentication, host-authority, request/schema,
+source-identity, durable-state, and publication-integrity failures remain hard
+stopping boundaries.
+Completed publications include a versioned `delivery_ledger` and matching
+`alc-companion-delivery-ledger.json` resource. The ledger reconciles source
+units and every stage's expected, produced, and accounted counts; unaccounted
+content or an undeclared fallback fails validation. A duplicate or conflicting
+host request ID from `guide-reviewer` is isolated only after a persisted
+proposer artifact passes normal guide validation. ACF still refuses the changed
+instruction. Companion publishes the validated proposal with an explicit
+`review_skipped` issue, or records the chapter as source-and-translation-only
+when no admissible proposal remains. Exhausted
+early provider availability failures use the explicit source-only delivery above;
+authentication, permission, source-identity, lineage, schema, and durable-
+corruption errors still stop.
+`status` reads the selected snapshot and already materialized publication
+without acquiring the delivery write lease. To attach a terminal owner to a
+long-running build, use:
+
+```bash
+alc-companion wait --project-dir local/example --poll-seconds 15
+```
+
+The command emits progress heartbeats on stderr and returns one JSON status
+when the durable run reaches a terminal state or an actionable pause. For a `RUNNING`
+snapshot it resumes the same run to recover an orphaned execution; an active
+owner's lease remains authoritative, so `wait` continues observing without
+starting or taking over another run. Delivery results
+expose `delivery_mode` (`bilingual`, `partial_bilingual`, `source_only`, or
+`source_language`) alongside the canonical ledger `delivery_grade`. When a
+validated interactive-admission fallback produced static source-only HTML,
+subsequent status reads report that actual source-only delivery rather than the
+pre-fallback publication grade.
+An actionable pause is not a final delivery; inspect its resume descriptor and
+continue the same lineage.
 `build` refuses to replace a different selected source or recipe unless
 `--new-lineage` is explicit; that flag is not a retry mechanism.
 After an explicit render, use `data.delivery.html`; an empty delivery with
@@ -211,6 +275,9 @@ Model-authored display math is canonicalized before publication: opening and
 closing `$$` delimiters occupy separate lines around the TeX body. Ambiguous or
 unbalanced display-math delimiters are rejected instead of being published as
 literal Reader text.
+Structured guide titles remain plain text. Accidental `$...$` or `\\(...\\)`
+inline-math delimiters are removed while their title content is retained, so a
+title-formatting defect cannot stop or visibly leak markup into the Reader.
 
 ## Reader assumptions
 

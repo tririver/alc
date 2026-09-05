@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,13 +34,13 @@ from .build import (
     validate_build_diagnostics,
 )
 from .generation_validation import CompanionContentError
+from .project import CompanionProjectPaths
 from .publication import (
     CompanionPublicationError,
     PublishedCompanion,
     load_published_companion,
     materialize_published_companion,
 )
-from .project import CompanionProjectPaths
 from .publication_revisions import materialize_operator_revisions
 from .request_contracts import (
     CompanionBuildRequest,
@@ -241,6 +241,7 @@ class CompanionService:
         provider: str | None = recipe.model.provider
         model: str | None = recipe.model.model
         tier: str | None = recipe.model.tier
+        effort: str | None = recipe.model.reasoning_effort
         if plan is not None:
             if plan.get("schema_version") != "alc.companion.progress_plan.v1":
                 raise CompanionServiceError(
@@ -262,6 +263,8 @@ class CompanionService:
             provider = _optional_string(plan.get("provider"))
             model = _optional_string(plan.get("model"))
             tier = _optional_string(plan.get("tier"))
+            if plan.get("effort") is not None:
+                effort = _optional_string(plan.get("effort"))
 
         glossary_ready = _find_artifact_in_lineage(
             artifacts,
@@ -304,9 +307,36 @@ class CompanionService:
             / "partial-reader"
             / "companion.html"
         )
-        translation_fallbacks = _translation_fallback_summary(
+        event_fallbacks = _translation_fallback_summary(
             self.repository.run_directory(run_id)
         )
+        translation_fallbacks = event_fallbacks
+        if view.snapshot.status is RunStatus.SUCCEEDED:
+            try:
+                profile = self.publication(run_id).reader_profile
+            except (CompanionServiceError, ValueError):
+                pass
+            else:
+                ledger = (
+                    profile.get("delivery_ledger")
+                    if isinstance(profile, Mapping)
+                    else None
+                )
+                if isinstance(ledger, Mapping):
+                    final_fallbacks = _delivery_ledger_fallback_summary(ledger)
+                    final_fallbacks["reason_codes"] = list(
+                        dict.fromkeys(
+                            [
+                                *final_fallbacks["reason_codes"],
+                                *event_fallbacks["reason_codes"],
+                            ]
+                        )
+                    )
+                    if "provider_failure" in event_fallbacks:
+                        final_fallbacks["provider_failure"] = dict(
+                            event_fallbacks["provider_failure"]
+                        )
+                    translation_fallbacks = final_fallbacks
         total = (
             4
             + len(chapter_ids) * (2 + int(translation_required))
@@ -325,7 +355,9 @@ class CompanionService:
             if plan is not None
             else 0
         )
-        if plan is None:
+        if view.snapshot.status is RunStatus.SUCCEEDED:
+            phase = "completed"
+        elif plan is None:
             source_ready = _find_artifact_in_lineage(
                 artifacts,
                 "diagnostics/build",
@@ -369,6 +401,7 @@ class CompanionService:
                 "provider": provider,
                 "model": model,
                 "tier": tier,
+                "effort": effort,
             },
             "last_progress_at": _last_progress_at(
                 self.repository.run_directory(run_id),
@@ -571,6 +604,7 @@ def _translation_fallback_summary(
     source_text_units = 0
     review_skipped_units = 0
     reason_codes: list[str] = []
+    provider_failures: list[Mapping[str, Any]] = []
     path = run_directory / "events.jsonl"
     try:
         with path.open(encoding="utf-8") as handle:
@@ -579,12 +613,15 @@ def _translation_fallback_summary(
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(event, Mapping) or event.get("event") != (
-                    "translation_fallback"
-                ):
+                if not isinstance(event, Mapping):
                     continue
                 data = event.get("data")
                 if not isinstance(data, Mapping):
+                    continue
+                if event.get("event") == "translation_provider_fallback":
+                    provider_failures.append(data)
+                    continue
+                if event.get("event") != "translation_fallback":
                     continue
                 source_count = data.get("source_text_block_count")
                 review_count = data.get("review_skipped_block_count")
@@ -605,6 +642,99 @@ def _translation_fallback_summary(
                     )
     except (OSError, UnicodeError):
         pass
+    summary: dict[str, Any] = {
+        "source_text_units": source_text_units,
+        "review_skipped_units": review_skipped_units,
+        "reason_codes": list(dict.fromkeys(reason_codes)),
+    }
+    provider_summary = _provider_failure_summary(provider_failures)
+    if provider_summary is not None:
+        summary["provider_failure"] = provider_summary
+    return summary
+
+
+def _provider_failure_summary(
+    failures: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    valid = [
+        item
+        for item in failures
+        if type(item.get("window_ordinal")) is int
+        and int(item["window_ordinal"]) >= 0
+    ]
+    if not valid:
+        return None
+
+    def strings(key: str) -> list[str]:
+        return list(
+            dict.fromkeys(
+                str(item[key])
+                for item in valid
+                if isinstance(item.get(key), str) and str(item[key]).strip()
+            )
+        )
+
+    windows = {int(item["window_ordinal"]) for item in valid}
+    summary = {
+        "provider": strings("provider")[0] if strings("provider") else "unknown",
+        "model": strings("model")[0] if strings("model") else None,
+        "tier": strings("tier")[0] if strings("tier") else None,
+        "failure_categories": strings("failure_category"),
+        "detail_codes": strings("detail_code"),
+        "first_failed_window": min(windows),
+        "failed_window_count": len(windows),
+        "remaining_windows_skipped": max(
+            (
+                int(item["remaining_windows_skipped"])
+                for item in valid
+                if type(item.get("remaining_windows_skipped")) is int
+            ),
+            default=0,
+        ),
+        "global_fallback_triggered": any(
+            item.get("global_fallback_triggered") is True for item in valid
+        ),
+    }
+    efforts = strings("effort")
+    if efforts:
+        summary["effort"] = efforts[0]
+    return summary
+
+
+def _delivery_ledger_fallback_summary(
+    ledger: Mapping[str, Any],
+) -> dict[str, Any]:
+    source_text_units = 0
+    review_skipped_units = 0
+    reason_codes: list[str] = []
+    issues = ledger.get("issues")
+    if not isinstance(issues, Sequence) or isinstance(issues, (str, bytes)):
+        return {
+            "source_text_units": 0,
+            "review_skipped_units": 0,
+            "reason_codes": [],
+        }
+    for issue in issues:
+        if not isinstance(issue, Mapping):
+            continue
+        count = issue.get("affected_count")
+        affected = count if type(count) is int and count > 0 else 0
+        category = issue.get("category")
+        if category == "translation_source_text":
+            source_text_units += affected
+        elif category == "translation_review_skipped":
+            review_skipped_units += affected
+        if (
+            isinstance(category, str)
+            and category != "translation_provider_failure"
+            and (
+                category.startswith("translation_")
+                or category == "provider_delivery_unavailable"
+            )
+        ):
+            evidence = issue.get("evidence")
+            if isinstance(evidence, str) and evidence:
+                reason_codes.append(evidence)
     return {
         "source_text_units": source_text_units,
         "review_skipped_units": review_skipped_units,

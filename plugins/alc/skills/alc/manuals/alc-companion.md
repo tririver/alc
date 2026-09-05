@@ -42,6 +42,7 @@ independent; this sequencing belongs to the ALC Skill.
 ```bash
 alc-companion build <source.md> --pdf <validator.pdf> \
   --project-dir <project-dir> --target-language <language-tag> \
+  --provider codex --model <model> --effort <effort> \
   --host-authority <host-authority>
 ```
 
@@ -123,10 +124,17 @@ The user's Companion request is the authorization to process the supplied
 source with the workflow's frozen provider. It is not necessary to obtain a
 second destination confirmation for that same provider.
 
+For the Codex provider, Companion defaults to `gpt-5.6-luna` with `medium`
+reasoning effort. Override them independently with `--model` and `--effort`;
+supported effort values are `low`, `medium`, `high`, and `xhigh`. Both values
+are part of durable run identity and remain unchanged on resume. The Skill
+announces the resolved pair immediately before a new build and continues
+without waiting for confirmation.
+
 For a new `build`, never send unresolved `--provider auto` to host approval.
 Run the public `ac-llm doctor --provider auto` preflight through `alc-runtime`
 in the ordinary sandbox, require `data.available: true`, and pass its exact
-`data.provider` to the build. For `resume`, use the frozen provider/model
+`data.provider` to the build. For `resume`, use the frozen provider/model/effort
 reported by `status` in the host justification without changing the run.
 
 `--document-cache-root <path>` overrides the document cache for build or resume.
@@ -168,9 +176,21 @@ root reader appears as an artifact with role `web`; status does not expose a
 `data.delivery` field. Preserve status warnings about invalid workspaces or
 stale HTML.
 `data.progress` reports the current phase, completed and total units, completed
-and total chapters, the frozen provider/model, last progress time, partial
+and total chapters, the frozen provider/model/effort, last progress time, partial
 Reader availability, translation fallback counts/reasons, and one normalized
 `next_action`.
+
+`status` is lock-free and read-only. To remain attached until the selected run
+leaves `PENDING` or `RUNNING`, use
+`alc-companion wait --project-dir <project-dir>`; it emits periodic stderr
+heartbeats and returns a terminal status or an actionable pause.
+Inside Codex Desktop, retain and poll the command tool's exact running handle.
+If that handle is lost, start one `alc-companion wait` attachment and retain its
+handle until it returns a terminal status or actionable pause. `wait` resumes
+the same durable run when its `RUNNING` execution is orphaned; while an active
+owner still holds the lease it remains observation-only. A partial Reader or a
+`running` status is not a valid final delivery. An actionable pause must be
+handled through its resume descriptor on the same lineage.
 
 ## Resume, Render, and Validate
 
@@ -199,11 +219,47 @@ affected source text as identity-preserving Markdown and continue after the
 bounded retry, including failures detected after bounded units are reassembled
 into their original block. Resuming through a previously persisted invalid
 draft or accepted model artifact applies the same block-local salvage instead
-of repeating the failure. Review failures keep the validated pre-review
-translation. These cases remain visible in
-`data.progress.translation_fallbacks` and fragment provenance; they do not
-require hand-written resume input. Source corruption, permission decisions,
-explicit stops, and invalid final publication remain safe stopping boundaries.
+of repeating the failure. Glossary control-character failures drop only the
+affected entries after the same bounded retry. Review failures keep the
+validated pre-review translation. These cases remain visible in
+`data.progress.translation_fallbacks`; translated-block fallbacks also retain
+fragment provenance. They do not require hand-written resume input. Source
+corruption, permission decisions, explicit stops, and invalid final publication
+remain safe stopping boundaries.
+Persisted translation revisions are revalidated individually before Companion
+constructs a chapter model view. A malformed revision is replaced by source text
+for guide input and its unsafe overlay is omitted from the final Reader with an
+explicit `translation_omitted` ledger issue; valid neighboring revisions remain
+available. The v2 translation-view cache keeps this repaired view separate from
+older poisoned cache artifacts.
+Provider transport, timeout, rate-limit, quota, unavailability, and open-circuit
+outcomes during translation source-preserve the affected window without
+discarding accepted translations. A later successful window resets the streak;
+two consecutive failed windows preserve every remaining model-dependent
+window. `data.progress.translation_fallbacks.provider_failure` reports the
+sanitized provider/model, categories/detail codes, first failed window, failed
+window count, remaining skipped windows, and whether global fallback triggered.
+Guide provider exhaustion omits only the affected guide. A completed static
+source-only Reader is reserved for an
+early provider failure before a usable overlay exists. Provider execution has a five-minute pipe-inactivity
+deadline rather than an unbounded wait. Ongoing provider output may continue
+for longer; a disappeared or interrupted provider becomes a typed timeout and
+releases its execution leases before the safe delivery policy runs.
+Authentication, host-authority, request/schema,
+source-identity, lineage, durable-state, and publication-integrity failures do
+not use this fallback.
+Every completed Reader carries `alc.companion.delivery_ledger.v1`, including
+stage counts and every scoped fallback. A `guide-reviewer` duplicate or
+conflicting host request ID is a local infrastructure failure only when its
+persisted proposer artifact passes normal guide validation; ACF refuses the
+changed request while the Reader labels the skipped review.
+Do not treat provider authentication, authority, request/schema,
+source-identity, lineage, durable-state, or publication-integrity errors as a
+fallback opportunity.
+CLI results also expose `delivery_mode`; `delivery_grade` always comes from the
+same validated ledger used by the Reader. A validated static source-only HTML
+fallback overrides the pre-fallback publication grade in subsequent status
+results.
 
 `build` refuses to replace a different selected source/recipe by default. Use
 `--new-lineage` only after an explicit decision to start a genuinely different
@@ -308,6 +364,8 @@ owned by `alc-translate`: language detection and the glossary precede full
 translation, and translation completes before reviewed guide generation. Each
 proposer and reviewer compares a complete chapter with its frozen translation.
 The glossary size is approximate; deduplicated underfill is valid.
+Structured guide titles are plain text; accidental `$...$` and `\\(...\\)`
+delimiters are removed without discarding the enclosed title content.
 Every chapter enters proposer-reviewer evaluation,
 including an empty proposal; a strong proposal may be accepted immediately,
 and at most two full revisions are requested. Add
